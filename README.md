@@ -63,3 +63,13 @@ python mod_manager.py disable my_mod
 ```
 
 Imported mods live in `user_mods/<folder>`. Disabling a mod toggles the `enabled` flag in its manifest so that the sorter loads without executing the plugin, keeping your main code safe from experimental additions.
+
+### Included example mod
+
+The repository ships with an enabled sample plugin in `user_mods/example_theme_mod`. It demonstrates how to:
+
+* Register a custom "Ocean Breeze" theme that appears in the settings overlay previews.
+* Extend the scan by adding `.bak` and `.tmp` files to the ignored extension list.
+* Annotate `.package` files that contain "preview" in their filename so they are easy to review in the results grid.
+
+Launch the sorter normally (`python Sims4ModSorter.py`) and you will see log entries confirming that the example mod loaded. You can disable or remove it later with `python mod_manager.py disable example_theme_mod` once you are ready to build your own plugins.
