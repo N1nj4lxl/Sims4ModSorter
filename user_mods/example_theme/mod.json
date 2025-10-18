@@ -1,0 +1,6 @@
+{
+  "name": "Sunrise Theme Demo",
+  "entry": "mod.py",
+  "enabled": true,
+  "callable": "register"
+}
