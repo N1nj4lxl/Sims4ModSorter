@@ -178,6 +178,8 @@ CATEGORY_ORDER = [
 
 CATEGORY_INDEX = {name: idx for idx, name in enumerate(CATEGORY_ORDER)}
 
+CATEGORY_INDEX = {name: idx for idx, name in enumerate(CATEGORY_ORDER)}
+
 DEFAULT_FOLDER_MAP = {
     "Adult Script": "Adult - Scripts",
     "Adult Gameplay": "Adult - Gameplay",
@@ -391,6 +393,150 @@ def flush_plugin_messages(app, phase: str) -> None:
             continue
         prefix = prefix_map.get(level, "Mod")
         app.log(f"{prefix}: {message}")
+
+# ---------------------------
+# Modding support
+# ---------------------------
+
+USER_MODS_DIR = Path(__file__).with_name("user_mods")
+
+
+class ModAPI:
+    """Lightweight API exposed to external mods."""
+
+    def __init__(self, manager: "PluginManager"):
+        self._manager = manager
+
+    def register_pre_scan_hook(self, func):
+        if callable(func):
+            self._manager.pre_scan_hooks.append(func)
+
+    def register_post_scan_hook(self, func):
+        if callable(func):
+            self._manager.post_scan_hooks.append(func)
+
+    def register_theme(self, name: str, palette: Dict[str, str]):
+        required = {"bg", "fg", "alt", "accent", "sel"}
+        if not name or not isinstance(palette, dict) or not required.issubset(palette.keys()):
+            self._manager.log_boot(f"Theme registration skipped for '{name or '?'}' (invalid palette)", level="warn")
+            return
+        THEMES[name] = {key: palette[key] for key in required}
+        self._manager.log_boot(f"Theme registered: {name}", level="info")
+
+    def log(self, message: str, level: str = "info"):
+        self._manager.log(message, level=level)
+
+
+class PluginManager:
+    def __init__(self, mods_dir: Path):
+        self.mods_dir = mods_dir
+        self.pre_scan_hooks = []
+        self.post_scan_hooks = []
+        self.boot_messages: List[Tuple[str, str]] = []
+        self.runtime_messages: List[Tuple[str, str]] = []
+        self.api = ModAPI(self)
+
+    def log_boot(self, message: str, level: str = "info"):
+        self.boot_messages.append((level, message))
+
+    def log(self, message: str, level: str = "info"):
+        self.runtime_messages.append((level, message))
+
+    def drain_boot_messages(self):
+        msgs = list(self.boot_messages)
+        self.boot_messages.clear()
+        return msgs
+
+    def drain_runtime_messages(self):
+        msgs = list(self.runtime_messages)
+        self.runtime_messages.clear()
+        return msgs
+
+    def load(self):
+        self.mods_dir.mkdir(parents=True, exist_ok=True)
+        for entry in sorted(self.mods_dir.iterdir()):
+            if entry.is_file() and entry.suffix == ".py":
+                manifest = {
+                    "name": entry.stem,
+                    "entry": entry.name,
+                    "enabled": True,
+                    "callable": "register",
+                }
+                self._load_mod(manifest, entry)
+            elif entry.is_dir():
+                manifest_path = entry / "mod.json"
+                if manifest_path.exists():
+                    try:
+                        with open(manifest_path, "r", encoding="utf-8") as fh:
+                            manifest = json.load(fh)
+                    except Exception as exc:
+                        self.log_boot(f"Failed to read manifest for {entry.name}: {exc}", level="error")
+                        continue
+                else:
+                    manifest = {
+                        "name": entry.name,
+                        "entry": "mod.py",
+                        "enabled": True,
+                        "callable": "register",
+                    }
+                self._load_mod(manifest, entry / manifest.get("entry", "mod.py"))
+
+    def _load_mod(self, manifest: Dict[str, object], entry_path: Path):
+        name = manifest.get("name") or entry_path.stem
+        if not manifest.get("enabled", True):
+            self.log_boot(f"Skipping disabled mod: {name}")
+            return
+        if not entry_path.exists():
+            self.log_boot(f"Missing entry file for mod '{name}': {entry_path.name}", level="error")
+            return
+
+        module_name = manifest.get("import_name") or f"user_mod_{name}"
+        module_name = re.sub(r"[^0-9A-Za-z_]+", "_", module_name)
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, entry_path)
+            if spec is None or spec.loader is None:
+                raise ImportError("Could not create spec")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
+        except Exception as exc:
+            self.log_boot(f"Failed to import mod '{name}': {exc}", level="error")
+            return
+
+        callable_name = manifest.get("callable", "register")
+        register = getattr(module, callable_name, None)
+        if not callable(register):
+            self.log_boot(f"Mod '{name}' missing callable '{callable_name}'", level="warn")
+            return
+        try:
+            register(self.api)
+        except Exception as exc:
+            self.log_boot(f"Mod '{name}' failed during register: {exc}", level="error")
+            return
+        self.log_boot(f"Loaded mod: {name}")
+
+    def run_pre_scan(self, context: Dict):
+        for hook in list(self.pre_scan_hooks):
+            try:
+                hook(context, self.api)
+            except Exception as exc:
+                self.log(f"Pre-scan hook error ({hook.__module__}): {exc}", level="error")
+
+    def run_post_scan(self, items: List[FileItem], context: Dict):
+        for hook in list(self.post_scan_hooks):
+            try:
+                hook(items, context, self.api)
+            except Exception as exc:
+                self.log(f"Post-scan hook error ({hook.__module__}): {exc}", level="error")
+
+
+def load_user_mods() -> PluginManager:
+    manager = PluginManager(USER_MODS_DIR)
+    try:
+        manager.load()
+    except Exception as exc:
+        manager.log_boot(f"Mod loading aborted: {exc}", level="error")
+    return manager
 
 # ---------------------------
 # Utilities
@@ -619,6 +765,25 @@ def guess_type_for_name(name: str, ext: str) -> Tuple[str, float, str]:
             return ("Adult Override", 0.8, "Adult keyword + override")
 
         return ("Adult Gameplay", 0.75, "Adult keyword")
+
+    # Non-adult heuristics -------------------------------------------------
+    if ext in SCRIPT_EXTS:
+        return ("Script Mod", 0.85, "Script-like extension")
+
+    if ext in ARCHIVE_EXTS:
+        return ("Archive", 0.5, "Archive container")
+
+    if ext == ".package":
+        for kw, cat in KEYWORD_MAP:
+            if kw in n:
+                return (cat, 0.65, f"Keyword '{kw}'")
+        return ("Other", 0.4, "Package (no keyword match)")
+
+    # Utilities / configs / leftovers
+    if ext in {".cfg", ".ini", ".log", ".txt", ".md"}:
+        return ("Utility Tool", 0.45, "Utility/config file")
+
+    return ("Unknown", 0.3, "Unrecognised extension")
 
     # Non-adult heuristics -------------------------------------------------
     if ext in SCRIPT_EXTS:
@@ -874,7 +1039,7 @@ class Sims4ModSorterApp(tk.Tk):
         self._build_ui()
         self._build_settings_overlay()
         self.bind("<Configure>", self._on_resize)
-        flush_plugin_messages(self, "boot")
+        self._report_mod_boot_messages()
 
     def _build_style(self):
         style = ttk.Style()
@@ -1162,7 +1327,7 @@ class Sims4ModSorterApp(tk.Tk):
             self._refresh_tree()
             self.status_var.set(f"Plan: {len(self.items)} files")
             self.log(f"Scan complete. Planned {len(self.items)} files. Linked packages: {stats['linked']} across {stats['scripts']} script(s).")
-            flush_plugin_messages(self, "runtime")
+            self._report_mod_runtime_messages()
 
         threading.Thread(target=worker, daemon=True).start()
 
