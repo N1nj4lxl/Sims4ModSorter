@@ -1064,27 +1064,6 @@ class Sims4ModSorterApp(tk.Tk):
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
-    def _emit_mod_message(self, level: str, message: str):
-        if not message:
-            return
-        prefix = {
-            "error": "Mod error",
-            "warn": "Mod warning",
-        }.get(level, "Mod")
-        self.log(f"{prefix}: {message}")
-
-    def _report_mod_boot_messages(self):
-        if not getattr(self, "plugin_manager", None):
-            return
-        for level, message in self.plugin_manager.drain_boot_messages():
-            self._emit_mod_message(level, message)
-
-    def _report_mod_runtime_messages(self):
-        if not getattr(self, "plugin_manager", None):
-            return
-        for level, message in self.plugin_manager.drain_runtime_messages():
-            self._emit_mod_message(level, message)
-
     def on_apply_theme(self):
         self._build_style()
         self.log_text.configure(bg=self._theme_cache["alt"], fg=self._theme_cache["fg"])
