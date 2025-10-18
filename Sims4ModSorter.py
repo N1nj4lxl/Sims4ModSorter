@@ -1,7 +1,10 @@
 # Sims4 Mod Sorter — single file
 # Python 3.10+
+import importlib.util
 import os, re, io, json, time, shutil, struct, zipfile, threading, tkinter as tk
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from tkinter import ttk, filedialog
 from typing import List, Dict, Tuple, Optional
 import urllib.request
@@ -173,6 +176,8 @@ CATEGORY_ORDER = [
     "Utility Tool", "Archive", "Other", "Unknown",
 ]
 
+CATEGORY_INDEX = {name: idx for idx, name in enumerate(CATEGORY_ORDER)}
+
 DEFAULT_FOLDER_MAP = {
     "Adult Script": "Adult - Scripts",
     "Adult Gameplay": "Adult - Gameplay",
@@ -222,6 +227,150 @@ THEMES = {
     "High Contrast Mode": {"bg": "#000000", "fg": "#FFFFFF", "alt": "#000000", "accent": "#FFD400", "sel": "#333333"},
     "Pink Holiday": {"bg": "#1a1216", "fg": "#FFE7F3", "alt": "#23171e", "accent": "#FF5BA6", "sel": "#3a1f2c"},
 }
+
+# ---------------------------
+# Modding support
+# ---------------------------
+
+USER_MODS_DIR = Path(__file__).with_name("user_mods")
+
+
+class ModAPI:
+    """Lightweight API exposed to external mods."""
+
+    def __init__(self, manager: "PluginManager"):
+        self._manager = manager
+
+    def register_pre_scan_hook(self, func):
+        if callable(func):
+            self._manager.pre_scan_hooks.append(func)
+
+    def register_post_scan_hook(self, func):
+        if callable(func):
+            self._manager.post_scan_hooks.append(func)
+
+    def register_theme(self, name: str, palette: Dict[str, str]):
+        required = {"bg", "fg", "alt", "accent", "sel"}
+        if not name or not isinstance(palette, dict) or not required.issubset(palette.keys()):
+            self._manager.log_boot(f"Theme registration skipped for '{name or '?'}' (invalid palette)", level="warn")
+            return
+        THEMES[name] = {key: palette[key] for key in required}
+        self._manager.log_boot(f"Theme registered: {name}", level="info")
+
+    def log(self, message: str, level: str = "info"):
+        self._manager.log(message, level=level)
+
+
+class PluginManager:
+    def __init__(self, mods_dir: Path):
+        self.mods_dir = mods_dir
+        self.pre_scan_hooks = []
+        self.post_scan_hooks = []
+        self.boot_messages: List[Tuple[str, str]] = []
+        self.runtime_messages: List[Tuple[str, str]] = []
+        self.api = ModAPI(self)
+
+    def log_boot(self, message: str, level: str = "info"):
+        self.boot_messages.append((level, message))
+
+    def log(self, message: str, level: str = "info"):
+        self.runtime_messages.append((level, message))
+
+    def drain_boot_messages(self):
+        msgs = list(self.boot_messages)
+        self.boot_messages.clear()
+        return msgs
+
+    def drain_runtime_messages(self):
+        msgs = list(self.runtime_messages)
+        self.runtime_messages.clear()
+        return msgs
+
+    def load(self):
+        self.mods_dir.mkdir(parents=True, exist_ok=True)
+        for entry in sorted(self.mods_dir.iterdir()):
+            if entry.is_file() and entry.suffix == ".py":
+                manifest = {
+                    "name": entry.stem,
+                    "entry": entry.name,
+                    "enabled": True,
+                    "callable": "register",
+                }
+                self._load_mod(manifest, entry)
+            elif entry.is_dir():
+                manifest_path = entry / "mod.json"
+                if manifest_path.exists():
+                    try:
+                        with open(manifest_path, "r", encoding="utf-8") as fh:
+                            manifest = json.load(fh)
+                    except Exception as exc:
+                        self.log_boot(f"Failed to read manifest for {entry.name}: {exc}", level="error")
+                        continue
+                else:
+                    manifest = {
+                        "name": entry.name,
+                        "entry": "mod.py",
+                        "enabled": True,
+                        "callable": "register",
+                    }
+                self._load_mod(manifest, entry / manifest.get("entry", "mod.py"))
+
+    def _load_mod(self, manifest: Dict[str, object], entry_path: Path):
+        name = manifest.get("name") or entry_path.stem
+        if not manifest.get("enabled", True):
+            self.log_boot(f"Skipping disabled mod: {name}")
+            return
+        if not entry_path.exists():
+            self.log_boot(f"Missing entry file for mod '{name}': {entry_path.name}", level="error")
+            return
+
+        module_name = manifest.get("import_name") or f"user_mod_{name}"
+        module_name = re.sub(r"[^0-9A-Za-z_]+", "_", module_name)
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, entry_path)
+            if spec is None or spec.loader is None:
+                raise ImportError("Could not create spec")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
+        except Exception as exc:
+            self.log_boot(f"Failed to import mod '{name}': {exc}", level="error")
+            return
+
+        callable_name = manifest.get("callable", "register")
+        register = getattr(module, callable_name, None)
+        if not callable(register):
+            self.log_boot(f"Mod '{name}' missing callable '{callable_name}'", level="warn")
+            return
+        try:
+            register(self.api)
+        except Exception as exc:
+            self.log_boot(f"Mod '{name}' failed during register: {exc}", level="error")
+            return
+        self.log_boot(f"Loaded mod: {name}")
+
+    def run_pre_scan(self, context: Dict):
+        for hook in list(self.pre_scan_hooks):
+            try:
+                hook(context, self.api)
+            except Exception as exc:
+                self.log(f"Pre-scan hook error ({hook.__module__}): {exc}", level="error")
+
+    def run_post_scan(self, items: List[FileItem], context: Dict):
+        for hook in list(self.post_scan_hooks):
+            try:
+                hook(items, context, self.api)
+            except Exception as exc:
+                self.log(f"Post-scan hook error ({hook.__module__}): {exc}", level="error")
+
+
+def load_user_mods() -> PluginManager:
+    manager = PluginManager(USER_MODS_DIR)
+    try:
+        manager.load()
+    except Exception as exc:
+        manager.log_boot(f"Mod loading aborted: {exc}", level="error")
+    return manager
 
 # ---------------------------
 # Utilities
@@ -348,67 +497,15 @@ def normalize_key(filename: str) -> str:
     base = re.sub(r'[^a-z0-9]+', '', base)
     return base
 
-# ---------------------------
-# DBPF quick index scan (counts resource types in .package)
-# ---------------------------
-# --- DBPF index scan (counts resource types in .package) ---
-TYPE_IDS = {
-    0x034AEECB: "CASP", 0x319E4F1D: "COBJ/OBJD", 0x02D5DF13: "JAZZ",
-    0x220557DA: "STBL", 0x015A1849: "GEOM", 0x01661233: "MODL",
-    0x01D10F34: "MLOD", 0x0354796A: "TONE"
-}
+_NAT_SORT_RE = re.compile(r'(\d+)')
 
-def dbpf_scan_types(path: str) -> dict[int,int]:
-    out = {}
-    with open(path, "rb") as f:
-        head = f.read(96)
-        if len(head) < 96 or head[:4] != b"DBPF":
-            return out
-        count = int.from_bytes(head[0x20:0x24], "little")
-        index_pos = int.from_bytes(head[0x40:0x44], "little")
-        if not count or not index_pos:
-            return out
-        f.seek(index_pos)
-        index_type = int.from_bytes(f.read(4), "little")
-        bits = [i for i in range(8) if (index_type >> i) & 1]
-        header_dwords = [int.from_bytes(f.read(4), "little") for _ in bits]
-        per_entry = 8 - len(bits)
-        for _ in range(count):
-            missing = [int.from_bytes(f.read(4), "little") for _ in range(per_entry)]
-            vals = {}
-            hi = mi = 0
-            for b in range(8):
-                if b in bits:
-                    vals[b] = header_dwords[hi]; hi += 1
-                else:
-                    vals[b] = missing[mi]; mi += 1
-            rtype = vals.get(0, 0)
-            out[rtype] = out.get(rtype, 0) + 1
+def _natural_key(value: str):
+    parts = _NAT_SORT_RE.split(value.lower())
+    out = []
+    for part in parts:
+        out.append(int(part) if part.isdigit() else part)
     return out
 
-def classify_from_types(types: dict[int,int], filename: str) -> tuple[str,float,str]:
-    if not types:
-        return "Unknown", 0.5, "No DBPF index"
-    has = lambda t: t in types
-    name = filename.lower()
-    if has(0x034AEECB):  # CASP
-        if any(k in name for k in ["glass", "eyewear", "spectacle", "goggle"]):
-            return "CAS Accessories", 0.9, "CASP + eyewear hint"
-        if any(k in name for k in ["hair","brow","lash"]): return "CAS Hair", 0.85, "CASP"
-        if any(k in name for k in ["lip","liner","blush","makeup"]): return "CAS Makeup", 0.85, "CASP"
-        if any(k in name for k in ["skin","overlay"]): return "CAS Skin", 0.85, "CASP"
-        if any(k in name for k in ["eye","iris"]): return "CAS Eyes", 0.85, "CASP"
-        return "CAS Clothing", 0.8, "CASP"
-    if has(0x319E4F1D) or has(0x015A1849) or has(0x01661233) or has(0x01D10F34):
-        return "BuildBuy Object", 0.85, "Object resources"
-    if has(0x02D5DF13): return "Animation", 0.85, "JAZZ"
-    if has(0x0354796A): return "CAS Skin", 0.85, "TONE"
-    if has(0x220557DA): return "Gameplay Tuning", 0.75, "STBL"
-    return "Other", 0.6, "Misc resources"
-
-# ---------------------------
-# Classification
-# ---------------------------
 ADULT_TOKENS = {
     "wickedwhims", "turbodriver", "basemental", "nisa", "wild_guy",
     "nsfw", "porn", "sex", "nude", "naked", "strip", "lapdance", "prostitution",
@@ -503,6 +600,25 @@ def guess_type_for_name(name: str, ext: str) -> Tuple[str, float, str]:
 
         return ("Adult Gameplay", 0.75, "Adult keyword")
 
+    # Non-adult heuristics -------------------------------------------------
+    if ext in SCRIPT_EXTS:
+        return ("Script Mod", 0.85, "Script-like extension")
+
+    if ext in ARCHIVE_EXTS:
+        return ("Archive", 0.5, "Archive container")
+
+    if ext == ".package":
+        for kw, cat in KEYWORD_MAP:
+            if kw in n:
+                return (cat, 0.65, f"Keyword '{kw}'")
+        return ("Other", 0.4, "Package (no keyword match)")
+
+    # Utilities / configs / leftovers
+    if ext in {".cfg", ".ini", ".log", ".txt", ".md"}:
+        return ("Utility Tool", 0.45, "Utility/config file")
+
+    return ("Unknown", 0.3, "Unrecognised extension")
+
 def refine_with_metadata(path: str, current: Tuple[str, float, str]) -> Tuple[str, float, str, str]:
     name, conf, notes = current
     ext = os.path.splitext(path)[1].lower()
@@ -539,88 +655,93 @@ def map_type_to_folder(cat: str, folder_map: Dict[str, str]) -> str:
 def scan_folder(path: str, folder_map: Dict[str, str], recurse: bool = True,
                 ignore_exts: Optional[set] = None, ignore_name_contains: Optional[List[str]] = None,
                 progress_cb=None) -> List[FileItem]:
-    out: List[FileItem] = []
     if not os.path.isdir(path):
-        return out
+        return []
 
-    ignore_exts = {e.strip().lower() if e.strip().startswith('.') else f".{e.strip().lower()}"
-                   for e in (ignore_exts or set()) if e and e.strip()}
-    ignore_name_contains = [t.strip().lower() for t in (ignore_name_contains or []) if t and t.strip()]
+    ignore_exts = {
+        ext.strip().lower() if ext.strip().startswith('.') else f".{ext.strip().lower()}"
+        for ext in (ignore_exts or set()) if ext and ext.strip()
+    }
+    ignore_name_contains = [tok.strip().lower() for tok in (ignore_name_contains or []) if tok and tok.strip()]
 
-    # Build candidate list
-    candidates: List[str] = []
-    if recurse:
-        for root, _, files in os.walk(path):
-            for fname in files:
-                candidates.append(os.path.join(root, fname))
-    else:
-        for entry in os.scandir(path):
-            if entry.is_file():
-                candidates.append(entry.path)
+    def iter_candidates():
+        if recurse:
+            for root, _, files in os.walk(path):
+                for fname in files:
+                    yield os.path.join(root, fname)
+        else:
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    if entry.is_file():
+                        yield entry.path
 
-    total = len(candidates)
+    def count_candidates():
+        if recurse:
+            total = 0
+            for _, _, files in os.walk(path):
+                total += len(files)
+            return total
+        with os.scandir(path) as entries:
+            return sum(1 for entry in entries if entry.is_file())
 
-    for idx, fpath in enumerate(candidates, start=1):
+    total = count_candidates()
+    items: List[FileItem] = []
+
+    for idx, fpath in enumerate(iter_candidates(), start=1):
+        fname = os.path.basename(fpath)
+        lowname = fname.lower()
+        ext = os.path.splitext(fname)[1].lower()
+
+        if ext in ignore_exts or any(tok in lowname for tok in ignore_name_contains):
+            if progress_cb:
+                progress_cb(idx, total, fpath, "ignored")
+            continue
+
         try:
-            fname = os.path.basename(fpath)
-            lowname = fname.lower()
-            ext = os.path.splitext(fname)[1].lower()
-
-            if ext in ignore_exts or any(tok in lowname for tok in ignore_name_contains):
-                if progress_cb: progress_cb(idx, total, fpath, "ignored")
-                continue
-
             size_mb = human_mb(os.path.getsize(fpath))
-            g = guess_type_for_name(fname, ext)
-            cat, conf, notes = g
-
-            # Refine .package using DBPF metadata
-            if ext == ".package":
-                adult_hint = any(x in fname.lower() for x in (
-                    "wickedwhims","turbodriver","basemental","nisa","wild_guy",
-                    "nsfw","porn","sex","nude","naked","strip","lapdance","prostitution",
-                    "genital","penis","vagina","condom","dildo","vibrator","plug",
-                ))
-                types = dbpf_scan_types(fpath)
-                if types:
-                    c2, c2conf, c2notes = classify_from_types(types, fname, adult_hint)
-                    if c2conf >= conf:
-                        cat, conf, notes = c2, c2conf, f"{c2notes}"
-                    else:
-                        notes = f"{notes}; {c2notes}"
-
-            cat, conf, notes, tags = refine_with_metadata(fpath, g)
+            guess = guess_type_for_name(fname, ext)
+            cat, conf, notes = guess
+            cat, conf, notes, tags = refine_with_metadata(fpath, guess)
+            relp = os.path.relpath(fpath, path)
             target = map_type_to_folder(cat, folder_map)
-            relp = os.path.relpath(fpath, path)
-            out.append(FileItem(
-                path=fpath, name=fname, ext=ext, size_mb=size_mb, relpath=relp,
-                guess_type=cat, confidence=conf, notes=notes, include=True, target_folder=target, meta_tags=tags
+            items.append(FileItem(
+                path=fpath,
+                name=fname,
+                ext=ext,
+                size_mb=size_mb,
+                relpath=relp,
+                guess_type=cat,
+                confidence=conf,
+                notes=notes,
+                include=True,
+                target_folder=target,
+                meta_tags=tags,
             ))
-            if progress_cb: progress_cb(idx, total, fpath, "scanned")
+            if progress_cb:
+                progress_cb(idx, total, fpath, "scanned")
         except Exception as e:
-            relp = os.path.relpath(fpath, path)
-            out.append(FileItem(
-                path=fpath, name=os.path.basename(fpath), ext=os.path.splitext(fpath)[1].lower(),
-                size_mb=0.0, relpath=relp, guess_type="Unknown", confidence=0.0,
-                notes=f"scan error: {e}", include=False, target_folder=map_type_to_folder("Unknown", folder_map),
+            relp = os.path.relpath(fpath, path) if os.path.exists(fpath) else fname
+            items.append(FileItem(
+                path=fpath,
+                name=fname,
+                ext=ext,
+                size_mb=0.0,
+                relpath=relp,
+                guess_type="Unknown",
+                confidence=0.0,
+                notes=f"scan error: {e}",
+                include=False,
+                target_folder=map_type_to_folder("Unknown", folder_map),
             ))
-            if progress_cb: progress_cb(idx, total, fpath, "error")
+            if progress_cb:
+                progress_cb(idx, total, fpath, "error")
 
-    g = guess_type_for_name(fname, ext)        # existing
-    cat, conf, notes = g
-
-    if ext == ".package":
-        types = dbpf_scan_types(fpath)
-        if types:
-            c2, c2conf, c2notes = classify_from_types(types, fname)
-            if c2conf >= conf:
-                cat, conf, notes = c2, c2conf, f"{c2notes} ({', '.join(f'{TYPE_IDS.get(t,hex(t))}:{n}' for t,n in types.items())})"
-
-    out.sort(key=lambda fi: (
-        CATEGORY_ORDER.index(fi.guess_type) if fi.guess_type in CATEGORY_ORDER else 999,
-        os.path.dirname(fi.relpath).lower(),
-        fi.name.lower()))
-    return out
+    items.sort(key=lambda fi: (
+        CATEGORY_INDEX.get(fi.guess_type, len(CATEGORY_ORDER)),
+        _natural_key(os.path.dirname(fi.relpath) or '.'),
+        _natural_key(fi.name),
+    ))
+    return items
 
 def ensure_folder(path: str):
     if not os.path.isdir(path):
@@ -724,6 +845,7 @@ class Sims4ModSorterApp(tk.Tk):
         self.theme_name = tk.StringVar(value="Dark Mode")
         self.mods_root = tk.StringVar(value=get_default_mods_path())
         self.items: List[FileItem] = []
+        self.plugin_manager = load_user_mods()
 
         self.status_var = tk.StringVar(value="Ready")
         self.summary_var = tk.StringVar(value="No plan yet")
@@ -732,6 +854,7 @@ class Sims4ModSorterApp(tk.Tk):
         self._build_ui()
         self._build_settings_overlay()
         self.bind("<Configure>", self._on_resize)
+        self._report_mod_boot_messages()
 
     def _build_style(self):
         style = ttk.Style()
@@ -820,45 +943,118 @@ class Sims4ModSorterApp(tk.Tk):
     # In-window settings overlay (no OS pop-up)
     def _build_settings_overlay(self):
         self.overlay = tk.Frame(self, bg=self._theme_cache["sel"])
-        self.overlay_card = ttk.Frame(self.overlay, padding=14)
-        self.overlay_card.place(relx=0.5, rely=0.5, anchor="center")
+        self.overlay.columnconfigure(0, weight=1)
+        self.overlay.rowconfigure(0, weight=1)
 
-        row0 = ttk.Frame(self.overlay_card); row0.pack(fill="x", pady=(0,6))
-        ttk.Label(row0, text="Settings").pack(side="left")
-        ttk.Button(row0, text="✕", command=self.hide_settings, width=3).pack(side="right")
+        self.overlay_card = ttk.Frame(self.overlay, padding=18)
+        self.overlay_card.grid(row=0, column=0, sticky="nsew")
+        self.overlay_card.columnconfigure(0, weight=1)
 
-        row1 = ttk.Frame(self.overlay_card); row1.pack(fill="x", pady=6)
-        ttk.Label(row1, text="Theme").pack(side="left")
-        self.theme_cb = ttk.Combobox(row1, values=list(THEMES.keys()), textvariable=self.theme_name, state="readonly", width=24)
-        self.theme_cb.pack(side="left", padx=8)
-        ttk.Button(row1, text="Apply Theme", command=self.on_apply_theme).pack(side="left")
+        header = ttk.Frame(self.overlay_card)
+        header.grid(row=0, column=0, sticky="ew")
+        header.columnconfigure(0, weight=1)
+        ttk.Label(header, text="Settings", font=("TkDefaultFont", 12, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Button(header, text="Close", command=self.hide_settings, width=7).grid(row=0, column=1, sticky="e")
 
-        row2 = ttk.Frame(self.overlay_card); row2.pack(fill="x", pady=6)
-        self.chk_recurse = ttk.Checkbutton(row2, text="Scan subfolders", variable=self.recurse_var); self.chk_recurse.pack(side="left", padx=12)
+        theme_section = ttk.LabelFrame(self.overlay_card, text="Themes")
+        theme_section.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        theme_section.columnconfigure(0, weight=1)
 
-        row3 = ttk.Frame(self.overlay_card); row3.pack(fill="x", pady=6)
-        ttk.Label(row3, text="Ignore extensions (csv)").pack(side="left")
-        self.ignore_exts_var = tk.StringVar(value=self.ignore_exts_var.get())
-        ttk.Entry(row3, textvariable=self.ignore_exts_var, width=30).pack(side="left", padx=6)
+        theme_controls = ttk.Frame(theme_section)
+        theme_controls.grid(row=0, column=0, sticky="ew")
+        theme_controls.columnconfigure(1, weight=1)
+        ttk.Label(theme_controls, text="Theme").grid(row=0, column=0, sticky="w")
+        self.theme_cb = ttk.Combobox(theme_controls, values=list(THEMES.keys()), textvariable=self.theme_name, state="readonly")
+        self.theme_cb.grid(row=0, column=1, sticky="ew", padx=6)
+        ttk.Button(theme_controls, text="Apply", command=self.on_apply_theme).grid(row=0, column=2, padx=(6,0))
 
-        row4 = ttk.Frame(self.overlay_card); row4.pack(fill="x", pady=6)
-        ttk.Label(row4, text="Ignore names contains (csv)").pack(side="left")
-        self.ignore_names_var = tk.StringVar(value=self.ignore_names_var.get())
-        ttk.Entry(row4, textvariable=self.ignore_names_var, width=45).pack(side="left", padx=6)
+        self.theme_preview_container = ttk.Frame(theme_section)
+        self.theme_preview_container.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        for col in range(3):
+            self.theme_preview_container.columnconfigure(col, weight=1)
+        self._build_theme_preview_widgets()
 
-        row5 = ttk.Frame(self.overlay_card); row5.pack(fill="x", pady=(10,0))
-        ttk.Button(row5, text="Close", command=self.hide_settings).pack(side="right")
+        scan_section = ttk.LabelFrame(self.overlay_card, text="Scanning")
+        scan_section.grid(row=2, column=0, sticky="ew", pady=(16, 0))
+        scan_section.columnconfigure(0, weight=1)
+
+        self.chk_recurse = ttk.Checkbutton(scan_section, text="Scan subfolders", variable=self.recurse_var)
+        self.chk_recurse.grid(row=0, column=0, sticky="w")
+
+        ttk.Label(scan_section, text="Ignore extensions (comma separated)").grid(row=1, column=0, sticky="w", pady=(10, 2))
+        ttk.Entry(scan_section, textvariable=self.ignore_exts_var).grid(row=2, column=0, sticky="ew")
+
+        ttk.Label(scan_section, text="Ignore names containing (comma separated)").grid(row=3, column=0, sticky="w", pady=(10, 2))
+        ttk.Entry(scan_section, textvariable=self.ignore_names_var).grid(row=4, column=0, sticky="ew")
+
+        actions = ttk.Frame(self.overlay_card)
+        actions.grid(row=3, column=0, sticky="e", pady=(18, 0))
+        ttk.Button(actions, text="Done", command=self.hide_settings).grid(row=0, column=0)
 
         self.overlay.bind("<Escape>", lambda e: self.hide_settings())
         self.overlay.place_forget()
+        self._update_theme_preview_highlight()
 
     def show_settings(self):
         self.overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
         self.overlay.tkraise()
         self.overlay.focus_set()
+        self._update_theme_preview_highlight()
 
     def hide_settings(self):
         self.overlay.place_forget()
+
+    def _build_theme_preview_widgets(self):
+        if not hasattr(self, "theme_preview_container"):
+            return
+        for child in self.theme_preview_container.winfo_children():
+            child.destroy()
+        self.theme_preview_canvases: Dict[str, tk.Canvas] = {}
+
+        columns = 3
+        for idx, (name, palette) in enumerate(THEMES.items()):
+            row = idx // columns
+            col = idx % columns
+            cell = ttk.Frame(self.theme_preview_container)
+            cell.grid(row=row, column=col, padx=4, pady=4, sticky="nsew")
+            cell.columnconfigure(0, weight=1)
+
+            canvas = tk.Canvas(cell, width=120, height=60, highlightthickness=2)
+            canvas.grid(row=0, column=0, sticky="ew")
+            canvas.create_rectangle(0, 0, 120, 60, fill=palette["bg"], outline="")
+            canvas.create_rectangle(0, 0, 120, 24, fill=palette["alt"], outline="")
+            canvas.create_rectangle(0, 24, 120, 40, fill=palette["accent"], outline="")
+            canvas.create_rectangle(0, 40, 120, 60, fill=palette["sel"], outline="")
+
+            label = ttk.Label(cell, text=name, anchor="center")
+            label.grid(row=1, column=0, pady=(4, 0))
+
+            bind_target = lambda widget, theme=name: widget.bind(
+                "<Button-1>", lambda _e, theme_name=theme: self._on_theme_preview_click(theme_name)
+            )
+            bind_target(canvas)
+            bind_target(label)
+
+            self.theme_preview_canvases[name] = canvas
+
+        self._update_theme_preview_highlight()
+
+    def _on_theme_preview_click(self, theme_name: str):
+        self.theme_name.set(theme_name)
+        if hasattr(self, "theme_cb"):
+            self.theme_cb.set(theme_name)
+        self._update_theme_preview_highlight()
+
+    def _update_theme_preview_highlight(self):
+        canvases = getattr(self, "theme_preview_canvases", {})
+        if not canvases:
+            return
+        selected = self.theme_name.get()
+        accent = THEMES.get(selected, THEMES["Dark Mode"])["accent"]
+        neutral = self._theme_cache.get("alt", "#444444")
+        for name, canvas in canvases.items():
+            border = accent if name == selected else neutral
+            canvas.configure(highlightbackground=border, highlightcolor=border)
 
     # ---- helpers
     def log(self, msg: str):
@@ -868,10 +1064,32 @@ class Sims4ModSorterApp(tk.Tk):
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
+    def _emit_mod_message(self, level: str, message: str):
+        if not message:
+            return
+        prefix = {
+            "error": "Mod error",
+            "warn": "Mod warning",
+        }.get(level, "Mod")
+        self.log(f"{prefix}: {message}")
+
+    def _report_mod_boot_messages(self):
+        if not getattr(self, "plugin_manager", None):
+            return
+        for level, message in self.plugin_manager.drain_boot_messages():
+            self._emit_mod_message(level, message)
+
+    def _report_mod_runtime_messages(self):
+        if not getattr(self, "plugin_manager", None):
+            return
+        for level, message in self.plugin_manager.drain_runtime_messages():
+            self._emit_mod_message(level, message)
+
     def on_apply_theme(self):
         self._build_style()
         self.log_text.configure(bg=self._theme_cache["alt"], fg=self._theme_cache["fg"])
         self.overlay.configure(bg=self._theme_cache["sel"])
+        self._update_theme_preview_highlight()
         self.log("Theme applied: " + self.theme_name.get())
 
     # ---- actions
@@ -899,18 +1117,53 @@ class Sims4ModSorterApp(tk.Tk):
         def worker():
             ignore_exts = {e.strip() for e in self.ignore_exts_var.get().split(',')}
             ignore_names = [t.strip() for t in self.ignore_names_var.get().split(',')]
+            context = {
+                "mods_root": mods,
+                "recurse": self.recurse_var.get(),
+                "ignore_exts": ignore_exts,
+                "ignore_names": ignore_names,
+                "folder_map": self.folder_map,
+            }
+            if self.plugin_manager:
+                self.plugin_manager.run_pre_scan(context)
+                if isinstance(context.get("ignore_exts"), (list, set, tuple)):
+                    ignore_exts = {str(ext).strip() for ext in context["ignore_exts"] if str(ext).strip()}
+                if isinstance(context.get("ignore_names"), (list, set, tuple)):
+                    ignore_names = [str(name).strip() for name in context["ignore_names"] if str(name).strip()]
+                if context.get("mods_root"):
+                    context["mods_root"] = str(context["mods_root"])
+            scan_root = str(context.get("mods_root", mods) or mods)
+            if scan_root != mods:
+                try:
+                    self.mods_root.set(scan_root)
+                except Exception:
+                    pass
+
             items = scan_folder(
-                mods, self.folder_map,
+                scan_root, self.folder_map,
                 recurse=self.recurse_var.get(),
                 ignore_exts=ignore_exts,
                 ignore_name_contains=ignore_names,
                 progress_cb=progress_cb,
             )
             stats = bundle_scripts_and_packages(items, self.folder_map)
+            if self.plugin_manager:
+                context.update({
+                    "bundle_stats": stats,
+                    "items": items,
+                    "scan_root": scan_root,
+                })
+                self.plugin_manager.run_post_scan(items, context)
+                items.sort(key=lambda fi: (
+                    CATEGORY_INDEX.get(fi.guess_type, len(CATEGORY_ORDER)),
+                    _natural_key(os.path.dirname(fi.relpath) or '.'),
+                    _natural_key(fi.name),
+                ))
             self.items = items
             self._refresh_tree()
             self.status_var.set(f"Plan: {len(self.items)} files")
             self.log(f"Scan complete. Planned {len(self.items)} files. Linked packages: {stats['linked']} across {stats['scripts']} script(s).")
+            self._report_mod_runtime_messages()
 
         threading.Thread(target=worker, daemon=True).start()
 
