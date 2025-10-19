@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import multiprocessing
 import os
 import queue
 import re
@@ -1210,8 +1211,23 @@ class Sims4ModSorterApp(tk.Tk):
         ttk.Label(scan_section, text="Ignore names containing (comma separated)").grid(row=3, column=0, sticky="w", pady=(10, 2))
         ttk.Entry(scan_section, textvariable=self.ignore_names_var).grid(row=4, column=0, sticky="ew")
 
+        if self.plugin_manager and self.plugin_manager.settings_sections:
+            next_row += 1
+            plugins_section = ttk.LabelFrame(card, text="Plugins")
+            plugins_section.grid(row=next_row, column=0, sticky="ew", pady=(16, 0))
+            plugins_section.columnconfigure(0, weight=1)
+            for index, (title, builder) in enumerate(self.plugin_manager.settings_sections):
+                panel = ttk.LabelFrame(plugins_section, text=title)
+                panel.grid(row=index, column=0, sticky="ew", pady=(6, 0))
+                panel.columnconfigure(0, weight=1)
+                try:
+                    builder(self, panel, self.plugin_manager.api)
+                except Exception as exc:
+                    self.log(f"Plugin settings error: {exc}")
+
         actions = ttk.Frame(card)
-        actions.grid(row=3, column=0, sticky="e", pady=(18, 0))
+        next_row += 1
+        actions.grid(row=next_row, column=0, sticky="e", pady=(18, 0))
         ttk.Button(actions, text="Done", command=self.hide_settings).grid(row=0, column=0)
 
         self.overlay.bind("<Escape>", lambda _e: self.hide_settings())
@@ -1280,6 +1296,9 @@ class Sims4ModSorterApp(tk.Tk):
             pass
         self.after(16, self._pump_ui_queue)
 
+    def schedule_refresh(self) -> None:
+        self._enqueue_ui(lambda: self._refresh_tree(preserve_selection=True))
+
     def log(self, message: str) -> None:
         timestamp = time.strftime("%H:%M:%S")
         self.log_text.configure(state="normal")
@@ -1300,6 +1319,7 @@ class Sims4ModSorterApp(tk.Tk):
         self.overlay.place_forget()
 
     def on_apply_theme(self) -> None:
+        self._hide_tooltip()
         self._build_style()
         palette = self._theme_cache
         self.log_text.configure(bg=palette.get("alt", "#1f2328"), fg=palette.get("fg", "#E6E6E6"))
@@ -1553,6 +1573,8 @@ class Sims4ModSorterApp(tk.Tk):
                 "size": item.size_mb,
                 "tags": item.meta_tags,
                 "folder": item.target_folder,
+                "dependency_status": item.dependency_status,
+                "dependency_detail": item.dependency_detail,
             }
             for item in self.items
         ]
@@ -1588,6 +1610,7 @@ class Sims4ModSorterApp(tk.Tk):
             self.tree.insert("", "end", iid=iid, values=values)
             if iid in selected:
                 self.tree.selection_add(iid)
+            self._tooltip_payload[iid] = dict(item.tooltips)
         if self.items:
             topcats = sorted(counts.items(), key=lambda pair: -pair[1])[:4]
             fragment = ", ".join(f"{name}: {count}" for name, count in topcats)
@@ -1598,12 +1621,99 @@ class Sims4ModSorterApp(tk.Tk):
 
     def _on_resize(self, _event: Optional[tk.Event] = None) -> None:
         total_width = self.tree.winfo_width() or 1200
-        fixed = 40 + 220 + 70 + 170 + 200 + 60 + 80 + 180
+        base_fixed = 40 + 220 + 70 + 170 + 200 + 60 + 80 + 180
+        plugin_fixed = sum(self.tree.column(col.column_id, option="width") for col in self._plugin_columns)
+        fixed = base_fixed + plugin_fixed
         dynamic = max(300, total_width - fixed - 60)
         name_width = int(dynamic * 0.6)
         notes_width = int(dynamic * 0.4)
         self.tree.column("name", width=max(220, name_width))
         self.tree.column("notes", width=max(220, notes_width))
+
+    # ------------------------------------------------------------------
+    # Tooltip helpers
+    # ------------------------------------------------------------------
+    def _schedule_tooltip(self, text: str, x: int, y: int) -> None:
+        if self._tooltip_after:
+            self.after_cancel(self._tooltip_after)
+        self._tooltip_after = self.after(400, lambda: self._show_tooltip(text, x, y))
+
+    def _show_tooltip(self, text: str, x: int, y: int) -> None:
+        if self._tooltip_after:
+            self.after_cancel(self._tooltip_after)
+            self._tooltip_after = None
+        if not text:
+            self._hide_tooltip()
+            return
+        if self._tooltip_window is None or not self._tooltip_window.winfo_exists():
+            self._tooltip_window = tk.Toplevel(self)
+            self._tooltip_window.wm_overrideredirect(True)
+            try:
+                self._tooltip_window.attributes("-topmost", True)
+            except Exception:
+                pass
+            palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
+            self._tooltip_label = ttk.Label(
+                self._tooltip_window,
+                text=text,
+                background=palette.get("alt", "#333333"),
+                foreground=palette.get("fg", "#ffffff"),
+                relief="solid",
+                borderwidth=1,
+                padding=(6, 4),
+                wraplength=360,
+                justify="left",
+            )
+            self._tooltip_label.pack()
+        else:
+            if self._tooltip_label is not None:
+                self._tooltip_label.configure(text=text)
+        if self._tooltip_window is not None and self._tooltip_window.winfo_exists():
+            self._tooltip_window.update_idletasks()
+            self._tooltip_window.geometry(f"+{x}+{y}")
+
+    def _position_tooltip(self, x: int, y: int) -> None:
+        if self._tooltip_window is not None and self._tooltip_window.winfo_exists():
+            self._tooltip_window.geometry(f"+{x}+{y}")
+
+    def _hide_tooltip(self) -> None:
+        if self._tooltip_after:
+            self.after_cancel(self._tooltip_after)
+            self._tooltip_after = None
+        if self._tooltip_window is not None and self._tooltip_window.winfo_exists():
+            self._tooltip_window.destroy()
+        self._tooltip_window = None
+        self._tooltip_label = None
+        self._tooltip_target = ("", "")
+
+    def _on_tree_motion(self, event: tk.Event) -> None:
+        row = self.tree.identify_row(event.y)
+        column_token = self.tree.identify_column(event.x)
+        if not row or not column_token:
+            self._hide_tooltip()
+            return
+        try:
+            index = int(column_token.replace("#", "")) - 1
+        except ValueError:
+            self._hide_tooltip()
+            return
+        if index < 0 or index >= len(self._column_order):
+            self._hide_tooltip()
+            return
+        column_id = self._column_order[index]
+        tooltip_map = self._tooltip_payload.get(row, {})
+        text = tooltip_map.get(column_id, "")
+        if not text:
+            self._hide_tooltip()
+            return
+        target = (row, column_id)
+        pointer_x = event.x_root + 12
+        pointer_y = event.y_root + 18
+        if target == self._tooltip_target and self._tooltip_window is not None:
+            self._position_tooltip(pointer_x, pointer_y)
+            return
+        self._tooltip_target = target
+        self._schedule_tooltip(text, pointer_x, pointer_y)
 # ---------------------------------------------------------------------------
 # Entry points and self-test
 # ---------------------------------------------------------------------------

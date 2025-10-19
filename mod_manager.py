@@ -192,8 +192,66 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def interactive_main() -> int:
+    ensure_mods_dir()
+    print("Sims4 Mod Sorter - Mod Manager")
+    print("Manage user plugins without needing command-line arguments.")
+    while True:
+        print("\nOptions:")
+        print("  1) Import mod")
+        print("  2) List mods")
+        print("  3) Enable mod")
+        print("  4) Disable mod")
+        print("  5) Quit")
+        try:
+            choice = input("Select an option: ").strip()
+        except EOFError:
+            print()
+            return 0
+        if choice == "1":
+            source = input("Path to .py/.zip/directory: ").strip()
+            name = input("Display name (optional): ").strip() or None
+            entry = input("Entry file (optional): ").strip() or None
+            callable_name = input("Callable (default register): ").strip() or "register"
+            overwrite = input("Overwrite existing? [y/N]: ").strip().lower() == "y"
+            disable = input("Import disabled? [y/N]: ").strip().lower() == "y"
+            args = argparse.Namespace(
+                source=source,
+                name=name,
+                entry=entry,
+                callable=callable_name,
+                overwrite=overwrite,
+                disable=disable,
+            )
+            import_mod(args)
+        elif choice == "2":
+            list_mods(argparse.Namespace())
+        elif choice == "3":
+            identifier = input("Folder name or display name: ").strip()
+            if identifier:
+                set_enabled(identifier, True)
+        elif choice == "4":
+            identifier = input("Folder name or display name: ").strip()
+            if identifier:
+                set_enabled(identifier, False)
+        elif choice == "5" or choice.lower() in {"q", "quit", "exit"}:
+            return 0
+        else:
+            print("Invalid selection. Choose 1-5.")
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv:
+        parser.print_help()
+        print()
+        try:
+            return interactive_main()
+        except KeyboardInterrupt:
+            print()
+            return 0
     args = parser.parse_args(argv)
     return args.func(args)
 
