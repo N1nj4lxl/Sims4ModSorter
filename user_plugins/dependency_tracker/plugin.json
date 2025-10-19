@@ -2,5 +2,6 @@
   "name": "Dependency Tracker",
   "entry": "plugin.py",
   "enabled": true,
-  "callable": "register"
+  "callable": "register",
+  "version": "1.0.0"
 }
