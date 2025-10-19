@@ -1,0 +1,6 @@
+{
+  "name": "Example Theme & Scan Tweaks",
+  "entry": "mod.py",
+  "enabled": true,
+  "callable": "register"
+}
