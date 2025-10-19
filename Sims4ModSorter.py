@@ -24,7 +24,7 @@ from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence,
 
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import filedialog, ttk
+from tkinter import filedialog, messagebox, ttk
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +274,41 @@ def _scrim_color(bg_hex: str, *, strength: float = 0.45) -> str:
 # ---------------------------------------------------------------------------
 
 USER_PLUGINS_DIR: Path = Path(__file__).resolve().with_name("user_plugins")
+VERSION_FILE: Path = Path(__file__).resolve().with_name("VERSION")
+
+
+def _read_sorter_version() -> str:
+    try:
+        value = VERSION_FILE.read_text(encoding="utf-8").strip()
+        return value or "0.0.0"
+    except Exception:
+        return "0.0.0"
+
+
+APP_VERSION = _read_sorter_version()
+
+
+def _parse_version(value: str) -> Tuple[int, ...]:
+    parts: List[int] = []
+    for token in re.split(r"[^0-9]+", value):
+        if not token:
+            continue
+        try:
+            parts.append(int(token))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts or [0])
+
+
+def _compare_versions(current: str, required: str) -> int:
+    left = _parse_version(current)
+    right = _parse_version(required)
+    for index in range(max(len(left), len(right))):
+        a = left[index] if index < len(left) else 0
+        b = right[index] if index < len(right) else 0
+        if a != b:
+            return 1 if a > b else -1
+    return 0
 
 
 class PluginMessageBus:
@@ -302,6 +337,44 @@ class PluginColumn:
     heading: str
     width: int
     anchor: str
+
+
+@dataclass(slots=True)
+class PluginStatus:
+    name: str
+    folder: str
+    version: str
+    status: str
+    message: str = ""
+
+
+def _extract_plugin_version(manifest: Dict[str, object], module_path: Path) -> str:
+    version = manifest.get("version")
+    if isinstance(version, str) and version.strip():
+        return version.strip()
+    version_file = module_path.parent / "VERSION"
+    if version_file.exists():
+        try:
+            value = version_file.read_text(encoding="utf-8").strip()
+            if value:
+                return value
+        except Exception:
+            pass
+    return "Unknown"
+
+
+def _manifest_compatibility(manifest: Dict[str, object]) -> Optional[str]:
+    minimum = manifest.get("min_sorter_version") or manifest.get("min_app_version")
+    maximum = manifest.get("max_sorter_version") or manifest.get("max_app_version")
+    if isinstance(minimum, str) and minimum.strip():
+        required = minimum.strip()
+        if _compare_versions(APP_VERSION, required) < 0:
+            return f"Requires sorter {required}+"
+    if isinstance(maximum, str) and maximum.strip():
+        limit = maximum.strip()
+        if _compare_versions(APP_VERSION, limit) > 0:
+            return f"Incompatible beyond sorter {limit}"
+    return None
 
 
 def _partition_plugin_columns(
@@ -377,12 +450,14 @@ class PluginManager:
         self.column_order: List[str] = []
         self.settings_sections: List[Tuple[str, Callable[["Sims4ModSorterApp", ttk.Frame, PluginAPI], None]]] = []
         self.app: Optional["Sims4ModSorterApp"] = None
+        self.statuses: List[PluginStatus] = []
 
     def attach_app(self, app: "Sims4ModSorterApp") -> None:
         self.app = app
 
     def load(self) -> None:
         self.plugins_dir.mkdir(parents=True, exist_ok=True)
+        self.statuses.clear()
         for entry in sorted(self.plugins_dir.iterdir(), key=lambda p: p.name.lower()):
             manifest: Dict[str, object]
             module_path: Path
@@ -404,11 +479,21 @@ class PluginManager:
 
     def _load_manifest(self, manifest: Dict[str, object], module_path: Path) -> None:
         name = str(manifest.get("name") or module_path.stem)
+        folder = module_path.parent.name if module_path.parent != module_path else module_path.stem
+        version = _extract_plugin_version(manifest, module_path)
+        compatibility = _manifest_compatibility(manifest)
+        if compatibility:
+            self.message_bus.post("boot", "warn", f"Plugin '{name}' skipped: {compatibility}")
+            self.statuses.append(PluginStatus(name, folder, version, "incompatible", compatibility))
+            return
         if not manifest.get("enabled", True):
             self.message_bus.post("boot", "info", f"Skipping disabled plugin: {name}")
+            self.statuses.append(PluginStatus(name, folder, version, "disabled", "Disabled"))
             return
         if not module_path.exists():
+            message = f"Missing entry: {module_path.name}"
             self.message_bus.post("boot", "error", f"Missing entry for {name}: {module_path.name}")
+            self.statuses.append(PluginStatus(name, folder, version, "error", message))
             return
         module_name = re.sub(r"[^0-9A-Za-z_]+", "_", manifest.get("import_name", name))
         try:
@@ -419,19 +504,26 @@ class PluginManager:
             sys.modules[module_name] = module
             spec.loader.exec_module(module)
         except Exception as exc:
+            message = str(exc)
             self.message_bus.post("boot", "error", f"Failed to import {name}: {exc}")
+            self.statuses.append(PluginStatus(name, folder, version, "error", message))
             return
         callable_name = str(manifest.get("callable", "register"))
         register = getattr(module, callable_name, None)
         if not callable(register):
+            message = f"Missing callable '{callable_name}'"
             self.message_bus.post("boot", "warn", f"Plugin '{name}' missing callable '{callable_name}'")
+            self.statuses.append(PluginStatus(name, folder, version, "error", message))
             return
         try:
             register(self.api)
         except Exception as exc:
+            message = str(exc)
             self.message_bus.post("boot", "error", f"Plugin '{name}' failed during register: {exc}")
+            self.statuses.append(PluginStatus(name, folder, version, "error", message))
             return
         self.message_bus.post("boot", "info", f"Loaded plugin: {name}")
+        self.statuses.append(PluginStatus(name, folder, version, "loaded", ""))
 
     def run_pre_scan(self, context: Dict[str, object]) -> None:
         for hook in list(self.pre_scan_hooks):
@@ -458,6 +550,9 @@ class PluginManager:
 
     def get_columns(self) -> List[PluginColumn]:
         return [self.columns[column_id] for column_id in self.column_order if column_id in self.columns]
+
+    def get_statuses(self) -> List[PluginStatus]:
+        return list(self.statuses)
 
 
 def load_user_plugins() -> PluginManager:
@@ -1044,6 +1139,9 @@ class Sims4ModSorterApp(tk.Tk):
         self._tooltip_label: Optional[tk.Label] = None
         self._tooltip_after: Optional[str] = None
         self._tooltip_target: Tuple[str, str] = ("", "")
+        self._mod_status_window: Optional[tk.Toplevel] = None
+        self._status_trees: Dict[str, ttk.Treeview] = {}
+        self._status_summary_var = tk.StringVar(value="")
 
         self._build_style()
         self._build_ui()
@@ -1114,6 +1212,7 @@ class Sims4ModSorterApp(tk.Tk):
         ttk.Button(top, text="Export Plan", command=self.on_export).pack(side="left", padx=4)
         ttk.Label(top, textvariable=self.status_var).pack(side="left", padx=12)
         ttk.Button(top, text="⚙", width=3, command=self.show_settings).pack(side="right")
+        ttk.Button(top, text="Mod Status", command=self.show_mod_status_popup).pack(side="right", padx=6)
         ttk.Button(top, text="Undo Last", command=self.on_undo).pack(side="right", padx=6)
 
         mid = ttk.Frame(root_container)
@@ -1307,21 +1406,6 @@ class Sims4ModSorterApp(tk.Tk):
         ttk.Entry(scan_section, textvariable=self.ignore_names_var).grid(row=5, column=0, sticky="ew")
         row += 1
 
-        if self.plugin_manager and self.plugin_manager.settings_sections:
-            plugin_section = ttk.Frame(container)
-            plugin_section.grid(row=row, column=0, sticky="ew", pady=(18, 0))
-            plugin_section.columnconfigure(0, weight=1)
-            ttk.Label(plugin_section, text="Plugins", font=("TkDefaultFont", 10, "bold")).grid(row=0, column=0, sticky="w")
-            for index, (title, builder) in enumerate(self.plugin_manager.settings_sections, start=1):
-                panel = ttk.LabelFrame(plugin_section, text=title)
-                panel.grid(row=index, column=0, sticky="ew", pady=(8 if index == 1 else 6, 0))
-                panel.columnconfigure(0, weight=1)
-                try:
-                    builder(self, panel, self.plugin_manager.api)
-                except Exception as exc:
-                    self.log(f"Plugin settings error: {exc}")
-            row += 1
-
         actions = ttk.Frame(container)
         actions.grid(row=row + 1, column=0, sticky="e", pady=(20, 0))
         ttk.Button(actions, text="Done", command=self.hide_settings).grid(row=0, column=0)
@@ -1429,6 +1513,101 @@ class Sims4ModSorterApp(tk.Tk):
             self.settings_sidebar.place_forget()
         if hasattr(self, "settings_scrim"):
             self.settings_scrim.place_forget()
+
+    # ------------------------------------------------------------------
+    # Plugin status popup
+    # ------------------------------------------------------------------
+    def show_mod_status_popup(self) -> None:
+        if not self.plugin_manager:
+            messagebox.showinfo("Plugin Status", "No plugins loaded.", parent=self)
+            return
+        if self._mod_status_window and self._mod_status_window.winfo_exists():
+            self._populate_mod_status_popup()
+            self._mod_status_window.deiconify()
+            self._mod_status_window.lift()
+            return
+        palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
+        window = tk.Toplevel(self)
+        window.title("Plugin Status")
+        window.transient(self)
+        window.resizable(False, True)
+        window.configure(bg=palette.get("bg", "#111316"))
+        window.protocol("WM_DELETE_WINDOW", self._close_mod_status_popup)
+        self._mod_status_window = window
+
+        container = ttk.Frame(window, padding=16)
+        container.pack(fill="both", expand=True)
+
+        notebook = ttk.Notebook(container)
+        notebook.pack(fill="both", expand=True)
+
+        loaded_frame = ttk.Frame(notebook)
+        blocked_frame = ttk.Frame(notebook)
+        notebook.add(loaded_frame, text="Loaded")
+        notebook.add(blocked_frame, text="Blocked")
+
+        def create_tree(parent: ttk.Frame) -> ttk.Treeview:
+            frame = ttk.Frame(parent)
+            frame.pack(fill="both", expand=True)
+            tree = ttk.Treeview(frame, columns=("name", "folder", "version", "status", "message"), show="headings", height=8)
+            tree.heading("name", text="Name")
+            tree.heading("folder", text="Folder")
+            tree.heading("version", text="Version")
+            tree.heading("status", text="Status")
+            tree.heading("message", text="Details")
+            tree.column("name", width=220, anchor="w")
+            tree.column("folder", width=120, anchor="w")
+            tree.column("version", width=90, anchor="center")
+            tree.column("status", width=100, anchor="center")
+            tree.column("message", width=260, anchor="w")
+            tree.pack(side="left", fill="both", expand=True)
+            scroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+            tree.configure(yscrollcommand=scroll.set)
+            scroll.pack(side="right", fill="y")
+            return tree
+
+        loaded_tree = create_tree(loaded_frame)
+        blocked_tree = create_tree(blocked_frame)
+        self._status_trees = {"loaded": loaded_tree, "blocked": blocked_tree}
+
+        summary = ttk.Label(container, textvariable=self._status_summary_var)
+        summary.pack(anchor="w", pady=(12, 0))
+
+        self._populate_mod_status_popup()
+
+    def _close_mod_status_popup(self) -> None:
+        if self._mod_status_window and self._mod_status_window.winfo_exists():
+            self._mod_status_window.destroy()
+        self._mod_status_window = None
+        self._status_trees = {}
+
+    def _populate_mod_status_popup(self) -> None:
+        if not self.plugin_manager:
+            return
+        statuses = self.plugin_manager.get_statuses()
+        loaded = [status for status in statuses if status.status == "loaded"]
+        blocked = [status for status in statuses if status.status != "loaded"]
+        for key, entries in (("loaded", loaded), ("blocked", blocked)):
+            tree = self._status_trees.get(key)
+            if not tree or not tree.winfo_exists():
+                continue
+            tree.delete(*tree.get_children())
+            if not entries:
+                tree.insert("", "end", values=("No entries", "", "", "", ""))
+                continue
+            for status in entries:
+                tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        status.name,
+                        status.folder,
+                        status.version,
+                        status.status.capitalize(),
+                        status.message,
+                    ),
+                )
+        self._status_summary_var.set(f"Loaded: {len(loaded)} | Blocked: {len(blocked)}")
 
     def on_apply_theme(self) -> None:
         self._hide_tooltip()
@@ -1920,7 +2099,7 @@ import os, re, io, json, time, shutil, struct, zipfile, threading, tkinter as tk
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from tkinter import ttk, filedialog
+from tkinter import ttk, filedialog, messagebox
 from typing import List, Dict, Tuple, Optional
 import urllib.request
 import urllib.parse
@@ -2152,6 +2331,70 @@ THEMES = {
 # ---------------------------
 
 USER_PLUGINS_DIR = Path(__file__).with_name("user_plugins")
+VERSION_FILE = Path(__file__).with_name("VERSION")
+
+
+def _read_sorter_version():
+    try:
+        text = VERSION_FILE.read_text(encoding="utf-8").strip()
+        return text or "0.0.0"
+    except Exception:
+        return "0.0.0"
+
+
+APP_VERSION = _read_sorter_version()
+
+
+def _parse_version(value: str) -> Tuple[int, ...]:
+    parts: List[int] = []
+    for token in re.split(r"[^0-9]+", value):
+        if not token:
+            continue
+        try:
+            parts.append(int(token))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts or [0])
+
+
+def _compare_versions(current: str, required: str) -> int:
+    left = _parse_version(current)
+    right = _parse_version(required)
+    for idx in range(max(len(left), len(right))):
+        a = left[idx] if idx < len(left) else 0
+        b = right[idx] if idx < len(right) else 0
+        if a != b:
+            return 1 if a > b else -1
+    return 0
+
+
+def _extract_plugin_version(manifest: Dict[str, object], entry_path: Path) -> str:
+    version = manifest.get("version")
+    if isinstance(version, str) and version.strip():
+        return version.strip()
+    version_file = entry_path.parent / "VERSION"
+    if version_file.exists():
+        try:
+            text = version_file.read_text(encoding="utf-8").strip()
+            if text:
+                return text
+        except Exception:
+            pass
+    return "Unknown"
+
+
+def _manifest_compatibility(manifest: Dict[str, object]) -> Optional[str]:
+    minimum = manifest.get("min_sorter_version") or manifest.get("min_app_version")
+    maximum = manifest.get("max_sorter_version") or manifest.get("max_app_version")
+    if isinstance(minimum, str) and minimum.strip():
+        needed = minimum.strip()
+        if _compare_versions(APP_VERSION, needed) < 0:
+            return f"Requires sorter {needed}+"
+    if isinstance(maximum, str) and maximum.strip():
+        limit = maximum.strip()
+        if _compare_versions(APP_VERSION, limit) > 0:
+            return f"Incompatible beyond sorter {limit}"
+    return None
 
 
 class PluginAPI:
@@ -2188,6 +2431,7 @@ class PluginManager:
         self.boot_messages: List[Tuple[str, str]] = []
         self.runtime_messages: List[Tuple[str, str]] = []
         self.api = PluginAPI(self)
+        self.statuses: List[PluginStatus] = []
 
     def log_boot(self, message: str, level: str = "info"):
         self.boot_messages.append((level, message))
@@ -2207,6 +2451,7 @@ class PluginManager:
 
     def load(self):
         self.plugins_dir.mkdir(parents=True, exist_ok=True)
+        self.statuses.clear()
         for entry in sorted(self.plugins_dir.iterdir()):
             if entry.is_file() and entry.suffix == ".py":
                 manifest = {
@@ -2235,12 +2480,22 @@ class PluginManager:
                 self._load_mod(manifest, entry / manifest.get("entry", "plugin.py"))
 
     def _load_mod(self, manifest: Dict[str, object], entry_path: Path):
-        name = manifest.get("name") or entry_path.stem
+        name = str(manifest.get("name") or entry_path.stem)
+        folder = entry_path.parent.name if entry_path.parent != entry_path else entry_path.stem
+        version = _extract_plugin_version(manifest, entry_path)
+        compatibility = _manifest_compatibility(manifest)
+        if compatibility:
+            self.log_boot(f"Plugin '{name}' skipped: {compatibility}", level="warn")
+            self.statuses.append(PluginStatus(name, folder, version, "incompatible", compatibility))
+            return
         if not manifest.get("enabled", True):
             self.log_boot(f"Skipping disabled plugin: {name}")
+            self.statuses.append(PluginStatus(name, folder, version, "disabled", "Disabled"))
             return
         if not entry_path.exists():
+            message = f"Missing entry: {entry_path.name}"
             self.log_boot(f"Missing entry file for mod '{name}': {entry_path.name}", level="error")
+            self.statuses.append(PluginStatus(name, folder, version, "error", message))
             return
 
         module_name = manifest.get("import_name") or f"user_mod_{name}"
@@ -2253,20 +2508,27 @@ class PluginManager:
             sys.modules[module_name] = module
             spec.loader.exec_module(module)
         except Exception as exc:
+            message = str(exc)
             self.log_boot(f"Failed to import mod '{name}': {exc}", level="error")
+            self.statuses.append(PluginStatus(name, folder, version, "error", message))
             return
 
         callable_name = manifest.get("callable", "register")
         register = getattr(module, callable_name, None)
         if not callable(register):
+            message = f"Missing callable '{callable_name}'"
             self.log_boot(f"Plugin '{name}' missing callable '{callable_name}'", level="warn")
+            self.statuses.append(PluginStatus(name, folder, version, "error", message))
             return
         try:
             register(self.api)
         except Exception as exc:
+            message = str(exc)
             self.log_boot(f"Plugin '{name}' failed during register: {exc}", level="error")
+            self.statuses.append(PluginStatus(name, folder, version, "error", message))
             return
         self.log_boot(f"Loaded plugin: {name}")
+        self.statuses.append(PluginStatus(name, folder, version, "loaded", ""))
 
     def run_pre_scan(self, context: Dict):
         for hook in list(self.pre_scan_hooks):
@@ -2281,6 +2543,9 @@ class PluginManager:
                 hook(items, context, self.api)
             except Exception as exc:
                 self.log(f"Post-scan hook error ({hook.__module__}): {exc}", level="error")
+
+    def get_statuses(self) -> List[PluginStatus]:
+        return list(self.statuses)
 
 
 def load_user_plugins() -> PluginManager:
@@ -3134,6 +3399,9 @@ class Sims4ModSorterApp(tk.Tk):
 
         self.status_var = tk.StringVar(value="Ready")
         self.summary_var = tk.StringVar(value="No plan yet")
+        self._mod_status_window = None
+        self._status_trees: Dict[str, ttk.Treeview] = {}
+        self._status_summary_var = tk.StringVar(value="")
 
         self._build_style()
         self._build_ui()
@@ -3177,6 +3445,7 @@ class Sims4ModSorterApp(tk.Tk):
         ttk.Button(top, text="Scan", command=self.on_scan).pack(side="left", padx=4)
         ttk.Label(top, textvariable=self.status_var).pack(side="left", padx=12)
         ttk.Button(top, text="⚙", width=3, command=self.show_settings).pack(side="right")
+        ttk.Button(top, text="Mod Status", command=self.show_mod_status_popup).pack(side="right", padx=6)
         ttk.Button(top, text="Undo Last", command=self.on_undo).pack(side="right", padx=6)
 
         mid = ttk.Frame(root_container); mid.pack(fill="both", expand=True, padx=12, pady=(6, 8))
@@ -3313,20 +3582,6 @@ class Sims4ModSorterApp(tk.Tk):
         ttk.Label(scan, text="Ignore names containing (comma separated)").grid(row=4, column=0, sticky="w", pady=(10, 2))
         ttk.Entry(scan, textvariable=self.ignore_names_var).grid(row=5, column=0, sticky="ew")
         row += 1
-        if self.plugin_manager and self.plugin_manager.settings_sections:
-            plugin_section = ttk.Frame(container)
-            plugin_section.grid(row=row, column=0, sticky="ew", pady=(18, 0))
-            plugin_section.columnconfigure(0, weight=1)
-            ttk.Label(plugin_section, text="Plugins", font=("TkDefaultFont", 10, "bold")).grid(row=0, column=0, sticky="w")
-            for index, (title, builder) in enumerate(self.plugin_manager.settings_sections, start=1):
-                panel = ttk.LabelFrame(plugin_section, text=title)
-                panel.grid(row=index, column=0, sticky="ew", pady=(8 if index == 1 else 6, 0))
-                panel.columnconfigure(0, weight=1)
-                try:
-                    builder(self, panel, self.plugin_manager.api)
-                except Exception as exc:
-                    self.log(f"Plugin settings error: {exc}")
-            row += 1
         actions = ttk.Frame(container)
         actions.grid(row=row + 1, column=0, sticky="e", pady=(20, 0))
         ttk.Button(actions, text="Done", command=self.hide_settings).grid(row=0, column=0)
@@ -3358,6 +3613,98 @@ class Sims4ModSorterApp(tk.Tk):
             self.settings_sidebar.place_forget()
         if hasattr(self, "settings_scrim"):
             self.settings_scrim.place_forget()
+
+    def show_mod_status_popup(self) -> None:
+        if not self.plugin_manager:
+            messagebox.showinfo("Plugin Status", "No plugins loaded.", parent=self)
+            return
+        if self._mod_status_window and self._mod_status_window.winfo_exists():
+            self._populate_mod_status_popup()
+            self._mod_status_window.deiconify()
+            self._mod_status_window.lift()
+            return
+        palette = getattr(self, "_theme_cache", THEMES["Dark Mode"])
+        window = tk.Toplevel(self)
+        window.title("Plugin Status")
+        window.transient(self)
+        window.resizable(False, True)
+        window.configure(bg=palette.get("bg", "#111316"))
+        window.protocol("WM_DELETE_WINDOW", self._close_mod_status_popup)
+        self._mod_status_window = window
+
+        container = ttk.Frame(window, padding=16)
+        container.pack(fill="both", expand=True)
+
+        notebook = ttk.Notebook(container)
+        notebook.pack(fill="both", expand=True)
+
+        loaded_frame = ttk.Frame(notebook)
+        blocked_frame = ttk.Frame(notebook)
+        notebook.add(loaded_frame, text="Loaded")
+        notebook.add(blocked_frame, text="Blocked")
+
+        def create_tree(parent: ttk.Frame) -> ttk.Treeview:
+            frame = ttk.Frame(parent)
+            frame.pack(fill="both", expand=True)
+            tree = ttk.Treeview(frame, columns=("name", "folder", "version", "status", "message"), show="headings", height=8)
+            tree.heading("name", text="Name")
+            tree.heading("folder", text="Folder")
+            tree.heading("version", text="Version")
+            tree.heading("status", text="Status")
+            tree.heading("message", text="Details")
+            tree.column("name", width=220, anchor="w")
+            tree.column("folder", width=120, anchor="w")
+            tree.column("version", width=90, anchor="center")
+            tree.column("status", width=100, anchor="center")
+            tree.column("message", width=260, anchor="w")
+            tree.pack(side="left", fill="both", expand=True)
+            scroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+            tree.configure(yscrollcommand=scroll.set)
+            scroll.pack(side="right", fill="y")
+            return tree
+
+        loaded_tree = create_tree(loaded_frame)
+        blocked_tree = create_tree(blocked_frame)
+        self._status_trees = {"loaded": loaded_tree, "blocked": blocked_tree}
+
+        summary = ttk.Label(container, textvariable=self._status_summary_var)
+        summary.pack(anchor="w", pady=(12, 0))
+
+        self._populate_mod_status_popup()
+
+    def _close_mod_status_popup(self) -> None:
+        if self._mod_status_window and self._mod_status_window.winfo_exists():
+            self._mod_status_window.destroy()
+        self._mod_status_window = None
+        self._status_trees = {}
+
+    def _populate_mod_status_popup(self) -> None:
+        if not self.plugin_manager:
+            return
+        statuses = self.plugin_manager.get_statuses()
+        loaded = [status for status in statuses if status.status == "loaded"]
+        blocked = [status for status in statuses if status.status != "loaded"]
+        for key, entries in (("loaded", loaded), ("blocked", blocked)):
+            tree = self._status_trees.get(key)
+            if not tree or not tree.winfo_exists():
+                continue
+            tree.delete(*tree.get_children())
+            if not entries:
+                tree.insert("", "end", values=("No entries", "", "", "", ""))
+                continue
+            for status in entries:
+                tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        status.name,
+                        status.folder,
+                        status.version,
+                        status.status.capitalize(),
+                        status.message,
+                    ),
+                )
+        self._status_summary_var.set(f"Loaded: {len(loaded)} | Blocked: {len(blocked)}")
 
     def _build_theme_preview_widgets(self):
         if not hasattr(self, "theme_preview_container"):

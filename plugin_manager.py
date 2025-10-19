@@ -1,16 +1,27 @@
-"""CLI utility to manage Sims4ModSorter user plugins."""
+"""Interactive Plugin Manager for Sims4 Mod Sorter."""
 from __future__ import annotations
 
-import argparse
 import json
+import os
 import re
 import shutil
 import sys
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Iterable, List, Optional
 
-USER_PLUGINS_DIR = Path(__file__).resolve().parent / "user_plugins"
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+
+BASE_DIR = Path(__file__).resolve().parent
+USER_PLUGINS_DIR = BASE_DIR / "user_plugins"
+VERSION_FILE = BASE_DIR / "VERSION"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def sanitize_name(name: str) -> str:
@@ -23,12 +34,45 @@ def ensure_plugins_dir() -> None:
     USER_PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def read_version() -> str:
+    try:
+        return VERSION_FILE.read_text(encoding="utf-8").strip() or "0.0.0"
+    except Exception:
+        return "0.0.0"
+
+
+APP_VERSION = read_version()
+
+
+def parse_version(value: str) -> List[int]:
+    parts: List[int] = []
+    for token in re.split(r"[^0-9]+", value):
+        if not token:
+            continue
+        try:
+            parts.append(int(token))
+        except ValueError:
+            parts.append(0)
+    return parts or [0]
+
+
+def compare_versions(current: str, required: str) -> int:
+    left = parse_version(current)
+    right = parse_version(required)
+    for idx in range(max(len(left), len(right))):
+        a = left[idx] if idx < len(left) else 0
+        b = right[idx] if idx < len(right) else 0
+        if a != b:
+            return 1 if a > b else -1
+    return 0
+
+
 def load_manifest(plugin_dir: Path) -> Dict[str, object]:
     manifest_path = plugin_dir / "plugin.json"
     if manifest_path.exists():
         try:
-            with open(manifest_path, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
+            with open(manifest_path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
             if isinstance(data, dict):
                 return data
         except Exception:
@@ -43,8 +87,8 @@ def load_manifest(plugin_dir: Path) -> Dict[str, object]:
 
 def write_manifest(plugin_dir: Path, manifest: Dict[str, object]) -> None:
     manifest_path = plugin_dir / "plugin.json"
-    with open(manifest_path, "w", encoding="utf-8") as fh:
-        json.dump(manifest, fh, indent=2, sort_keys=True)
+    with open(manifest_path, "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2, sort_keys=True)
 
 
 def copy_directory(src: Path, dest: Path) -> None:
@@ -56,205 +100,462 @@ def copy_directory(src: Path, dest: Path) -> None:
             shutil.copy2(item, target)
 
 
-def import_plugin(args: argparse.Namespace) -> int:
-    source = Path(args.source).expanduser().resolve()
-    if not source.exists():
-        print(f"Source not found: {source}", file=sys.stderr)
-        return 1
-
-    ensure_plugins_dir()
-    plugin_name = args.name or source.stem
-    folder_name = sanitize_name(plugin_name)
-    dest_dir = USER_PLUGINS_DIR / folder_name
-
-    if dest_dir.exists():
-        if args.overwrite:
-            shutil.rmtree(dest_dir)
-        else:
-            print(f"Plugin '{folder_name}' already exists. Use --overwrite to replace it.", file=sys.stderr)
-            return 1
-
-    dest_dir.mkdir(parents=True, exist_ok=True)
-
-    entry = args.entry
-    callable_name = args.callable
-
-    if source.is_file() and zipfile.is_zipfile(source):
-        with zipfile.ZipFile(source, "r") as zf:
-            zf.extractall(dest_dir)
-        if not entry:
-            potential = dest_dir / "plugin.py"
-            if potential.exists():
-                entry = "plugin.py"
-    elif source.is_file():
-        entry = entry or source.name
-        target_path = dest_dir / entry
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target_path)
-    elif source.is_dir():
-        copy_directory(source, dest_dir)
-        if not entry:
-            potential = dest_dir / "plugin.py"
-            if potential.exists():
-                entry = "plugin.py"
-    else:
-        print(f"Unsupported source type: {source}", file=sys.stderr)
-        shutil.rmtree(dest_dir, ignore_errors=True)
-        return 1
-
-    entry = entry or "plugin.py"
-    if not (dest_dir / entry).exists():
-        print(f"Entry file '{entry}' not found inside installed plugin. Adjust --entry.", file=sys.stderr)
-        shutil.rmtree(dest_dir, ignore_errors=True)
-        return 1
-
-    manifest = {
-        "name": plugin_name,
-        "entry": entry,
-        "enabled": not args.disable,
-        "callable": callable_name,
-    }
-    write_manifest(dest_dir, manifest)
-    status = "disabled" if args.disable else "enabled"
-    print(f"Imported plugin '{plugin_name}' into {dest_dir.name} ({status}).")
-    return 0
+def determine_version(manifest: Dict[str, object], module_path: Path) -> str:
+    version = manifest.get("version")
+    if isinstance(version, str) and version.strip():
+        return version.strip()
+    module_parent = module_path.parent
+    version_file = module_parent / "VERSION"
+    if version_file.exists():
+        try:
+            value = version_file.read_text(encoding="utf-8").strip()
+            if value:
+                return value
+        except Exception:
+            pass
+    return "Unknown"
 
 
-def list_plugins(_args: argparse.Namespace) -> int:
-    ensure_plugins_dir()
-    entries = [d for d in USER_PLUGINS_DIR.iterdir() if d.is_dir()]
-    if not entries:
-        print("No plugins installed.")
-        return 0
-
-    print(f"Plugins in {USER_PLUGINS_DIR}:")
-    for plugin_dir in sorted(entries, key=lambda d: d.name.lower()):
-        manifest = load_manifest(plugin_dir)
-        status = "enabled" if manifest.get("enabled", True) else "disabled"
-        entry = manifest.get("entry", "plugin.py")
-        print(f"- {manifest.get('name', plugin_dir.name)} [{status}] -> {plugin_dir.name}/{entry}")
-    return 0
-
-
-def find_plugin(identifier: str) -> Optional[Path]:
-    ensure_plugins_dir()
-    candidate = USER_PLUGINS_DIR / sanitize_name(identifier)
-    if candidate.exists():
-        return candidate
-    identifier_lower = identifier.lower()
-    for plugin_dir in USER_PLUGINS_DIR.iterdir():
-        if not plugin_dir.is_dir():
-            continue
-        manifest = load_manifest(plugin_dir)
-        name = str(manifest.get("name", ""))
-        if name.lower() == identifier_lower:
-            return plugin_dir
+def compatibility_message(manifest: Dict[str, object]) -> Optional[str]:
+    minimum = manifest.get("min_sorter_version") or manifest.get("min_app_version")
+    maximum = manifest.get("max_sorter_version") or manifest.get("max_app_version")
+    if isinstance(minimum, str) and minimum.strip():
+        if compare_versions(APP_VERSION, minimum.strip()) < 0:
+            return f"Requires sorter {minimum.strip()} or newer"
+    if isinstance(maximum, str) and maximum.strip():
+        if compare_versions(APP_VERSION, maximum.strip()) > 0:
+            return f"Incompatible with sorter newer than {maximum.strip()}"
     return None
 
 
-def set_enabled(identifier: str, enabled: bool) -> int:
-    plugin_dir = find_plugin(identifier)
-    if not plugin_dir:
-        print(f"Plugin '{identifier}' not found.", file=sys.stderr)
-        return 1
-    manifest = load_manifest(plugin_dir)
-    manifest["enabled"] = enabled
-    write_manifest(plugin_dir, manifest)
-    state = "enabled" if enabled else "disabled"
-    print(f"Plugin '{manifest.get('name', plugin_dir.name)}' is now {state}.")
-    return 0
+def describe_source(path: Path) -> str:
+    if path.is_file():
+        return path.name
+    return path.name + "/"
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Manage Sims4ModSorter user plugins.")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    imp = subparsers.add_parser("import", help="Import a plugin into the user_plugins directory")
-    imp.add_argument("source", help="Path to a .py file, directory, or .zip archive")
-    imp.add_argument("--name", help="Display name for the plugin")
-    imp.add_argument("--entry", help="Relative entry file inside the plugin", default=None)
-    imp.add_argument("--callable", help="Registration callable name", default="register")
-    imp.add_argument("--disable", action="store_true", help="Import the plugin but leave it disabled")
-    imp.add_argument("--overwrite", action="store_true", help="Replace an existing plugin with the same name")
-    imp.set_defaults(func=import_plugin)
-
-    ls = subparsers.add_parser("list", help="List installed plugins")
-    ls.set_defaults(func=list_plugins)
-
-    enable = subparsers.add_parser("enable", help="Enable a plugin")
-    enable.add_argument("identifier", help="Folder name or plugin display name")
-    enable.set_defaults(func=lambda args: set_enabled(args.identifier, True))
-
-    disable = subparsers.add_parser("disable", help="Disable a plugin")
-    disable.add_argument("identifier", help="Folder name or plugin display name")
-    disable.set_defaults(func=lambda args: set_enabled(args.identifier, False))
-
-    return parser
+# ---------------------------------------------------------------------------
+# Data models
+# ---------------------------------------------------------------------------
 
 
-def interactive_main() -> int:
-    ensure_plugins_dir()
-    print("Sims4 Mod Sorter - Plugin Manager")
-    print("Manage user plugins without needing command-line arguments.")
-    while True:
-        print("\nOptions:")
-        print("  1) Import plugin")
-        print("  2) List plugins")
-        print("  3) Enable plugin")
-        print("  4) Disable plugin")
-        print("  5) Quit")
-        try:
-            choice = input("Select an option: ").strip()
-        except EOFError:
-            print()
-            return 0
-        if choice == "1":
-            source = input("Path to .py/.zip/directory: ").strip()
-            name = input("Display name (optional): ").strip() or None
-            entry = input("Entry file (optional): ").strip() or None
-            callable_name = input("Callable (default register): ").strip() or "register"
-            overwrite = input("Overwrite existing? [y/N]: ").strip().lower() == "y"
-            disable = input("Import disabled? [y/N]: ").strip().lower() == "y"
-            args = argparse.Namespace(
-                source=source,
-                name=name,
-                entry=entry,
-                callable=callable_name,
-                overwrite=overwrite,
-                disable=disable,
+@dataclass
+class PluginEntry:
+    name: str
+    folder: str
+    version: str
+    enabled: bool
+    source: Path
+    status: str
+    message: str = ""
+
+
+class PluginLibrary:
+    """Filesystem operations for plugins."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        ensure_plugins_dir()
+
+    def refresh(self) -> List[PluginEntry]:
+        entries: List[PluginEntry] = []
+        for plugin_dir in sorted(self.root.iterdir(), key=lambda p: p.name.lower()):
+            if not plugin_dir.is_dir():
+                continue
+            manifest = load_manifest(plugin_dir)
+            entry_path = plugin_dir / str(manifest.get("entry", "plugin.py"))
+            name = str(manifest.get("name") or plugin_dir.name)
+            enabled = bool(manifest.get("enabled", True))
+            version = determine_version(manifest, entry_path)
+            status = "Enabled" if enabled else "Disabled"
+            message = ""
+            compat = compatibility_message(manifest)
+            if compat:
+                status = "Blocked"
+                message = compat
+            elif not entry_path.exists():
+                status = "Error"
+                message = f"Missing entry: {entry_path.name}"
+            entries.append(
+                PluginEntry(
+                    name=name,
+                    folder=plugin_dir.name,
+                    version=version,
+                    enabled=enabled,
+                    source=plugin_dir,
+                    status=status,
+                    message=message,
+                )
             )
-            import_plugin(args)
-        elif choice == "2":
-            list_plugins(argparse.Namespace())
-        elif choice == "3":
-            identifier = input("Folder name or display name: ").strip()
-            if identifier:
-                set_enabled(identifier, True)
-        elif choice == "4":
-            identifier = input("Folder name or display name: ").strip()
-            if identifier:
-                set_enabled(identifier, False)
-        elif choice == "5" or choice.lower() in {"q", "quit", "exit"}:
-            return 0
+        return entries
+
+    # Import helpers -----------------------------------------------------
+    def import_from_source(
+        self,
+        source: Path,
+        *,
+        name: Optional[str] = None,
+        entry: Optional[str] = None,
+        callable_name: str = "register",
+        disable: bool = False,
+        overwrite: bool = False,
+    ) -> PluginEntry:
+        if not source.exists():
+            raise FileNotFoundError(str(source))
+        ensure_plugins_dir()
+        plugin_name = name or source.stem
+        folder_name = sanitize_name(plugin_name)
+        dest_dir = self.root / folder_name
+        if dest_dir.exists():
+            if overwrite:
+                shutil.rmtree(dest_dir)
+            else:
+                raise FileExistsError(f"Plugin '{folder_name}' already exists")
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        chosen_entry = entry
+        if source.is_file() and zipfile.is_zipfile(source):
+            with zipfile.ZipFile(source, "r") as archive:
+                archive.extractall(dest_dir)
+            if not chosen_entry:
+                default_entry = dest_dir / "plugin.py"
+                if default_entry.exists():
+                    chosen_entry = "plugin.py"
+        elif source.is_file():
+            chosen_entry = chosen_entry or source.name
+            target = dest_dir / chosen_entry
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        elif source.is_dir():
+            copy_directory(source, dest_dir)
+            if not chosen_entry:
+                default_entry = dest_dir / "plugin.py"
+                if default_entry.exists():
+                    chosen_entry = "plugin.py"
         else:
-            print("Invalid selection. Choose 1-5.")
+            shutil.rmtree(dest_dir, ignore_errors=True)
+            raise ValueError(f"Unsupported source type: {source}")
+        chosen_entry = chosen_entry or "plugin.py"
+        if not (dest_dir / chosen_entry).exists():
+            shutil.rmtree(dest_dir, ignore_errors=True)
+            raise FileNotFoundError(f"Entry '{chosen_entry}' not found inside plugin")
+        manifest = {
+            "name": plugin_name,
+            "entry": chosen_entry,
+            "callable": callable_name,
+            "enabled": not disable,
+        }
+        write_manifest(dest_dir, manifest)
+        version = determine_version(manifest, dest_dir / chosen_entry)
+        status = "Enabled" if manifest["enabled"] else "Disabled"
+        return PluginEntry(
+            name=plugin_name,
+            folder=folder_name,
+            version=version,
+            enabled=manifest["enabled"],
+            source=dest_dir,
+            status=status,
+            message="Imported",
+        )
+
+    def set_enabled(self, identifier: str, enabled: bool) -> PluginEntry:
+        plugin_dir = self._resolve(identifier)
+        manifest = load_manifest(plugin_dir)
+        manifest["enabled"] = enabled
+        write_manifest(plugin_dir, manifest)
+        version = determine_version(manifest, plugin_dir / str(manifest.get("entry", "plugin.py")))
+        status = "Enabled" if enabled else "Disabled"
+        return PluginEntry(
+            name=str(manifest.get("name") or plugin_dir.name),
+            folder=plugin_dir.name,
+            version=version,
+            enabled=enabled,
+            source=plugin_dir,
+            status=status,
+            message="",
+        )
+
+    def remove(self, identifier: str) -> None:
+        plugin_dir = self._resolve(identifier)
+        shutil.rmtree(plugin_dir, ignore_errors=True)
+
+    def open_folder(self) -> None:
+        ensure_plugins_dir()
+        if sys.platform.startswith("win"):
+            os.startfile(self.root)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            os.system(f"open '{self.root}'")
+        else:
+            os.system(f"xdg-open '{self.root}' >/dev/null 2>&1 &")
+
+    # Internal -----------------------------------------------------------
+    def _resolve(self, identifier: str) -> Path:
+        folder = sanitize_name(identifier)
+        candidate = self.root / folder
+        if candidate.exists():
+            return candidate
+        target_lower = identifier.lower()
+        for entry in self.root.iterdir():
+            if not entry.is_dir():
+                continue
+            manifest = load_manifest(entry)
+            name = str(manifest.get("name") or entry.name).lower()
+            if name == target_lower:
+                return entry
+        raise FileNotFoundError(identifier)
 
 
-def main(argv: Optional[list[str]] = None) -> int:
-    parser = build_parser()
-    if argv is None:
-        argv = sys.argv[1:]
-    if not argv:
-        parser.print_help()
-        print()
+# ---------------------------------------------------------------------------
+# Tkinter UI
+# ---------------------------------------------------------------------------
+
+
+class PluginManagerApp(tk.Tk):
+    def __init__(self) -> None:
+        super().__init__()
+        self.title("Plugin Manager")
+        self.geometry("760x520")
+        self.minsize(680, 440)
+        self.configure(bg="#1f1f24")
+
+        self.library = PluginLibrary(USER_PLUGINS_DIR)
+        self.entries: List[PluginEntry] = []
+        self.status_var = tk.StringVar(value="Ready")
+
+        self._build_style()
+        self._build_ui()
+        self.refresh()
+
+    # UI construction ---------------------------------------------------
+    def _build_style(self) -> None:
+        style = ttk.Style()
         try:
-            return interactive_main()
-        except KeyboardInterrupt:
-            print()
-            return 0
-    args = parser.parse_args(argv)
-    return args.func(args)
+            style.theme_use("clam")
+        except Exception:
+            pass
+        style.configure("TFrame", background="#1f1f24")
+        style.configure("TLabel", background="#1f1f24", foreground="#f2f2f7")
+        style.configure("TButton", background="#2d2d34", foreground="#f2f2f7", padding=8)
+        style.map("TButton", background=[("active", "#3b3b44")])
+        style.configure(
+            "Treeview",
+            background="#2a2a31",
+            foreground="#f2f2f7",
+            fieldbackground="#2a2a31",
+            rowheight=28,
+            bordercolor="#1f1f24",
+            borderwidth=0,
+        )
+        style.map("Treeview", background=[("selected", "#454552")])
+        style.configure("Treeview.Heading", background="#1f1f24", foreground="#f2f2f7")
+        style.configure("Status.TLabel", background="#1f1f24", foreground="#9d9da6")
+
+    def _build_ui(self) -> None:
+        root = ttk.Frame(self, padding=16)
+        root.pack(fill="both", expand=True)
+
+        header = ttk.Frame(root)
+        header.pack(fill="x")
+        ttk.Label(header, text="Installed Plugins", font=("Segoe UI", 14, "bold")).pack(side="left")
+        ttk.Button(header, text="Open Folder", command=self.on_open_folder).pack(side="right")
+
+        toolbar = ttk.Frame(root)
+        toolbar.pack(fill="x", pady=(12, 8))
+        ttk.Button(toolbar, text="Import File", command=self.on_import_file).pack(side="left")
+        ttk.Button(toolbar, text="Import Folder", command=self.on_import_folder).pack(side="left", padx=(8, 0))
+        ttk.Button(toolbar, text="Refresh", command=self.refresh).pack(side="left", padx=(8, 0))
+        self.btn_enable = ttk.Button(toolbar, text="Enable", command=lambda: self.on_toggle(True))
+        self.btn_enable.pack(side="left", padx=(24, 0))
+        self.btn_disable = ttk.Button(toolbar, text="Disable", command=lambda: self.on_toggle(False))
+        self.btn_disable.pack(side="left", padx=(8, 0))
+        ttk.Button(toolbar, text="Remove", command=self.on_remove).pack(side="left", padx=(8, 0))
+
+        columns = ("name", "folder", "version", "status", "message")
+        self.tree = ttk.Treeview(root, columns=columns, show="headings")
+        self.tree.heading("name", text="Name")
+        self.tree.heading("folder", text="Folder")
+        self.tree.heading("version", text="Version")
+        self.tree.heading("status", text="Status")
+        self.tree.heading("message", text="Details")
+        self.tree.column("name", width=200, anchor="w")
+        self.tree.column("folder", width=120, anchor="w")
+        self.tree.column("version", width=100, anchor="center")
+        self.tree.column("status", width=100, anchor="center")
+        self.tree.column("message", width=240, anchor="w")
+        self.tree.pack(fill="both", expand=True)
+        self.tree.bind("<<TreeviewSelect>>", lambda _e: self._update_buttons())
+
+        status_bar = ttk.Frame(root, padding=(0, 12, 0, 0))
+        status_bar.pack(fill="x")
+        ttk.Label(status_bar, textvariable=self.status_var, style="Status.TLabel").pack(side="left")
+
+    # Actions ------------------------------------------------------------
+    def refresh(self) -> None:
+        try:
+            self.entries = self.library.refresh()
+            self._reload_tree()
+            self.status_var.set(f"Loaded {len(self.entries)} plugin(s)")
+        except Exception as exc:
+            messagebox.showerror("Refresh failed", str(exc), parent=self)
+            self.status_var.set("Refresh failed")
+        self._update_buttons()
+
+    def on_open_folder(self) -> None:
+        try:
+            self.library.open_folder()
+        except Exception as exc:
+            messagebox.showerror("Unable to open", str(exc), parent=self)
+
+    def on_import_file(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Import Plugin",
+            filetypes=[
+                ("Python plugin", "*.py"),
+                ("ZIP archive", "*.zip"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not path:
+            return
+        self._handle_import(Path(path))
+
+    def on_import_folder(self) -> None:
+        path = filedialog.askdirectory(title="Import Plugin Folder")
+        if not path:
+            return
+        self._handle_import(Path(path))
+
+    def _handle_import(self, path: Path) -> None:
+        dialog = ImportDialog(self, default_name=path.stem)
+        self.wait_window(dialog)
+        if not dialog.result:
+            return
+        name, entry, callable_name, disable, overwrite = dialog.result
+        try:
+            entry_obj = self.library.import_from_source(
+                path,
+                name=name or None,
+                entry=entry or None,
+                callable_name=callable_name or "register",
+                disable=disable,
+                overwrite=overwrite,
+            )
+        except Exception as exc:
+            messagebox.showerror("Import failed", str(exc), parent=self)
+            return
+        self.refresh()
+        self.status_var.set(f"Imported {entry_obj.name}")
+
+    def on_toggle(self, enabled: bool) -> None:
+        identifier = self._selected_folder()
+        if not identifier:
+            return
+        try:
+            entry = self.library.set_enabled(identifier, enabled)
+        except Exception as exc:
+            messagebox.showerror("Update failed", str(exc), parent=self)
+            return
+        self.refresh()
+        state = "enabled" if enabled else "disabled"
+        self.status_var.set(f"Plugin {entry.name} {state}")
+
+    def on_remove(self) -> None:
+        identifier = self._selected_folder()
+        if not identifier:
+            return
+        entry = next((e for e in self.entries if e.folder == identifier), None)
+        name = entry.name if entry else identifier
+        if messagebox.askyesno("Remove Plugin", f"Remove '{name}'?", parent=self):
+            try:
+                self.library.remove(identifier)
+            except Exception as exc:
+                messagebox.showerror("Remove failed", str(exc), parent=self)
+                return
+            self.refresh()
+            self.status_var.set(f"Removed {name}")
+
+    # Helpers ------------------------------------------------------------
+    def _reload_tree(self) -> None:
+        self.tree.delete(*self.tree.get_children())
+        for entry in self.entries:
+            values = (entry.name, entry.folder, entry.version, entry.status, entry.message)
+            self.tree.insert("", "end", iid=entry.folder, values=values)
+
+    def _selected_folder(self) -> Optional[str]:
+        selection = self.tree.selection()
+        if not selection:
+            return None
+        return selection[0]
+
+    def _update_buttons(self) -> None:
+        folder = self._selected_folder()
+        if not folder:
+            self.btn_enable.state(["disabled"])
+            self.btn_disable.state(["disabled"])
+            return
+        entry = next((e for e in self.entries if e.folder == folder), None)
+        if entry and entry.enabled:
+            self.btn_enable.state(["disabled"])
+            self.btn_disable.state(["!disabled"])
+        else:
+            self.btn_enable.state(["!disabled"])
+            self.btn_disable.state(["disabled"])
+
+
+class ImportDialog(tk.Toplevel):
+    def __init__(self, parent: PluginManagerApp, default_name: str) -> None:
+        super().__init__(parent)
+        self.title("Import Plugin")
+        self.configure(bg="#1f1f24")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self.result: Optional[tuple[str, str, str, bool, bool]] = None
+
+        ttk.Frame(self, padding=16).pack(fill="both", expand=True)
+        container = self.children[list(self.children.keys())[0]]
+
+        ttk.Label(container, text="Plugin name:").grid(row=0, column=0, sticky="w")
+        self.name_var = tk.StringVar(value=default_name)
+        ttk.Entry(container, textvariable=self.name_var).grid(row=0, column=1, sticky="ew", padx=(8, 0))
+
+        ttk.Label(container, text="Entry file (optional):").grid(row=1, column=0, sticky="w", pady=(10, 0))
+        self.entry_var = tk.StringVar()
+        ttk.Entry(container, textvariable=self.entry_var).grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(10, 0))
+
+        ttk.Label(container, text="Callable (default register):").grid(row=2, column=0, sticky="w", pady=(10, 0))
+        self.callable_var = tk.StringVar(value="register")
+        ttk.Entry(container, textvariable=self.callable_var).grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(10, 0))
+
+        self.disable_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(container, text="Import disabled", variable=self.disable_var).grid(row=3, column=1, sticky="w", pady=(12, 0))
+
+        self.overwrite_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(container, text="Overwrite if exists", variable=self.overwrite_var).grid(row=4, column=1, sticky="w", pady=(6, 0))
+
+        buttons = ttk.Frame(container)
+        buttons.grid(row=5, column=0, columnspan=2, sticky="e", pady=(18, 0))
+        ttk.Button(buttons, text="Cancel", command=self.destroy).pack(side="right")
+        ttk.Button(buttons, text="Import", command=self._on_accept).pack(side="right", padx=(0, 8))
+
+        container.columnconfigure(1, weight=1)
+        self.bind("<Return>", lambda _e: self._on_accept())
+        self.bind("<Escape>", lambda _e: self.destroy())
+
+    def _on_accept(self) -> None:
+        self.result = (
+            self.name_var.get().strip(),
+            self.entry_var.get().strip(),
+            self.callable_var.get().strip(),
+            self.disable_var.get(),
+            self.overwrite_var.get(),
+        )
+        self.destroy()
+
+
+def main() -> None:
+    app = PluginManagerApp()
+    app.mainloop()
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

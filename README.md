@@ -43,26 +43,22 @@ Sims4ModSorter now exposes a lightweight plugin system. Drop Python-based plugin
 
 Each plugin directory should contain a `plugin.json` manifest (created automatically by the helper script below) that describes the entry script, registration callable, and whether the plugin is enabled.
 
-### Managing plugins with `plugin_manager.py`
+### Managing plugins with the Plugin Manager
 
-Use the bundled CLI script to import, enable, or disable plugins safely without editing manifests by hand:
+Launch the dedicated Plugin Manager UI to import, enable, or disable plugins without editing manifests by hand:
 
 ```bash
-# List installed plugins
-python plugin_manager.py list
-
-# Import a standalone script (entry callable defaults to `register`)
-python plugin_manager.py import path/to/my_plugin.py --name "My Plugin"
-
-# Import a zipped plugin but keep it disabled until you have tested it
-python plugin_manager.py import path/to/my_plugin.zip --disable
-
-# Enable or disable a plugin by name or folder
-python plugin_manager.py enable "My Plugin"
-python plugin_manager.py disable my_plugin
+python plugin_manager.py
 ```
 
-Imported plugins live in `user_plugins/<folder>`. Disabling a plugin toggles the `enabled` flag in its manifest so that the sorter loads without executing the extension, keeping your main code safe from experimental additions.
+The window lists every plugin in `user_plugins/`, highlights whether it is enabled, and shows any compatibility warnings (for example when a plugin requires a newer version of the sorter). Use the toolbar buttons to:
+
+* **Import File** – add a single `.py` file or zipped package as a plugin.
+* **Import Folder** – register an unpacked plugin directory.
+* **Enable/Disable** – toggle the selected plugin.
+* **Remove** – delete the plugin’s folder from disk.
+
+The status bar confirms actions and the **Open Folder** button jumps straight to the plugin directory so you can make manual edits if required.
 
 ### Included example plugin
 
@@ -81,6 +77,4 @@ The `user_plugins/dependency_tracker` plugin is bundled and enabled by default. 
 * During scans it inspects `.package` and `.ts4script` files for phrases that match the local `known_dependencies.json` database. Recognised mods receive a ✅ icon when their dependencies are present or ⚠️ when something is missing.
 * Hover the icon to view a tooltip describing which frameworks were found or missing (for example, `Requires: UI Cheats Extension: MC Command Center (found), TS4 Script Loader (missing)`).
 * The Export Plan JSON includes `dependency_status` and `dependency_detail` keys for each entry so external tools can audit reports.
-* Open **Settings → Plugins → Dependency Tracker** to toggle tracking or reload the dependency list after editing `known_dependencies.json`. Reloading runs the analysis again without forcing a rescan.
-
 The plugin ships with common Sims 4 frameworks such as **MC Command Center**, **XML Injector**, **Basemental Drugs**, and **TS4 Script Loader**, but you can expand the JSON file with your own dependencies whenever you discover a new plugin relationship.
