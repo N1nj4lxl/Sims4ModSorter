@@ -1,3 +1,8 @@
+"""Sims4 Mod Sorter
+
+Refined single-file application with a cleaned scan pipeline, stable plugin hooks,
+thread-safe Tk interactions, and offline heuristics. Python 3.10+ only.
+"""
 from __future__ import annotations
 
 import importlib.util
@@ -37,6 +42,10 @@ class FileItem:
     target_folder: str = "Unsorted"
     bundle: str = ""
     meta_tags: str = ""
+    dependency_status: str = ""
+    dependency_detail: str = ""
+    extras: Dict[str, str] = field(default_factory=dict)
+    tooltips: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -261,6 +270,14 @@ class PluginMessageBus:
         return messages
 
 
+@dataclass(slots=True)
+class PluginColumn:
+    column_id: str
+    heading: str
+    width: int
+    anchor: str
+
+
 class ModAPI:
     """API exposed to user mods."""
 
@@ -286,6 +303,26 @@ class ModAPI:
     def log(self, message: str, level: str = "info") -> None:
         self._manager.message_bus.post("runtime", level, message)
 
+    @property
+    def app(self) -> Optional["Sims4ModSorterApp"]:
+        return getattr(self._manager, "app", None)
+
+    def register_column(self, column_id: str, heading: str, *, width: int = 80, anchor: str = "center") -> None:
+        if not column_id or not heading:
+            return
+        self._manager.register_column(column_id, heading, width, anchor)
+
+    def register_settings_section(
+        self, title: str, builder: Callable[["Sims4ModSorterApp", ttk.Frame, "ModAPI"], None]
+    ) -> None:
+        if callable(builder) and title:
+            self._manager.settings_sections.append((title, builder))
+
+    def request_refresh(self) -> None:
+        app = self.app
+        if app is not None:
+            app.schedule_refresh()
+
 
 class PluginManager:
     def __init__(self, mods_dir: Path, message_bus: Optional[PluginMessageBus] = None) -> None:
@@ -294,6 +331,13 @@ class PluginManager:
         self.post_scan_hooks: List[Callable[[List[FileItem], Dict[str, object], ModAPI], None]] = []
         self.message_bus = message_bus or PluginMessageBus()
         self.api = ModAPI(self)
+        self.columns: Dict[str, PluginColumn] = {}
+        self.column_order: List[str] = []
+        self.settings_sections: List[Tuple[str, Callable[["Sims4ModSorterApp", ttk.Frame, ModAPI], None]]] = []
+        self.app: Optional["Sims4ModSorterApp"] = None
+
+    def attach_app(self, app: "Sims4ModSorterApp") -> None:
+        self.app = app
 
     def load(self) -> None:
         self.mods_dir.mkdir(parents=True, exist_ok=True)
@@ -360,6 +404,18 @@ class PluginManager:
                 hook(items, context, self.api)
             except Exception as exc:
                 self.message_bus.post("runtime", "error", f"Post-scan hook error: {exc}")
+
+    def register_column(self, column_id: str, heading: str, width: int, anchor: str) -> None:
+        normalized = column_id.strip()
+        if not normalized:
+            return
+        if normalized in self.columns:
+            return
+        self.columns[normalized] = PluginColumn(normalized, heading, width, anchor)
+        self.column_order.append(normalized)
+
+    def get_columns(self) -> List[PluginColumn]:
+        return [self.columns[column_id] for column_id in self.column_order if column_id in self.columns]
 
 
 def load_user_mods() -> PluginManager:
@@ -930,12 +986,22 @@ class Sims4ModSorterApp(tk.Tk):
         self.items_by_path: Dict[str, FileItem] = {}
         self.scan_errors: List[str] = []
         self.plugin_manager = load_user_mods()
+        self._plugin_columns: List[PluginColumn] = []
+        if self.plugin_manager:
+            self.plugin_manager.attach_app(self)
+            self._plugin_columns = self.plugin_manager.get_columns()
 
         self.status_var = tk.StringVar(value="Ready")
         self.summary_var = tk.StringVar(value="No plan yet")
 
         self._ui_queue: "queue.Queue[Callable[[], None]]" = queue.Queue()
         self._theme_cache: Dict[str, str] = {}
+        self._column_order: List[str] = []
+        self._tooltip_payload: Dict[str, Dict[str, str]] = {}
+        self._tooltip_window: Optional[tk.Toplevel] = None
+        self._tooltip_label: Optional[tk.Label] = None
+        self._tooltip_after: Optional[str] = None
+        self._tooltip_target: Tuple[str, str] = ("", "")
 
         self._build_style()
         self._build_ui()
@@ -982,6 +1048,8 @@ class Sims4ModSorterApp(tk.Tk):
         self.configure(bg=palette["bg"])
 
     def _build_ui(self) -> None:
+        if self.plugin_manager:
+            self._plugin_columns = self.plugin_manager.get_columns()
         root_container = ttk.Frame(self)
         root_container.pack(fill="both", expand=True)
 
@@ -1006,6 +1074,14 @@ class Sims4ModSorterApp(tk.Tk):
 
         left = ttk.Frame(mid)
         left.pack(side="left", fill="both", expand=True)
+        base_columns = ["inc", "rel", "name", "size", "type", "target", "conf", "linked", "meta", "notes"]
+        columns = list(base_columns)
+        if self._plugin_columns:
+            insert_at = columns.index("linked")
+            for plugin_column in self._plugin_columns:
+                columns.insert(insert_at, plugin_column.column_id)
+                insert_at += 1
+        self._column_order = columns
         columns = ("inc", "rel", "name", "size", "type", "target", "conf", "linked", "meta", "notes")
         self.tree = ttk.Treeview(left, columns=columns, show="headings", selectmode="extended")
         headings = {
@@ -1020,6 +1096,10 @@ class Sims4ModSorterApp(tk.Tk):
             "meta": "Tags",
             "notes": "Notes",
         }
+        for plugin_column in self._plugin_columns:
+            headings[plugin_column.column_id] = plugin_column.heading
+        for column in columns:
+            self.tree.heading(column, text=headings.get(column, column))
         for column in columns:
             self.tree.heading(column, text=headings[column])
         self.tree.column("inc", width=40, anchor="center")
@@ -1029,6 +1109,8 @@ class Sims4ModSorterApp(tk.Tk):
         self.tree.column("type", width=170)
         self.tree.column("target", width=200)
         self.tree.column("conf", width=60, anchor="e")
+        for plugin_column in self._plugin_columns:
+            self.tree.column(plugin_column.column_id, width=plugin_column.width, anchor=plugin_column.anchor, stretch=False)
         self.tree.column("linked", width=80, anchor="center")
         self.tree.column("meta", width=180)
         self.tree.column("notes", width=260)
@@ -1082,6 +1164,8 @@ class Sims4ModSorterApp(tk.Tk):
 
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
         self.tree.bind("<Double-1>", self.on_double_click)
+        self.tree.bind("<Motion>", self._on_tree_motion)
+        self.tree.bind("<Leave>", lambda _e: self._hide_tooltip())
 
     def _build_settings_overlay(self) -> None:
         self.overlay = tk.Frame(self, bg=self._theme_cache.get("sel", "#2A2F3A"))
@@ -1098,8 +1182,9 @@ class Sims4ModSorterApp(tk.Tk):
         ttk.Label(header, text="Settings", font=("TkDefaultFont", 12, "bold")).grid(row=0, column=0, sticky="w")
         ttk.Button(header, text="Close", command=self.hide_settings, width=7).grid(row=0, column=1, sticky="e")
 
+        next_row = 1
         theme_section = ttk.LabelFrame(card, text="Themes")
-        theme_section.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        theme_section.grid(row=next_row, column=0, sticky="ew", pady=(12, 0))
         theme_section.columnconfigure(0, weight=1)
 
         theme_controls = ttk.Frame(theme_section)

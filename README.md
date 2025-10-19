@@ -73,3 +73,14 @@ The repository ships with an enabled sample plugin in `user_mods/example_theme_m
 * Annotate `.package` files that contain "preview" in their filename so they are easy to review in the results grid.
 
 Launch the sorter normally (`python Sims4ModSorter.py`) and you will see log entries confirming that the example mod loaded. You can disable or remove it later with `python mod_manager.py disable example_theme_mod` once you are ready to build your own plugins.
+
+### Dependency Tracker plugin
+
+The `user_mods/dependency_tracker` plugin is bundled and enabled by default. It adds a **Deps** column to the results table, an export payload, and settings controls that help you stay on top of framework requirements:
+
+* During scans it inspects `.package` and `.ts4script` files for phrases that match the local `known_dependencies.json` database. Recognised mods receive a ✅ icon when their dependencies are present or ⚠️ when something is missing.
+* Hover the icon to view a tooltip describing which frameworks were found or missing (for example, `Requires: UI Cheats Extension: MC Command Center (found), TS4 Script Loader (missing)`).
+* The Export Plan JSON includes `dependency_status` and `dependency_detail` keys for each entry so external tools can audit reports.
+* Open **Settings → Plugins → Dependency Tracker** to toggle tracking or reload the dependency list after editing `known_dependencies.json`. Reloading runs the analysis again without forcing a rescan.
+
+The plugin ships with common Sims 4 frameworks such as **MC Command Center**, **XML Injector**, **Basemental Drugs**, and **TS4 Script Loader**, but you can expand the JSON file with your own dependencies whenever you discover a new mod relationship.
