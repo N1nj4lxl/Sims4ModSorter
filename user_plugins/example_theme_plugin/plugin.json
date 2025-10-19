@@ -1,6 +1,6 @@
 {
   "name": "Example Theme & Scan Tweaks",
-  "entry": "mod.py",
+  "entry": "plugin.py",
   "enabled": true,
   "callable": "register"
 }

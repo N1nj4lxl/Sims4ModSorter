@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import filedialog, ttk
 
 
@@ -245,11 +246,34 @@ THEMES: Dict[str, Dict[str, str]] = {
     "Pink Holiday": {"bg": "#1a1216", "fg": "#FFE7F3", "alt": "#23171e", "accent": "#FF5BA6", "sel": "#3a1f2c"},
 }
 
+
+# ---------------------------------------------------------------------------
+# UI helpers
+# ---------------------------------------------------------------------------
+
+
+def _scrim_color(bg_hex: str, *, strength: float = 0.45) -> str:
+    """Blend the provided colour with black to simulate a translucent scrim."""
+
+    value = bg_hex.strip().lstrip("#")
+    if len(value) != 6:
+        return "#000000"
+    try:
+        r = int(value[0:2], 16)
+        g = int(value[2:4], 16)
+        b = int(value[4:6], 16)
+    except ValueError:
+        return "#000000"
+    ratio = max(0.0, min(1.0, strength))
+    blend = lambda component: int(component * (1.0 - ratio))
+    return f"#{blend(r):02x}{blend(g):02x}{blend(b):02x}"
+
+
 # ---------------------------------------------------------------------------
 # Plugin system
 # ---------------------------------------------------------------------------
 
-USER_MODS_DIR: Path = Path(__file__).resolve().with_name("user_mods")
+USER_PLUGINS_DIR: Path = Path(__file__).resolve().with_name("user_plugins")
 
 
 class PluginMessageBus:
@@ -296,17 +320,17 @@ def _partition_plugin_columns(
     return accepted, rejected
 
 
-class ModAPI:
-    """API exposed to user mods."""
+class PluginAPI:
+    """API exposed to user plugins."""
 
     def __init__(self, manager: "PluginManager") -> None:
         self._manager = manager
 
-    def register_pre_scan_hook(self, func: Callable[[Dict[str, object], "ModAPI"], None]) -> None:
+    def register_pre_scan_hook(self, func: Callable[[Dict[str, object], "PluginAPI"], None]) -> None:
         if callable(func):
             self._manager.pre_scan_hooks.append(func)
 
-    def register_post_scan_hook(self, func: Callable[[List[FileItem], Dict[str, object], "ModAPI"], None]) -> None:
+    def register_post_scan_hook(self, func: Callable[[List[FileItem], Dict[str, object], "PluginAPI"], None]) -> None:
         if callable(func):
             self._manager.post_scan_hooks.append(func)
 
@@ -331,7 +355,7 @@ class ModAPI:
         self._manager.register_column(column_id, heading, width, anchor)
 
     def register_settings_section(
-        self, title: str, builder: Callable[["Sims4ModSorterApp", ttk.Frame, "ModAPI"], None]
+        self, title: str, builder: Callable[["Sims4ModSorterApp", ttk.Frame, "PluginAPI"], None]
     ) -> None:
         if callable(builder) and title:
             self._manager.settings_sections.append((title, builder))
@@ -343,27 +367,27 @@ class ModAPI:
 
 
 class PluginManager:
-    def __init__(self, mods_dir: Path, message_bus: Optional[PluginMessageBus] = None) -> None:
-        self.mods_dir = mods_dir
-        self.pre_scan_hooks: List[Callable[[Dict[str, object], ModAPI], None]] = []
-        self.post_scan_hooks: List[Callable[[List[FileItem], Dict[str, object], ModAPI], None]] = []
+    def __init__(self, plugins_dir: Path, message_bus: Optional[PluginMessageBus] = None) -> None:
+        self.plugins_dir = plugins_dir
+        self.pre_scan_hooks: List[Callable[[Dict[str, object], PluginAPI], None]] = []
+        self.post_scan_hooks: List[Callable[[List[FileItem], Dict[str, object], PluginAPI], None]] = []
         self.message_bus = message_bus or PluginMessageBus()
-        self.api = ModAPI(self)
+        self.api = PluginAPI(self)
         self.columns: Dict[str, PluginColumn] = {}
         self.column_order: List[str] = []
-        self.settings_sections: List[Tuple[str, Callable[["Sims4ModSorterApp", ttk.Frame, ModAPI], None]]] = []
+        self.settings_sections: List[Tuple[str, Callable[["Sims4ModSorterApp", ttk.Frame, PluginAPI], None]]] = []
         self.app: Optional["Sims4ModSorterApp"] = None
 
     def attach_app(self, app: "Sims4ModSorterApp") -> None:
         self.app = app
 
     def load(self) -> None:
-        self.mods_dir.mkdir(parents=True, exist_ok=True)
-        for entry in sorted(self.mods_dir.iterdir(), key=lambda p: p.name.lower()):
+        self.plugins_dir.mkdir(parents=True, exist_ok=True)
+        for entry in sorted(self.plugins_dir.iterdir(), key=lambda p: p.name.lower()):
             manifest: Dict[str, object]
             module_path: Path
             if entry.is_dir():
-                manifest_path = entry / "mod.json"
+                manifest_path = entry / "plugin.json"
                 if manifest_path.exists():
                     try:
                         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -371,8 +395,8 @@ class PluginManager:
                         self.message_bus.post("boot", "error", f"Failed to parse {manifest_path.name}: {exc}")
                         continue
                 else:
-                    manifest = {"name": entry.name, "entry": "mod.py", "enabled": True, "callable": "register"}
-                module_path = entry / str(manifest.get("entry", "mod.py"))
+                    manifest = {"name": entry.name, "entry": "plugin.py", "enabled": True, "callable": "register"}
+                module_path = entry / str(manifest.get("entry", "plugin.py"))
             else:
                 manifest = {"name": entry.stem, "entry": entry.name, "enabled": True, "callable": "register"}
                 module_path = entry
@@ -381,7 +405,7 @@ class PluginManager:
     def _load_manifest(self, manifest: Dict[str, object], module_path: Path) -> None:
         name = str(manifest.get("name") or module_path.stem)
         if not manifest.get("enabled", True):
-            self.message_bus.post("boot", "info", f"Skipping disabled mod: {name}")
+            self.message_bus.post("boot", "info", f"Skipping disabled plugin: {name}")
             return
         if not module_path.exists():
             self.message_bus.post("boot", "error", f"Missing entry for {name}: {module_path.name}")
@@ -400,14 +424,14 @@ class PluginManager:
         callable_name = str(manifest.get("callable", "register"))
         register = getattr(module, callable_name, None)
         if not callable(register):
-            self.message_bus.post("boot", "warn", f"Mod '{name}' missing callable '{callable_name}'")
+            self.message_bus.post("boot", "warn", f"Plugin '{name}' missing callable '{callable_name}'")
             return
         try:
             register(self.api)
         except Exception as exc:
-            self.message_bus.post("boot", "error", f"Mod '{name}' failed during register: {exc}")
+            self.message_bus.post("boot", "error", f"Plugin '{name}' failed during register: {exc}")
             return
-        self.message_bus.post("boot", "info", f"Loaded mod: {name}")
+        self.message_bus.post("boot", "info", f"Loaded plugin: {name}")
 
     def run_pre_scan(self, context: Dict[str, object]) -> None:
         for hook in list(self.pre_scan_hooks):
@@ -436,12 +460,12 @@ class PluginManager:
         return [self.columns[column_id] for column_id in self.column_order if column_id in self.columns]
 
 
-def load_user_mods() -> PluginManager:
-    manager = PluginManager(USER_MODS_DIR)
+def load_user_plugins() -> PluginManager:
+    manager = PluginManager(USER_PLUGINS_DIR)
     try:
         manager.load()
     except Exception as exc:
-        manager.message_bus.post("boot", "error", f"Mod loading aborted: {exc}")
+        manager.message_bus.post("boot", "error", f"Plugin loading aborted: {exc}")
     return manager
 
 
@@ -449,11 +473,11 @@ def flush_plugin_messages(app, channel: str) -> None:
     manager = getattr(app, "plugin_manager", None)
     if not isinstance(manager, PluginManager):
         return
-    prefix = {"error": "Mod error", "warn": "Mod warning", "info": "Mod"}
+    prefix = {"error": "Plugin error", "warn": "Plugin warning", "info": "Plugin"}
     for level, message in manager.message_bus.drain(channel):
         if not message:
             continue
-        tag = prefix.get(level, "Mod")
+        tag = prefix.get(level, "Plugin")
         app.log(f"{tag}: {message}")
 
 
@@ -1003,7 +1027,7 @@ class Sims4ModSorterApp(tk.Tk):
         self.items: List[FileItem] = []
         self.items_by_path: Dict[str, FileItem] = {}
         self.scan_errors: List[str] = []
-        self.plugin_manager = load_user_mods()
+        self.plugin_manager = load_user_plugins()
         self._plugin_columns: List[PluginColumn] = []
         if self.plugin_manager:
             self.plugin_manager.attach_app(self)
@@ -1068,6 +1092,14 @@ class Sims4ModSorterApp(tk.Tk):
     def _build_ui(self) -> None:
         if self.plugin_manager:
             self._plugin_columns = self.plugin_manager.get_columns()
+        try:
+            self._tree_font = tkfont.nametofont("TkDefaultFont")
+        except tk.TclError:
+            self._tree_font = tkfont.Font()
+        try:
+            self._tree_heading_font = tkfont.nametofont("TkHeadingFont")
+        except tk.TclError:
+            self._tree_heading_font = self._tree_font
         root_container = ttk.Frame(self)
         root_container.pack(fill="both", expand=True)
 
@@ -1092,24 +1124,10 @@ class Sims4ModSorterApp(tk.Tk):
 
         left = ttk.Frame(mid)
         left.pack(side="left", fill="both", expand=True)
+        tree_frame = ttk.Frame(left)
+        tree_frame.pack(fill="both", expand=True)
         base_columns = ["inc", "rel", "name", "size", "type", "target", "conf", "linked", "meta", "notes"]
-        columns = list(base_columns)
-        if self._plugin_columns:
-            insert_at = columns.index("linked")
-            for plugin_column in self._plugin_columns:
-                columns.insert(insert_at, plugin_column.column_id)
-                insert_at += 1
-        self.tree = ttk.Treeview(left, columns=tuple(columns), show="headings", selectmode="extended")
-        tree_columns = tuple(self.tree["columns"])
-        tree_column_set = set(tree_columns)
-        accepted, rejected = _partition_plugin_columns(self._plugin_columns, tree_columns)
-        for plugin_column in rejected:
-            self.log(
-                f"Plugin column '{plugin_column.column_id}' was rejected by Tk and will be ignored.",
-            )
-        self._plugin_columns = accepted
-        self._column_order = list(tree_columns)
-        headings = {
+        base_headings = {
             "inc": "✔",
             "rel": "Folder",
             "name": "File",
@@ -1121,41 +1139,49 @@ class Sims4ModSorterApp(tk.Tk):
             "meta": "Tags",
             "notes": "Notes",
         }
+        base_anchors = {
+            "inc": "center",
+            "rel": "w",
+            "name": "w",
+            "size": "e",
+            "type": "w",
+            "target": "w",
+            "conf": "e",
+            "linked": "center",
+            "meta": "w",
+            "notes": "w",
+        }
+        columns = list(base_columns)
+        if self._plugin_columns:
+            insert_at = columns.index("linked")
+            for plugin_column in self._plugin_columns:
+                columns.insert(insert_at, plugin_column.column_id)
+                insert_at += 1
+        self.tree = ttk.Treeview(tree_frame, columns=tuple(columns), show="headings", selectmode="extended")
+        tree_columns = tuple(self.tree["columns"])
+        accepted, rejected = _partition_plugin_columns(self._plugin_columns, tree_columns)
+        for plugin_column in rejected:
+            self.log(f"Plugin column '{plugin_column.column_id}' was rejected by Tk and will be ignored.")
+        self._plugin_columns = accepted
+        self._column_order = list(tree_columns)
+        headings = dict(base_headings)
+        anchors = dict(base_anchors)
         for plugin_column in self._plugin_columns:
             headings[plugin_column.column_id] = plugin_column.heading
+            anchors[plugin_column.column_id] = plugin_column.anchor
+        self._column_anchors = anchors
         for column in self._column_order:
             self.tree.heading(column, text=headings.get(column, column))
-        if "inc" in tree_column_set:
-            self.tree.column("inc", width=40, anchor="center")
-        if "rel" in tree_column_set:
-            self.tree.column("rel", width=220)
-        if "name" in tree_column_set:
-            self.tree.column("name", width=360)
-        if "size" in tree_column_set:
-            self.tree.column("size", width=70, anchor="e")
-        if "type" in tree_column_set:
-            self.tree.column("type", width=170)
-        if "target" in tree_column_set:
-            self.tree.column("target", width=200)
-        if "conf" in tree_column_set:
-            self.tree.column("conf", width=60, anchor="e")
-        for plugin_column in self._plugin_columns:
-            self.tree.column(
-                plugin_column.column_id,
-                width=plugin_column.width,
-                anchor=plugin_column.anchor,
-                stretch=False,
-            )
-        if "linked" in tree_column_set:
-            self.tree.column("linked", width=80, anchor="center")
-        if "meta" in tree_column_set:
-            self.tree.column("meta", width=180)
-        if "notes" in tree_column_set:
-            self.tree.column("notes", width=260)
-        ysb = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscroll=ysb.set)
-        self.tree.pack(side="left", fill="both", expand=True)
-        ysb.pack(side="left", fill="y")
+            anchor = self._column_anchors.get(column, "w") or "w"
+            self.tree.column(column, anchor=anchor, stretch=False, width=80)
+        ysb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        xsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscroll=ysb.set, xscroll=xsb.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        ysb.grid(row=0, column=1, sticky="ns")
+        xsb.grid(row=1, column=0, sticky="ew")
+        tree_frame.grid_columnconfigure(0, weight=1)
+        tree_frame.grid_rowconfigure(0, weight=1)
 
         right = ttk.Frame(mid)
         right.pack(side="left", fill="y", padx=(10, 0))
@@ -1206,69 +1232,101 @@ class Sims4ModSorterApp(tk.Tk):
         self.tree.bind("<Leave>", lambda _e: self._hide_tooltip())
 
     def _build_settings_overlay(self) -> None:
-        self.overlay = tk.Frame(self, bg=self._theme_cache.get("sel", "#2A2F3A"))
-        self.overlay.columnconfigure(0, weight=1)
-        self.overlay.rowconfigure(0, weight=1)
+        palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
+        self._settings_sidebar_width = 360
+        scrim_color = _scrim_color(palette.get("bg", "#111316"))
 
-        card = ttk.Frame(self.overlay, padding=18)
-        card.grid(row=0, column=0, sticky="nsew")
-        card.columnconfigure(0, weight=1)
+        self.settings_scrim = tk.Frame(self, bg=scrim_color, highlightthickness=0, bd=0)
+        self.settings_scrim.place_forget()
+        self.settings_scrim.bind("<Button-1>", lambda _e: self.hide_settings())
 
-        header = ttk.Frame(card)
-        header.grid(row=0, column=0, sticky="ew")
-        header.columnconfigure(0, weight=1)
-        ttk.Label(header, text="Settings", font=("TkDefaultFont", 12, "bold")).grid(row=0, column=0, sticky="w")
-        ttk.Button(header, text="Close", command=self.hide_settings, width=7).grid(row=0, column=1, sticky="e")
+        self.settings_sidebar = tk.Frame(
+            self,
+            bg=palette.get("sel", "#2A2F3A"),
+            width=self._settings_sidebar_width,
+            highlightthickness=0,
+            bd=0,
+        )
+        self.settings_sidebar.place_forget()
+        self.settings_sidebar.grid_propagate(False)
+        self.settings_sidebar.columnconfigure(0, weight=1)
+        self.settings_sidebar.rowconfigure(0, weight=1)
 
-        next_row = 1
-        theme_section = ttk.LabelFrame(card, text="Themes")
-        theme_section.grid(row=next_row, column=0, sticky="ew", pady=(12, 0))
+        container = ttk.Frame(self.settings_sidebar, padding=(16, 20, 16, 20))
+        container.grid(row=0, column=0, sticky="nsew")
+        container.columnconfigure(0, weight=1)
+
+        row = 0
+        header = ttk.Frame(container)
+        header.grid(row=row, column=0, sticky="ew")
+        ttk.Label(header, text="Settings", font=("TkDefaultFont", 12, "bold")).pack(side="left")
+        ttk.Button(header, text="Close", command=self.hide_settings, width=7).pack(side="right")
+        row += 1
+
+        ttk.Separator(container).grid(row=row, column=0, sticky="ew", pady=(12, 10))
+        row += 1
+
+        theme_section = ttk.Frame(container)
+        theme_section.grid(row=row, column=0, sticky="ew")
         theme_section.columnconfigure(0, weight=1)
-
+        ttk.Label(theme_section, text="Themes", font=("TkDefaultFont", 10, "bold")).grid(row=0, column=0, sticky="w")
         theme_controls = ttk.Frame(theme_section)
-        theme_controls.grid(row=0, column=0, sticky="ew")
+        theme_controls.grid(row=1, column=0, sticky="ew", pady=(6, 0))
         theme_controls.columnconfigure(1, weight=1)
         ttk.Label(theme_controls, text="Theme").grid(row=0, column=0, sticky="w")
-        self.theme_cb = ttk.Combobox(theme_controls, values=list(THEMES.keys()), textvariable=self.theme_name, state="readonly")
-        self.theme_cb.grid(row=0, column=1, sticky="ew", padx=6)
+        self.theme_cb = ttk.Combobox(
+            theme_controls,
+            values=list(THEMES.keys()),
+            textvariable=self.theme_name,
+            state="readonly",
+        )
+        self.theme_cb.grid(row=0, column=1, sticky="ew", padx=(6, 0))
         ttk.Button(theme_controls, text="Apply", command=self.on_apply_theme).grid(row=0, column=2, padx=(6, 0))
 
         self.theme_preview_container = ttk.Frame(theme_section)
-        self.theme_preview_container.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-        for column in range(3):
+        self.theme_preview_container.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        for column in range(max(1, min(2, len(THEMES)))):
             self.theme_preview_container.columnconfigure(column, weight=1)
         self._build_theme_preview_widgets()
+        row += 1
 
-        scan_section = ttk.LabelFrame(card, text="Scanning")
-        scan_section.grid(row=2, column=0, sticky="ew", pady=(16, 0))
+        scan_section = ttk.Frame(container)
+        scan_section.grid(row=row, column=0, sticky="ew", pady=(18, 0))
         scan_section.columnconfigure(0, weight=1)
-        ttk.Checkbutton(scan_section, text="Scan subfolders", variable=self.recurse_var).grid(row=0, column=0, sticky="w")
-        ttk.Label(scan_section, text="Ignore extensions (comma separated)").grid(row=1, column=0, sticky="w", pady=(10, 2))
-        ttk.Entry(scan_section, textvariable=self.ignore_exts_var).grid(row=2, column=0, sticky="ew")
-        ttk.Label(scan_section, text="Ignore names containing (comma separated)").grid(row=3, column=0, sticky="w", pady=(10, 2))
-        ttk.Entry(scan_section, textvariable=self.ignore_names_var).grid(row=4, column=0, sticky="ew")
+        ttk.Label(scan_section, text="Scanning", font=("TkDefaultFont", 10, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(scan_section, text="Scan subfolders", variable=self.recurse_var).grid(
+            row=1, column=0, sticky="w", pady=(6, 0)
+        )
+        ttk.Label(scan_section, text="Ignore extensions (comma separated)").grid(
+            row=2, column=0, sticky="w", pady=(10, 2)
+        )
+        ttk.Entry(scan_section, textvariable=self.ignore_exts_var).grid(row=3, column=0, sticky="ew")
+        ttk.Label(scan_section, text="Ignore names containing (comma separated)").grid(
+            row=4, column=0, sticky="w", pady=(10, 2)
+        )
+        ttk.Entry(scan_section, textvariable=self.ignore_names_var).grid(row=5, column=0, sticky="ew")
+        row += 1
 
         if self.plugin_manager and self.plugin_manager.settings_sections:
-            next_row += 1
-            plugins_section = ttk.LabelFrame(card, text="Plugins")
-            plugins_section.grid(row=next_row, column=0, sticky="ew", pady=(16, 0))
-            plugins_section.columnconfigure(0, weight=1)
-            for index, (title, builder) in enumerate(self.plugin_manager.settings_sections):
-                panel = ttk.LabelFrame(plugins_section, text=title)
-                panel.grid(row=index, column=0, sticky="ew", pady=(6, 0))
+            plugin_section = ttk.Frame(container)
+            plugin_section.grid(row=row, column=0, sticky="ew", pady=(18, 0))
+            plugin_section.columnconfigure(0, weight=1)
+            ttk.Label(plugin_section, text="Plugins", font=("TkDefaultFont", 10, "bold")).grid(row=0, column=0, sticky="w")
+            for index, (title, builder) in enumerate(self.plugin_manager.settings_sections, start=1):
+                panel = ttk.LabelFrame(plugin_section, text=title)
+                panel.grid(row=index, column=0, sticky="ew", pady=(8 if index == 1 else 6, 0))
                 panel.columnconfigure(0, weight=1)
                 try:
                     builder(self, panel, self.plugin_manager.api)
                 except Exception as exc:
                     self.log(f"Plugin settings error: {exc}")
+            row += 1
 
-        actions = ttk.Frame(card)
-        next_row += 1
-        actions.grid(row=next_row, column=0, sticky="e", pady=(18, 0))
+        actions = ttk.Frame(container)
+        actions.grid(row=row + 1, column=0, sticky="e", pady=(20, 0))
         ttk.Button(actions, text="Done", command=self.hide_settings).grid(row=0, column=0)
 
-        self.overlay.bind("<Escape>", lambda _e: self.hide_settings())
-        self.overlay.place_forget()
+        self.settings_sidebar.bind("<Escape>", lambda _e: self.hide_settings())
         self._update_theme_preview_highlight()
     # ------------------------------------------------------------------
     # Theme preview helpers
@@ -1277,7 +1335,7 @@ class Sims4ModSorterApp(tk.Tk):
         for child in self.theme_preview_container.winfo_children():
             child.destroy()
         self.theme_preview_canvases: Dict[str, tk.Canvas] = {}
-        columns = 3
+        columns = max(1, min(2, len(THEMES)))
         for index, (name, palette) in enumerate(THEMES.items()):
             row = index // columns
             column = index % columns
@@ -1347,20 +1405,40 @@ class Sims4ModSorterApp(tk.Tk):
     # Settings overlay
     # ------------------------------------------------------------------
     def show_settings(self) -> None:
-        self.overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
-        self.overlay.tkraise()
-        self.overlay.focus_set()
+        if not hasattr(self, "settings_sidebar"):
+            return
+        palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
+        if hasattr(self, "settings_scrim"):
+            self.settings_scrim.configure(bg=_scrim_color(palette.get("bg", "#111316")))
+            self.settings_scrim.place(relx=0, rely=0, relwidth=1, relheight=1)
+            self.settings_scrim.tkraise()
+        self.settings_sidebar.configure(bg=palette.get("sel", "#2A2F3A"))
+        self.settings_sidebar.place(
+            relx=1.0,
+            rely=0,
+            relheight=1.0,
+            anchor="ne",
+            width=getattr(self, "_settings_sidebar_width", 360),
+        )
+        self.settings_sidebar.tkraise()
+        self.settings_sidebar.focus_set()
         self._update_theme_preview_highlight()
 
     def hide_settings(self) -> None:
-        self.overlay.place_forget()
+        if hasattr(self, "settings_sidebar"):
+            self.settings_sidebar.place_forget()
+        if hasattr(self, "settings_scrim"):
+            self.settings_scrim.place_forget()
 
     def on_apply_theme(self) -> None:
         self._hide_tooltip()
         self._build_style()
         palette = self._theme_cache
         self.log_text.configure(bg=palette.get("alt", "#1f2328"), fg=palette.get("fg", "#E6E6E6"))
-        self.overlay.configure(bg=palette.get("sel", "#2A2F3A"))
+        if hasattr(self, "settings_sidebar"):
+            self.settings_sidebar.configure(bg=palette.get("sel", "#2A2F3A"))
+        if hasattr(self, "settings_scrim"):
+            self.settings_scrim.configure(bg=_scrim_color(palette.get("bg", "#111316")))
         self._update_theme_preview_highlight()
         self.log(f"Theme applied: {self.theme_name.get()}")
     # ------------------------------------------------------------------
@@ -1672,18 +1750,40 @@ class Sims4ModSorterApp(tk.Tk):
             self.summary_var.set(f"Planned {len(self.items)} files | {fragment}")
         else:
             self.summary_var.set("No plan yet")
-        self._on_resize()
+        self._auto_size_columns()
 
-    def _on_resize(self, _event: Optional[tk.Event] = None) -> None:
-        total_width = self.tree.winfo_width() or 1200
-        base_fixed = 40 + 220 + 70 + 170 + 200 + 60 + 80 + 180
-        plugin_fixed = sum(self.tree.column(col.column_id, option="width") for col in self._plugin_columns)
-        fixed = base_fixed + plugin_fixed
-        dynamic = max(300, total_width - fixed - 60)
-        name_width = int(dynamic * 0.6)
-        notes_width = int(dynamic * 0.4)
-        self.tree.column("name", width=max(220, name_width))
-        self.tree.column("notes", width=max(220, notes_width))
+    def _auto_size_columns(self) -> None:
+        if not getattr(self, "tree", None):
+            return
+        font = getattr(self, "_tree_font", None)
+        if font is None:
+            try:
+                font = tkfont.nametofont("TkDefaultFont")
+            except tk.TclError:
+                font = tkfont.Font()
+            self._tree_font = font
+        heading_font = getattr(self, "_tree_heading_font", None)
+        if heading_font is None:
+            try:
+                heading_font = tkfont.nametofont("TkHeadingFont")
+            except tk.TclError:
+                heading_font = font
+            self._tree_heading_font = heading_font
+        padding = 24
+        widths: Dict[str, int] = {}
+        for column in self._column_order:
+            heading = self.tree.heading(column).get("text", column)
+            widths[column] = heading_font.measure(str(heading)) + padding
+        for iid in self.tree.get_children(""):
+            values = self.tree.item(iid, "values")
+            for index, column in enumerate(self._column_order):
+                value = values[index] if index < len(values) else ""
+                width = font.measure(str(value)) + padding
+                if width > widths[column]:
+                    widths[column] = width
+        for column, width in widths.items():
+            minimum = 36 if column in {"inc", "linked"} else 60
+            self.tree.column(column, width=max(minimum, int(width)), stretch=False)
 
     # ------------------------------------------------------------------
     # Tooltip helpers
@@ -2048,14 +2148,14 @@ THEMES = {
 }
 
 # ---------------------------
-# Modding support
+# Plugin support
 # ---------------------------
 
-USER_MODS_DIR = Path(__file__).with_name("user_mods")
+USER_PLUGINS_DIR = Path(__file__).with_name("user_plugins")
 
 
-class ModAPI:
-    """Lightweight API exposed to external mods."""
+class PluginAPI:
+    """Lightweight API exposed to external plugins."""
 
     def __init__(self, manager: "PluginManager"):
         self._manager = manager
@@ -2081,13 +2181,13 @@ class ModAPI:
 
 
 class PluginManager:
-    def __init__(self, mods_dir: Path):
-        self.mods_dir = mods_dir
+    def __init__(self, plugins_dir: Path):
+        self.plugins_dir = plugins_dir
         self.pre_scan_hooks = []
         self.post_scan_hooks = []
         self.boot_messages: List[Tuple[str, str]] = []
         self.runtime_messages: List[Tuple[str, str]] = []
-        self.api = ModAPI(self)
+        self.api = PluginAPI(self)
 
     def log_boot(self, message: str, level: str = "info"):
         self.boot_messages.append((level, message))
@@ -2106,8 +2206,8 @@ class PluginManager:
         return msgs
 
     def load(self):
-        self.mods_dir.mkdir(parents=True, exist_ok=True)
-        for entry in sorted(self.mods_dir.iterdir()):
+        self.plugins_dir.mkdir(parents=True, exist_ok=True)
+        for entry in sorted(self.plugins_dir.iterdir()):
             if entry.is_file() and entry.suffix == ".py":
                 manifest = {
                     "name": entry.stem,
@@ -2117,7 +2217,7 @@ class PluginManager:
                 }
                 self._load_mod(manifest, entry)
             elif entry.is_dir():
-                manifest_path = entry / "mod.json"
+                manifest_path = entry / "plugin.json"
                 if manifest_path.exists():
                     try:
                         with open(manifest_path, "r", encoding="utf-8") as fh:
@@ -2128,16 +2228,16 @@ class PluginManager:
                 else:
                     manifest = {
                         "name": entry.name,
-                        "entry": "mod.py",
+                        "entry": "plugin.py",
                         "enabled": True,
                         "callable": "register",
                     }
-                self._load_mod(manifest, entry / manifest.get("entry", "mod.py"))
+                self._load_mod(manifest, entry / manifest.get("entry", "plugin.py"))
 
     def _load_mod(self, manifest: Dict[str, object], entry_path: Path):
         name = manifest.get("name") or entry_path.stem
         if not manifest.get("enabled", True):
-            self.log_boot(f"Skipping disabled mod: {name}")
+            self.log_boot(f"Skipping disabled plugin: {name}")
             return
         if not entry_path.exists():
             self.log_boot(f"Missing entry file for mod '{name}': {entry_path.name}", level="error")
@@ -2159,14 +2259,14 @@ class PluginManager:
         callable_name = manifest.get("callable", "register")
         register = getattr(module, callable_name, None)
         if not callable(register):
-            self.log_boot(f"Mod '{name}' missing callable '{callable_name}'", level="warn")
+            self.log_boot(f"Plugin '{name}' missing callable '{callable_name}'", level="warn")
             return
         try:
             register(self.api)
         except Exception as exc:
-            self.log_boot(f"Mod '{name}' failed during register: {exc}", level="error")
+            self.log_boot(f"Plugin '{name}' failed during register: {exc}", level="error")
             return
-        self.log_boot(f"Loaded mod: {name}")
+        self.log_boot(f"Loaded plugin: {name}")
 
     def run_pre_scan(self, context: Dict):
         for hook in list(self.pre_scan_hooks):
@@ -2183,12 +2283,12 @@ class PluginManager:
                 self.log(f"Post-scan hook error ({hook.__module__}): {exc}", level="error")
 
 
-def load_user_mods() -> PluginManager:
-    manager = PluginManager(USER_MODS_DIR)
+def load_user_plugins() -> PluginManager:
+    manager = PluginManager(USER_PLUGINS_DIR)
     try:
         manager.load()
     except Exception as exc:
-        manager.log_boot(f"Mod loading aborted: {exc}", level="error")
+        manager.log_boot(f"Plugin loading aborted: {exc}", level="error")
     return manager
 
 
@@ -2202,8 +2302,8 @@ def flush_plugin_messages(app, phase: str) -> None:
     else:
         drain = manager.drain_boot_messages
     prefix_map = {
-        "error": "Mod error",
-        "warn": "Mod warning",
+        "error": "Plugin error",
+        "warn": "Plugin warning",
     }
     for level, message in drain():
         if not message:
@@ -2212,14 +2312,14 @@ def flush_plugin_messages(app, phase: str) -> None:
         app.log(f"{prefix}: {message}")
 
 # ---------------------------
-# Modding support
+# Plugin support
 # ---------------------------
 
-USER_MODS_DIR = Path(__file__).with_name("user_mods")
+USER_PLUGINS_DIR = Path(__file__).with_name("user_plugins")
 
 
-class ModAPI:
-    """Lightweight API exposed to external mods."""
+class PluginAPI:
+    """Lightweight API exposed to external plugins."""
 
     def __init__(self, manager: "PluginManager"):
         self._manager = manager
@@ -2245,13 +2345,13 @@ class ModAPI:
 
 
 class PluginManager:
-    def __init__(self, mods_dir: Path):
-        self.mods_dir = mods_dir
+    def __init__(self, plugins_dir: Path):
+        self.plugins_dir = plugins_dir
         self.pre_scan_hooks = []
         self.post_scan_hooks = []
         self.boot_messages: List[Tuple[str, str]] = []
         self.runtime_messages: List[Tuple[str, str]] = []
-        self.api = ModAPI(self)
+        self.api = PluginAPI(self)
 
     def log_boot(self, message: str, level: str = "info"):
         self.boot_messages.append((level, message))
@@ -2270,8 +2370,8 @@ class PluginManager:
         return msgs
 
     def load(self):
-        self.mods_dir.mkdir(parents=True, exist_ok=True)
-        for entry in sorted(self.mods_dir.iterdir()):
+        self.plugins_dir.mkdir(parents=True, exist_ok=True)
+        for entry in sorted(self.plugins_dir.iterdir()):
             if entry.is_file() and entry.suffix == ".py":
                 manifest = {
                     "name": entry.stem,
@@ -2281,7 +2381,7 @@ class PluginManager:
                 }
                 self._load_mod(manifest, entry)
             elif entry.is_dir():
-                manifest_path = entry / "mod.json"
+                manifest_path = entry / "plugin.json"
                 if manifest_path.exists():
                     try:
                         with open(manifest_path, "r", encoding="utf-8") as fh:
@@ -2292,16 +2392,16 @@ class PluginManager:
                 else:
                     manifest = {
                         "name": entry.name,
-                        "entry": "mod.py",
+                        "entry": "plugin.py",
                         "enabled": True,
                         "callable": "register",
                     }
-                self._load_mod(manifest, entry / manifest.get("entry", "mod.py"))
+                self._load_mod(manifest, entry / manifest.get("entry", "plugin.py"))
 
     def _load_mod(self, manifest: Dict[str, object], entry_path: Path):
         name = manifest.get("name") or entry_path.stem
         if not manifest.get("enabled", True):
-            self.log_boot(f"Skipping disabled mod: {name}")
+            self.log_boot(f"Skipping disabled plugin: {name}")
             return
         if not entry_path.exists():
             self.log_boot(f"Missing entry file for mod '{name}': {entry_path.name}", level="error")
@@ -2323,14 +2423,14 @@ class PluginManager:
         callable_name = manifest.get("callable", "register")
         register = getattr(module, callable_name, None)
         if not callable(register):
-            self.log_boot(f"Mod '{name}' missing callable '{callable_name}'", level="warn")
+            self.log_boot(f"Plugin '{name}' missing callable '{callable_name}'", level="warn")
             return
         try:
             register(self.api)
         except Exception as exc:
-            self.log_boot(f"Mod '{name}' failed during register: {exc}", level="error")
+            self.log_boot(f"Plugin '{name}' failed during register: {exc}", level="error")
             return
-        self.log_boot(f"Loaded mod: {name}")
+        self.log_boot(f"Loaded plugin: {name}")
 
     def run_pre_scan(self, context: Dict):
         for hook in list(self.pre_scan_hooks):
@@ -2347,12 +2447,12 @@ class PluginManager:
                 self.log(f"Post-scan hook error ({hook.__module__}): {exc}", level="error")
 
 
-def load_user_mods() -> PluginManager:
-    manager = PluginManager(USER_MODS_DIR)
+def load_user_plugins() -> PluginManager:
+    manager = PluginManager(USER_PLUGINS_DIR)
     try:
         manager.load()
     except Exception as exc:
-        manager.log_boot(f"Mod loading aborted: {exc}", level="error")
+        manager.log_boot(f"Plugin loading aborted: {exc}", level="error")
     return manager
 
 
@@ -2366,8 +2466,8 @@ def flush_plugin_messages(app, phase: str) -> None:
     else:
         drain = manager.drain_boot_messages
     prefix_map = {
-        "error": "Mod error",
-        "warn": "Mod warning",
+        "error": "Plugin error",
+        "warn": "Plugin warning",
     }
     for level, message in drain():
         if not message:
@@ -2376,14 +2476,14 @@ def flush_plugin_messages(app, phase: str) -> None:
         app.log(f"{prefix}: {message}")
 
 # ---------------------------
-# Modding support
+# Plugin support
 # ---------------------------
 
-USER_MODS_DIR = Path(__file__).with_name("user_mods")
+USER_PLUGINS_DIR = Path(__file__).with_name("user_plugins")
 
 
-class ModAPI:
-    """Lightweight API exposed to external mods."""
+class PluginAPI:
+    """Lightweight API exposed to external plugins."""
 
     def __init__(self, manager: "PluginManager"):
         self._manager = manager
@@ -2409,13 +2509,13 @@ class ModAPI:
 
 
 class PluginManager:
-    def __init__(self, mods_dir: Path):
-        self.mods_dir = mods_dir
+    def __init__(self, plugins_dir: Path):
+        self.plugins_dir = plugins_dir
         self.pre_scan_hooks = []
         self.post_scan_hooks = []
         self.boot_messages: List[Tuple[str, str]] = []
         self.runtime_messages: List[Tuple[str, str]] = []
-        self.api = ModAPI(self)
+        self.api = PluginAPI(self)
 
     def log_boot(self, message: str, level: str = "info"):
         self.boot_messages.append((level, message))
@@ -2434,8 +2534,8 @@ class PluginManager:
         return msgs
 
     def load(self):
-        self.mods_dir.mkdir(parents=True, exist_ok=True)
-        for entry in sorted(self.mods_dir.iterdir()):
+        self.plugins_dir.mkdir(parents=True, exist_ok=True)
+        for entry in sorted(self.plugins_dir.iterdir()):
             if entry.is_file() and entry.suffix == ".py":
                 manifest = {
                     "name": entry.stem,
@@ -2445,7 +2545,7 @@ class PluginManager:
                 }
                 self._load_mod(manifest, entry)
             elif entry.is_dir():
-                manifest_path = entry / "mod.json"
+                manifest_path = entry / "plugin.json"
                 if manifest_path.exists():
                     try:
                         with open(manifest_path, "r", encoding="utf-8") as fh:
@@ -2456,16 +2556,16 @@ class PluginManager:
                 else:
                     manifest = {
                         "name": entry.name,
-                        "entry": "mod.py",
+                        "entry": "plugin.py",
                         "enabled": True,
                         "callable": "register",
                     }
-                self._load_mod(manifest, entry / manifest.get("entry", "mod.py"))
+                self._load_mod(manifest, entry / manifest.get("entry", "plugin.py"))
 
     def _load_mod(self, manifest: Dict[str, object], entry_path: Path):
         name = manifest.get("name") or entry_path.stem
         if not manifest.get("enabled", True):
-            self.log_boot(f"Skipping disabled mod: {name}")
+            self.log_boot(f"Skipping disabled plugin: {name}")
             return
         if not entry_path.exists():
             self.log_boot(f"Missing entry file for mod '{name}': {entry_path.name}", level="error")
@@ -2487,14 +2587,14 @@ class PluginManager:
         callable_name = manifest.get("callable", "register")
         register = getattr(module, callable_name, None)
         if not callable(register):
-            self.log_boot(f"Mod '{name}' missing callable '{callable_name}'", level="warn")
+            self.log_boot(f"Plugin '{name}' missing callable '{callable_name}'", level="warn")
             return
         try:
             register(self.api)
         except Exception as exc:
-            self.log_boot(f"Mod '{name}' failed during register: {exc}", level="error")
+            self.log_boot(f"Plugin '{name}' failed during register: {exc}", level="error")
             return
-        self.log_boot(f"Loaded mod: {name}")
+        self.log_boot(f"Loaded plugin: {name}")
 
     def run_pre_scan(self, context: Dict):
         for hook in list(self.pre_scan_hooks):
@@ -2511,12 +2611,12 @@ class PluginManager:
                 self.log(f"Post-scan hook error ({hook.__module__}): {exc}", level="error")
 
 
-def load_user_mods() -> PluginManager:
-    manager = PluginManager(USER_MODS_DIR)
+def load_user_plugins() -> PluginManager:
+    manager = PluginManager(USER_PLUGINS_DIR)
     try:
         manager.load()
     except Exception as exc:
-        manager.log_boot(f"Mod loading aborted: {exc}", level="error")
+        manager.log_boot(f"Plugin loading aborted: {exc}", level="error")
     return manager
 
 # ---------------------------
@@ -3030,7 +3130,7 @@ class Sims4ModSorterApp(tk.Tk):
         self.theme_name = tk.StringVar(value="Dark Mode")
         self.mods_root = tk.StringVar(value=get_default_mods_path())
         self.items: List[FileItem] = []
-        self.plugin_manager = load_user_mods()
+        self.plugin_manager = load_user_plugins()
 
         self.status_var = tk.StringVar(value="Ready")
         self.summary_var = tk.StringVar(value="No plan yet")
@@ -3038,7 +3138,6 @@ class Sims4ModSorterApp(tk.Tk):
         self._build_style()
         self._build_ui()
         self._build_settings_overlay()
-        self.bind("<Configure>", self._on_resize)
         self._report_mod_boot_messages()
 
     def _build_style(self):
@@ -3060,6 +3159,15 @@ class Sims4ModSorterApp(tk.Tk):
         self._theme_cache = dict(bg=bg, fg=fg, alt=alt, accent=accent, sel=sel)
 
     def _build_ui(self):
+        self._plugin_columns = []
+        try:
+            self._tree_font = tkfont.nametofont("TkDefaultFont")
+        except tk.TclError:
+            self._tree_font = tkfont.Font()
+        try:
+            self._tree_heading_font = tkfont.nametofont("TkHeadingFont")
+        except tk.TclError:
+            self._tree_heading_font = self._tree_font
         root_container = ttk.Frame(self); root_container.pack(fill="both", expand=True)
 
         top = ttk.Frame(root_container); top.pack(fill="x", padx=12, pady=10)
@@ -3076,23 +3184,46 @@ class Sims4ModSorterApp(tk.Tk):
         ttk.Label(header, textvariable=self.summary_var).pack(side="left")
 
         left = ttk.Frame(mid); left.pack(side="left", fill="both", expand=True)
-        cols = ("inc", "rel", "name", "size", "type", "target", "conf", "linked", "meta", "notes")
-        self.tree = ttk.Treeview(left, columns=cols, show="headings", selectmode="extended")
-        for c,t in [("inc","✔"),("rel","Folder"),("name","File"),("size","MB"),("type","Type"),
-                    ("target","Target Folder"),("conf","Conf"),("linked","Linked"),("meta","Meta"),("notes","Notes")]:
-            self.tree.heading(c, text=t)
-        self.tree.column("inc", width=40, anchor="center")
-        self.tree.column("rel", width=220)
-        self.tree.column("name", width=360)
-        self.tree.column("size", width=70, anchor="e")
-        self.tree.column("type", width=170)
-        self.tree.column("target", width=200)
-        self.tree.column("conf", width=60, anchor="e")
-        self.tree.column("linked", width=80, anchor="center")
-        self.tree.column("meta", width=180)
-        self.tree.column("notes", width=260)
-        ysb = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscroll=ysb.set); self.tree.pack(side="left", fill="both", expand=True); ysb.pack(side="left", fill="y")
+        tree_frame = ttk.Frame(left); tree_frame.pack(fill="both", expand=True)
+        columns = ("inc", "rel", "name", "size", "type", "target", "conf", "linked", "meta", "notes")
+        headings = {
+            "inc": "✔",
+            "rel": "Folder",
+            "name": "File",
+            "size": "MB",
+            "type": "Type",
+            "target": "Target Folder",
+            "conf": "Conf",
+            "linked": "Linked",
+            "meta": "Tags",
+            "notes": "Notes",
+        }
+        anchors = {
+            "inc": "center",
+            "rel": "w",
+            "name": "w",
+            "size": "e",
+            "type": "w",
+            "target": "w",
+            "conf": "e",
+            "linked": "center",
+            "meta": "w",
+            "notes": "w",
+        }
+        self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended")
+        self._column_order = list(columns)
+        self._column_anchors = anchors
+        for column in self._column_order:
+            self.tree.heading(column, text=headings.get(column, column))
+            self.tree.column(column, anchor=self._column_anchors.get(column, "w"), stretch=False, width=80)
+        ysb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        xsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscroll=ysb.set, xscroll=xsb.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        ysb.grid(row=0, column=1, sticky="ns")
+        xsb.grid(row=1, column=0, sticky="ew")
+        tree_frame.grid_columnconfigure(0, weight=1)
+        tree_frame.grid_rowconfigure(0, weight=1)
 
         right = ttk.Frame(mid); right.pack(side="left", fill="y", padx=(10, 0))
         ttk.Label(right, text="Selection").pack(anchor="w")
@@ -3127,67 +3258,106 @@ class Sims4ModSorterApp(tk.Tk):
 
     # In-window settings overlay (no OS pop-up)
     def _build_settings_overlay(self):
-        self.overlay = tk.Frame(self, bg=self._theme_cache["sel"])
-        self.overlay.columnconfigure(0, weight=1)
-        self.overlay.rowconfigure(0, weight=1)
-
-        self.overlay_card = ttk.Frame(self.overlay, padding=18)
-        self.overlay_card.grid(row=0, column=0, sticky="nsew")
-        self.overlay_card.columnconfigure(0, weight=1)
-
-        header = ttk.Frame(self.overlay_card)
-        header.grid(row=0, column=0, sticky="ew")
-        header.columnconfigure(0, weight=1)
-        ttk.Label(header, text="Settings", font=("TkDefaultFont", 12, "bold")).grid(row=0, column=0, sticky="w")
-        ttk.Button(header, text="Close", command=self.hide_settings, width=7).grid(row=0, column=1, sticky="e")
-
-        theme_section = ttk.LabelFrame(self.overlay_card, text="Themes")
-        theme_section.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        theme = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
+        self._settings_sidebar_width = 360
+        scrim = _scrim_color(theme.get("bg", "#111316"))
+        self.settings_scrim = tk.Frame(self, bg=scrim, highlightthickness=0, bd=0)
+        self.settings_scrim.place_forget()
+        self.settings_scrim.bind("<Button-1>", lambda _e: self.hide_settings())
+        self.settings_sidebar = tk.Frame(
+            self,
+            bg=theme.get("sel", "#2A2F3A"),
+            width=self._settings_sidebar_width,
+            highlightthickness=0,
+            bd=0,
+        )
+        self.settings_sidebar.place_forget()
+        self.settings_sidebar.grid_propagate(False)
+        self.settings_sidebar.columnconfigure(0, weight=1)
+        self.settings_sidebar.rowconfigure(0, weight=1)
+        container = ttk.Frame(self.settings_sidebar, padding=(16, 20, 16, 20))
+        container.grid(row=0, column=0, sticky="nsew")
+        container.columnconfigure(0, weight=1)
+        row = 0
+        header = ttk.Frame(container)
+        header.grid(row=row, column=0, sticky="ew")
+        ttk.Label(header, text="Settings", font=("TkDefaultFont", 12, "bold")).pack(side="left")
+        ttk.Button(header, text="Close", command=self.hide_settings, width=7).pack(side="right")
+        row += 1
+        ttk.Separator(container).grid(row=row, column=0, sticky="ew", pady=(12, 10))
+        row += 1
+        theme_section = ttk.Frame(container)
+        theme_section.grid(row=row, column=0, sticky="ew")
         theme_section.columnconfigure(0, weight=1)
-
-        theme_controls = ttk.Frame(theme_section)
-        theme_controls.grid(row=0, column=0, sticky="ew")
-        theme_controls.columnconfigure(1, weight=1)
-        ttk.Label(theme_controls, text="Theme").grid(row=0, column=0, sticky="w")
-        self.theme_cb = ttk.Combobox(theme_controls, values=list(THEMES.keys()), textvariable=self.theme_name, state="readonly")
-        self.theme_cb.grid(row=0, column=1, sticky="ew", padx=6)
-        ttk.Button(theme_controls, text="Apply", command=self.on_apply_theme).grid(row=0, column=2, padx=(6,0))
-
+        ttk.Label(theme_section, text="Themes", font=("TkDefaultFont", 10, "bold")).grid(row=0, column=0, sticky="w")
+        ctrl = ttk.Frame(theme_section)
+        ctrl.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        ctrl.columnconfigure(1, weight=1)
+        ttk.Label(ctrl, text="Theme").grid(row=0, column=0, sticky="w")
+        self.theme_cb = ttk.Combobox(ctrl, values=list(THEMES.keys()), textvariable=self.theme_name, state="readonly")
+        self.theme_cb.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        ttk.Button(ctrl, text="Apply", command=self.on_apply_theme).grid(row=0, column=2, padx=(6, 0))
         self.theme_preview_container = ttk.Frame(theme_section)
-        self.theme_preview_container.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-        for col in range(3):
-            self.theme_preview_container.columnconfigure(col, weight=1)
+        self.theme_preview_container.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        for column in range(max(1, min(2, len(THEMES)))):
+            self.theme_preview_container.columnconfigure(column, weight=1)
         self._build_theme_preview_widgets()
-
-        scan_section = ttk.LabelFrame(self.overlay_card, text="Scanning")
-        scan_section.grid(row=2, column=0, sticky="ew", pady=(16, 0))
-        scan_section.columnconfigure(0, weight=1)
-
-        self.chk_recurse = ttk.Checkbutton(scan_section, text="Scan subfolders", variable=self.recurse_var)
-        self.chk_recurse.grid(row=0, column=0, sticky="w")
-
-        ttk.Label(scan_section, text="Ignore extensions (comma separated)").grid(row=1, column=0, sticky="w", pady=(10, 2))
-        ttk.Entry(scan_section, textvariable=self.ignore_exts_var).grid(row=2, column=0, sticky="ew")
-
-        ttk.Label(scan_section, text="Ignore names containing (comma separated)").grid(row=3, column=0, sticky="w", pady=(10, 2))
-        ttk.Entry(scan_section, textvariable=self.ignore_names_var).grid(row=4, column=0, sticky="ew")
-
-        actions = ttk.Frame(self.overlay_card)
-        actions.grid(row=3, column=0, sticky="e", pady=(18, 0))
+        row += 1
+        scan = ttk.Frame(container)
+        scan.grid(row=row, column=0, sticky="ew", pady=(18, 0))
+        scan.columnconfigure(0, weight=1)
+        ttk.Label(scan, text="Scanning", font=("TkDefaultFont", 10, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(scan, text="Scan subfolders", variable=self.recurse_var).grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(scan, text="Ignore extensions (comma separated)").grid(row=2, column=0, sticky="w", pady=(10, 2))
+        ttk.Entry(scan, textvariable=self.ignore_exts_var).grid(row=3, column=0, sticky="ew")
+        ttk.Label(scan, text="Ignore names containing (comma separated)").grid(row=4, column=0, sticky="w", pady=(10, 2))
+        ttk.Entry(scan, textvariable=self.ignore_names_var).grid(row=5, column=0, sticky="ew")
+        row += 1
+        if self.plugin_manager and self.plugin_manager.settings_sections:
+            plugin_section = ttk.Frame(container)
+            plugin_section.grid(row=row, column=0, sticky="ew", pady=(18, 0))
+            plugin_section.columnconfigure(0, weight=1)
+            ttk.Label(plugin_section, text="Plugins", font=("TkDefaultFont", 10, "bold")).grid(row=0, column=0, sticky="w")
+            for index, (title, builder) in enumerate(self.plugin_manager.settings_sections, start=1):
+                panel = ttk.LabelFrame(plugin_section, text=title)
+                panel.grid(row=index, column=0, sticky="ew", pady=(8 if index == 1 else 6, 0))
+                panel.columnconfigure(0, weight=1)
+                try:
+                    builder(self, panel, self.plugin_manager.api)
+                except Exception as exc:
+                    self.log(f"Plugin settings error: {exc}")
+            row += 1
+        actions = ttk.Frame(container)
+        actions.grid(row=row + 1, column=0, sticky="e", pady=(20, 0))
         ttk.Button(actions, text="Done", command=self.hide_settings).grid(row=0, column=0)
-
-        self.overlay.bind("<Escape>", lambda e: self.hide_settings())
-        self.overlay.place_forget()
+        self.settings_sidebar.bind("<Escape>", lambda _e: self.hide_settings())
         self._update_theme_preview_highlight()
 
     def show_settings(self):
-        self.overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
-        self.overlay.tkraise()
-        self.overlay.focus_set()
+        if not hasattr(self, "settings_sidebar"):
+            return
+        theme = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
+        if hasattr(self, "settings_scrim"):
+            self.settings_scrim.configure(bg=_scrim_color(theme.get("bg", "#111316")))
+            self.settings_scrim.place(relx=0, rely=0, relwidth=1, relheight=1)
+            self.settings_scrim.tkraise()
+        self.settings_sidebar.configure(bg=theme.get("sel", "#2A2F3A"))
+        self.settings_sidebar.place(
+            relx=1.0,
+            rely=0,
+            relheight=1.0,
+            anchor="ne",
+            width=getattr(self, "_settings_sidebar_width", 360),
+        )
+        self.settings_sidebar.tkraise()
+        self.settings_sidebar.focus_set()
         self._update_theme_preview_highlight()
 
     def hide_settings(self):
-        self.overlay.place_forget()
+        if hasattr(self, "settings_sidebar"):
+            self.settings_sidebar.place_forget()
+        if hasattr(self, "settings_scrim"):
+            self.settings_scrim.place_forget()
 
     def _build_theme_preview_widgets(self):
         if not hasattr(self, "theme_preview_container"):
@@ -3196,7 +3366,7 @@ class Sims4ModSorterApp(tk.Tk):
             child.destroy()
         self.theme_preview_canvases: Dict[str, tk.Canvas] = {}
 
-        columns = 3
+        columns = max(1, min(2, len(THEMES)))
         for idx, (name, palette) in enumerate(THEMES.items()):
             row = idx // columns
             col = idx % columns
@@ -3251,8 +3421,12 @@ class Sims4ModSorterApp(tk.Tk):
 
     def on_apply_theme(self):
         self._build_style()
-        self.log_text.configure(bg=self._theme_cache["alt"], fg=self._theme_cache["fg"])
-        self.overlay.configure(bg=self._theme_cache["sel"])
+        palette = self._theme_cache
+        self.log_text.configure(bg=palette["alt"], fg=palette["fg"])
+        if hasattr(self, "settings_sidebar"):
+            self.settings_sidebar.configure(bg=palette["sel"])
+        if hasattr(self, "settings_scrim"):
+            self.settings_scrim.configure(bg=_scrim_color(palette["bg"]))
         self._update_theme_preview_highlight()
         self.log("Theme applied: " + self.theme_name.get())
 
@@ -3443,15 +3617,7 @@ class Sims4ModSorterApp(tk.Tk):
             self.summary_var.set(f"Planned {total} files | {frag}")
         else:
             self.summary_var.set("No plan yet")
-        self._on_resize()
-
-    def _on_resize(self, event=None):
-        total_w = self.tree.winfo_width() or 1200
-        fixed = 40 + 220 + 70 + 170 + 200 + 60 + 80 + 180  # fixed widths
-        dynamic = max(300, total_w - fixed - 60)
-        name_w = int(dynamic * 0.6); notes_w = int(dynamic * 0.4)
-        self.tree.column("name", width=max(220, name_w))
-        self.tree.column("notes", width=max(220, notes_w))
+        self._auto_size_columns()
 
 # ---------------------------
 # Entry
