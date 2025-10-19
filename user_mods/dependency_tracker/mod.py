@@ -76,13 +76,8 @@ DATABASE = {
 }
 TRACKING_ENABLED = True
 LAST_ITEMS: List[object] = []
-LATEST_RESULTS: List[Dict[str, object]] = []
-RESULT_LOCK = threading.Lock()
 CHECK_VAR: Optional[tk.BooleanVar] = None
 INFO_LABELS: List[ttk.Label] = []
-VIEW_WINDOW: Optional[tk.Toplevel] = None
-VIEW_TREE: Optional[ttk.Treeview] = None
-VIEW_STATUS: Optional[ttk.Label] = None
 
 
 def _normalise(raw: Dict[str, object]) -> Dict[str, object]:
@@ -286,110 +281,16 @@ def _log_summary(api, results: List[Dict[str, object]], duration: float, total_i
     api.log(f"[Dependency Tracker] Finished dependency analysis in {duration:.2f}s")
 
 
-def _ensure_view_window(app: tk.Tk) -> tuple[tk.Toplevel, ttk.Treeview, ttk.Label]:
-    global VIEW_WINDOW, VIEW_TREE, VIEW_STATUS
-    if VIEW_WINDOW is None or not VIEW_WINDOW.winfo_exists():
-        VIEW_WINDOW = tk.Toplevel(app)
-        VIEW_WINDOW.title("Dependency Overview")
-        VIEW_WINDOW.geometry("720x420")
-        VIEW_WINDOW.transient(app)
-        container = ttk.Frame(VIEW_WINDOW, padding=12)
-        container.pack(fill="both", expand=True)
-        container.columnconfigure(0, weight=1)
-        container.rowconfigure(0, weight=1)
-        tree = ttk.Treeview(container, columns=("file", "status", "detail"), show="headings", selectmode="browse")
-        tree.heading("file", text="Mod")
-        tree.heading("status", text="Status")
-        tree.heading("detail", text="Dependencies")
-        tree.column("file", width=220, anchor="w")
-        tree.column("status", width=120, anchor="center")
-        tree.column("detail", width=340, anchor="w")
-        yscroll = ttk.Scrollbar(container, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=yscroll.set)
-        tree.grid(row=0, column=0, sticky="nsew")
-        yscroll.grid(row=0, column=1, sticky="ns")
-        status = ttk.Label(container, text="")
-        status.grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
-        tree.tag_configure("missing", foreground="#d9534f")
-        tree.tag_configure("ok", foreground="#2e7d32")
-
-        def on_close() -> None:
-            if VIEW_WINDOW is not None:
-                VIEW_WINDOW.withdraw()
-
-        VIEW_WINDOW.protocol("WM_DELETE_WINDOW", on_close)
-        VIEW_TREE = tree
-        VIEW_STATUS = status
-    else:
-        VIEW_WINDOW.deiconify()
-        VIEW_WINDOW.lift()
-    return VIEW_WINDOW, VIEW_TREE, VIEW_STATUS
-
-
-def _gather_rows() -> tuple[List[Dict[str, str]], str]:
-    with RESULT_LOCK:
-        items = list(LAST_ITEMS)
-    rows: List[Dict[str, str]] = []
-    missing = 0
-    for item in items:
-        detail = getattr(item, "dependency_detail", "")
-        status = getattr(item, "dependency_status", "")
-        if not detail:
-            continue
-        name = getattr(item, "name", "unknown")
-        rel = getattr(item, "relpath", "")
-        display = name if not rel else f"{name} ({rel})"
-        if status == "missing":
-            label = f"{ICON_MISSING} Missing"
-            missing += 1
-        else:
-            label = f"{ICON_OK} Satisfied"
-            status = "ok"
-        rows.append({"display": display, "status": status, "label": label, "detail": detail})
-    rows.sort(key=lambda row: (0 if row["status"] == "missing" else 1, row["display"].lower()))
-    if not rows:
-        if not TRACKING_ENABLED:
-            summary = "Dependency tracking is disabled in settings."
-        elif not items:
-            summary = "No scan results available yet."
-        else:
-            summary = "No tracked dependencies detected in the last scan."
-    else:
-        summary = f"Dependencies tracked for {len(rows)} mod(s). Missing: {missing}."
-    return rows, summary
-
-
-def _show_dependency_panel(app: tk.Tk, api) -> None:
-    rows, summary = _gather_rows()
-
-    def render() -> None:
-        window, tree, status_label = _ensure_view_window(app)
-        if tree is None or status_label is None:
-            return
-        tree.delete(*tree.get_children())
-        for row in rows:
-            tags = (row["status"],)
-            tree.insert("", "end", values=(row["display"], row["label"], row["detail"]), tags=tags)
-        status_label.configure(text=summary)
-        window.deiconify()
-        window.lift()
-
-    app.after(0, render)
-
-
 def _reanalyze_async(api, reason: str) -> None:
-    with RESULT_LOCK:
-        if not LAST_ITEMS:
-            return
-        items = list(LAST_ITEMS)
+    if not LAST_ITEMS:
+        return
+    items = list(LAST_ITEMS)
 
     def worker() -> None:
         if not TRACKING_ENABLED:
             for item in items:
                 _clear_item(item)
             api.log("[Dependency Tracker] Tracking disabled. Dependency markers cleared.")
-            with RESULT_LOCK:
-                LATEST_RESULTS.clear()
             api.request_refresh()
             return
         start = time.perf_counter()
@@ -397,8 +298,6 @@ def _reanalyze_async(api, reason: str) -> None:
         duration = time.perf_counter() - start
         api.log(f"[Dependency Tracker] {reason}")
         _log_summary(api, results, duration, len(items))
-        with RESULT_LOCK:
-            LATEST_RESULTS[:] = list(results)
         api.request_refresh()
 
     threading.Thread(target=worker, daemon=True).start()
@@ -441,21 +340,11 @@ def _build_settings(app, frame, api) -> None:
 def register(api) -> None:
     _load_database(api)
     api.register_column(COLUMN_ID, "Deps", width=64, anchor="center")
-    api.update_column(COLUMN_ID, heading="Dependencies", width=90)
     api.register_settings_section("Dependency Tracker", _build_settings)
-    api.register_button(
-        "dependency_view",
-        "View Dependencies",
-        _show_dependency_panel,
-        location="right",
-        tooltip="Show dependency requirements detected during the last scan.",
-    )
 
     def post_scan(items, context, _api) -> None:
-        with RESULT_LOCK:
-            LAST_ITEMS[:] = list(items)
-            if not TRACKING_ENABLED:
-                LATEST_RESULTS.clear()
+        global LAST_ITEMS
+        LAST_ITEMS = list(items)
         if not TRACKING_ENABLED:
             for item in items:
                 _clear_item(item)
@@ -464,8 +353,6 @@ def register(api) -> None:
         results = _analyse(items)
         duration = time.perf_counter() - start
         _log_summary(api, results, duration, len(items))
-        with RESULT_LOCK:
-            LATEST_RESULTS[:] = list(results)
 
     api.register_post_scan_hook(post_scan)
     api.log("[Dependency Tracker] Plugin initialised.")
