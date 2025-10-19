@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+import webbrowser
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,6 +27,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
+from launch_utils import UpdateResult, check_for_update
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -1118,6 +1120,7 @@ class Sims4ModSorterApp(tk.Tk):
         self.ignore_names_var = tk.StringVar(value="thumbcache,desktop.ini,resource.cfg")
         self.theme_name = tk.StringVar(value="Dark Mode")
         self.mods_root = tk.StringVar(value=get_default_mods_path())
+        self._version_display_var = tk.StringVar(value=f"App Version: {APP_VERSION}")
 
         self.items: List[FileItem] = []
         self.items_by_path: Dict[str, FileItem] = {}
@@ -1142,12 +1145,15 @@ class Sims4ModSorterApp(tk.Tk):
         self._mod_status_window: Optional[tk.Toplevel] = None
         self._status_trees: Dict[str, ttk.Treeview] = {}
         self._status_summary_var = tk.StringVar(value="")
+        self._update_check_in_progress = False
+        self.check_updates_button: Optional[ttk.Button] = None
 
         self._build_style()
         self._build_ui()
         self._build_settings_overlay()
         self.after(16, self._pump_ui_queue)
         self._report_mod_boot_messages()
+        self.after(1000, self._check_updates_on_launch)
 
     # ------------------------------------------------------------------
     # Compatibility shims
@@ -1333,11 +1339,7 @@ class Sims4ModSorterApp(tk.Tk):
     def _build_settings_overlay(self) -> None:
         palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
         self._settings_sidebar_width = 360
-        scrim_color = _scrim_color(palette.get("bg", "#111316"))
-
-        self.settings_scrim = tk.Frame(self, bg=scrim_color, highlightthickness=0, bd=0)
-        self.settings_scrim.place_forget()
-        self.settings_scrim.bind("<Button-1>", lambda _e: self.hide_settings())
+        self.settings_scrim = None
 
         self.settings_sidebar = tk.Frame(
             self,
@@ -1360,6 +1362,25 @@ class Sims4ModSorterApp(tk.Tk):
         header.grid(row=row, column=0, sticky="ew")
         ttk.Label(header, text="Settings", font=("TkDefaultFont", 12, "bold")).pack(side="left")
         ttk.Button(header, text="Close", command=self.hide_settings, width=7).pack(side="right")
+        row += 1
+
+        ttk.Separator(container).grid(row=row, column=0, sticky="ew", pady=(12, 10))
+        row += 1
+
+        updates_section = ttk.Frame(container)
+        updates_section.grid(row=row, column=0, sticky="ew")
+        updates_section.columnconfigure(0, weight=1)
+        ttk.Label(
+            updates_section,
+            textvariable=self._version_display_var,
+            font=("TkDefaultFont", 10, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        self.check_updates_button = ttk.Button(
+            updates_section,
+            text="Check for Updates",
+            command=self._on_manual_update_check,
+        )
+        self.check_updates_button.grid(row=1, column=0, sticky="ew", pady=(6, 0))
         row += 1
 
         ttk.Separator(container).grid(row=row, column=0, sticky="ew", pady=(12, 10))
@@ -1486,16 +1507,99 @@ class Sims4ModSorterApp(tk.Tk):
         self.log_text.configure(state="disabled")
 
     # ------------------------------------------------------------------
+    # Update checks
+    # ------------------------------------------------------------------
+    def _refresh_version_display(self) -> None:
+        if hasattr(self, "_version_display_var"):
+            self._version_display_var.set(f"App Version: {APP_VERSION}")
+
+    def _check_updates_on_launch(self) -> None:
+        self._start_update_check(manual=False)
+
+    def _on_manual_update_check(self) -> None:
+        self._start_update_check(manual=True)
+
+    def _start_update_check(self, *, manual: bool) -> None:
+        if self._update_check_in_progress:
+            if manual:
+                messagebox.showinfo("Update Check", "An update check is already running.", parent=self)
+            return
+        self._update_check_in_progress = True
+        button = getattr(self, "check_updates_button", None)
+        if manual and button and button.winfo_exists():
+            button.configure(state="disabled")
+
+        def worker() -> None:
+            error_message: Optional[str] = None
+            result: Optional[UpdateResult]
+            try:
+                result = check_for_update("app", APP_VERSION)
+            except Exception as exc:  # pragma: no cover - defensive
+                error_message = f"Update check failed: {exc}"
+                result = None
+            self._enqueue_ui(lambda: self._complete_update_check(result, manual, error_message))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _complete_update_check(
+        self, result: Optional[UpdateResult], manual: bool, error_message: Optional[str]
+    ) -> None:
+        self._update_check_in_progress = False
+        button = getattr(self, "check_updates_button", None)
+        if button and button.winfo_exists():
+            button.configure(state="normal")
+        self._refresh_version_display()
+
+        if error_message:
+            if manual:
+                messagebox.showerror("Update Check", error_message, parent=self)
+            else:
+                self.log(error_message)
+            return
+
+        if not result:
+            return
+
+        if result.message:
+            if manual:
+                messagebox.showerror("Update Check", result.message, parent=self)
+            else:
+                self.log(result.message)
+            return
+
+        if result.is_newer and result.latest_version:
+            self.log(f"Update available: {result.latest_version}")
+            prompt = (
+                f"Version {result.latest_version} is available (current version is {APP_VERSION}).\n"
+                "Would you like to open the download page?"
+            )
+            if messagebox.askyesno("Update Available", prompt, parent=self):
+                if result.download_url:
+                    webbrowser.open(result.download_url)
+                else:
+                    messagebox.showinfo(
+                        "Update Available", "Download URL is not configured.", parent=self
+                    )
+        else:
+            if manual:
+                messagebox.showinfo(
+                    "Update Check",
+                    f"You are using the latest version ({APP_VERSION}).",
+                    parent=self,
+                )
+
+    # ------------------------------------------------------------------
     # Settings overlay
     # ------------------------------------------------------------------
     def show_settings(self) -> None:
         if not hasattr(self, "settings_sidebar"):
             return
         palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
-        if hasattr(self, "settings_scrim"):
-            self.settings_scrim.configure(bg=_scrim_color(palette.get("bg", "#111316")))
-            self.settings_scrim.place(relx=0, rely=0, relwidth=1, relheight=1)
-            self.settings_scrim.tkraise()
+        scrim = getattr(self, "settings_scrim", None)
+        if scrim:
+            scrim.configure(bg=_scrim_color(palette.get("bg", "#111316")))
+            scrim.place(relx=0, rely=0, relwidth=1, relheight=1)
+            scrim.tkraise()
         self.settings_sidebar.configure(bg=palette.get("sel", "#2A2F3A"))
         self.settings_sidebar.place(
             relx=1.0,
@@ -1506,13 +1610,15 @@ class Sims4ModSorterApp(tk.Tk):
         )
         self.settings_sidebar.tkraise()
         self.settings_sidebar.focus_set()
+        self._refresh_version_display()
         self._update_theme_preview_highlight()
 
     def hide_settings(self) -> None:
         if hasattr(self, "settings_sidebar"):
             self.settings_sidebar.place_forget()
-        if hasattr(self, "settings_scrim"):
-            self.settings_scrim.place_forget()
+        scrim = getattr(self, "settings_scrim", None)
+        if scrim:
+            scrim.place_forget()
 
     # ------------------------------------------------------------------
     # Plugin status popup
@@ -1616,8 +1722,9 @@ class Sims4ModSorterApp(tk.Tk):
         self.log_text.configure(bg=palette.get("alt", "#1f2328"), fg=palette.get("fg", "#E6E6E6"))
         if hasattr(self, "settings_sidebar"):
             self.settings_sidebar.configure(bg=palette.get("sel", "#2A2F3A"))
-        if hasattr(self, "settings_scrim"):
-            self.settings_scrim.configure(bg=_scrim_color(palette.get("bg", "#111316")))
+        scrim = getattr(self, "settings_scrim", None)
+        if scrim:
+            scrim.configure(bg=_scrim_color(palette.get("bg", "#111316")))
         self._update_theme_preview_highlight()
         self.log(f"Theme applied: {self.theme_name.get()}")
     # ------------------------------------------------------------------
@@ -3394,6 +3501,7 @@ class Sims4ModSorterApp(tk.Tk):
         self.ignore_names_var = tk.StringVar(value="thumbcache,desktop.ini,resource.cfg")
         self.theme_name = tk.StringVar(value="Dark Mode")
         self.mods_root = tk.StringVar(value=get_default_mods_path())
+        self._version_display_var = tk.StringVar(value=f"App Version: {APP_VERSION}")
         self.items: List[FileItem] = []
         self.plugin_manager = load_user_plugins()
 
@@ -3402,11 +3510,14 @@ class Sims4ModSorterApp(tk.Tk):
         self._mod_status_window = None
         self._status_trees: Dict[str, ttk.Treeview] = {}
         self._status_summary_var = tk.StringVar(value="")
+        self._update_check_in_progress = False
+        self.check_updates_button = None
 
         self._build_style()
         self._build_ui()
         self._build_settings_overlay()
         self._report_mod_boot_messages()
+        self.after(1000, self._check_updates_on_launch)
 
     def _build_style(self):
         style = ttk.Style()
@@ -3529,10 +3640,7 @@ class Sims4ModSorterApp(tk.Tk):
     def _build_settings_overlay(self):
         theme = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
         self._settings_sidebar_width = 360
-        scrim = _scrim_color(theme.get("bg", "#111316"))
-        self.settings_scrim = tk.Frame(self, bg=scrim, highlightthickness=0, bd=0)
-        self.settings_scrim.place_forget()
-        self.settings_scrim.bind("<Button-1>", lambda _e: self.hide_settings())
+        self.settings_scrim = None
         self.settings_sidebar = tk.Frame(
             self,
             bg=theme.get("sel", "#2A2F3A"),
@@ -3552,6 +3660,23 @@ class Sims4ModSorterApp(tk.Tk):
         header.grid(row=row, column=0, sticky="ew")
         ttk.Label(header, text="Settings", font=("TkDefaultFont", 12, "bold")).pack(side="left")
         ttk.Button(header, text="Close", command=self.hide_settings, width=7).pack(side="right")
+        row += 1
+        ttk.Separator(container).grid(row=row, column=0, sticky="ew", pady=(12, 10))
+        row += 1
+        updates = ttk.Frame(container)
+        updates.grid(row=row, column=0, sticky="ew")
+        updates.columnconfigure(0, weight=1)
+        ttk.Label(
+            updates,
+            textvariable=self._version_display_var,
+            font=("TkDefaultFont", 10, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        self.check_updates_button = ttk.Button(
+            updates,
+            text="Check for Updates",
+            command=self._on_manual_update_check,
+        )
+        self.check_updates_button.grid(row=1, column=0, sticky="ew", pady=(6, 0))
         row += 1
         ttk.Separator(container).grid(row=row, column=0, sticky="ew", pady=(12, 10))
         row += 1
@@ -3592,10 +3717,11 @@ class Sims4ModSorterApp(tk.Tk):
         if not hasattr(self, "settings_sidebar"):
             return
         theme = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
-        if hasattr(self, "settings_scrim"):
-            self.settings_scrim.configure(bg=_scrim_color(theme.get("bg", "#111316")))
-            self.settings_scrim.place(relx=0, rely=0, relwidth=1, relheight=1)
-            self.settings_scrim.tkraise()
+        scrim = getattr(self, "settings_scrim", None)
+        if scrim:
+            scrim.configure(bg=_scrim_color(theme.get("bg", "#111316")))
+            scrim.place(relx=0, rely=0, relwidth=1, relheight=1)
+            scrim.tkraise()
         self.settings_sidebar.configure(bg=theme.get("sel", "#2A2F3A"))
         self.settings_sidebar.place(
             relx=1.0,
@@ -3606,13 +3732,15 @@ class Sims4ModSorterApp(tk.Tk):
         )
         self.settings_sidebar.tkraise()
         self.settings_sidebar.focus_set()
+        self._refresh_version_display()
         self._update_theme_preview_highlight()
 
     def hide_settings(self):
         if hasattr(self, "settings_sidebar"):
             self.settings_sidebar.place_forget()
-        if hasattr(self, "settings_scrim"):
-            self.settings_scrim.place_forget()
+        scrim = getattr(self, "settings_scrim", None)
+        if scrim:
+            scrim.place_forget()
 
     def show_mod_status_popup(self) -> None:
         if not self.plugin_manager:
@@ -3766,14 +3894,88 @@ class Sims4ModSorterApp(tk.Tk):
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
+    def _refresh_version_display(self):
+        if hasattr(self, "_version_display_var"):
+            self._version_display_var.set(f"App Version: {APP_VERSION}")
+
+    def _check_updates_on_launch(self):
+        self._start_update_check(manual=False)
+
+    def _on_manual_update_check(self):
+        self._start_update_check(manual=True)
+
+    def _start_update_check(self, *, manual: bool):
+        if self._update_check_in_progress:
+            if manual:
+                messagebox.showinfo("Update Check", "An update check is already running.", parent=self)
+            return
+        self._update_check_in_progress = True
+        if manual and self.check_updates_button and self.check_updates_button.winfo_exists():
+            self.check_updates_button.configure(state="disabled")
+
+        def worker():
+            error_message: Optional[str] = None
+            result: Optional[UpdateResult]
+            try:
+                result = check_for_update("app", APP_VERSION)
+            except Exception as exc:  # pragma: no cover - defensive
+                error_message = f"Update check failed: {exc}"
+                result = None
+            self.after(0, lambda: self._complete_update_check(result, manual, error_message))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _complete_update_check(self, result: Optional[UpdateResult], manual: bool, error_message: Optional[str]):
+        self._update_check_in_progress = False
+        if self.check_updates_button and self.check_updates_button.winfo_exists():
+            self.check_updates_button.configure(state="normal")
+        self._refresh_version_display()
+
+        if error_message:
+            if manual:
+                messagebox.showerror("Update Check", error_message, parent=self)
+            else:
+                self.log(error_message)
+            return
+
+        if not result:
+            return
+
+        if result.message:
+            if manual:
+                messagebox.showerror("Update Check", result.message, parent=self)
+            else:
+                self.log(result.message)
+            return
+
+        if result.is_newer and result.latest_version:
+            self.log(f"Update available: {result.latest_version}")
+            prompt = (
+                f"Version {result.latest_version} is available (current version is {APP_VERSION}).\n"
+                "Would you like to open the download page?"
+            )
+            if messagebox.askyesno("Update Available", prompt, parent=self):
+                if result.download_url:
+                    webbrowser.open(result.download_url)
+                else:
+                    messagebox.showinfo("Update Available", "Download URL is not configured.", parent=self)
+        else:
+            if manual:
+                messagebox.showinfo(
+                    "Update Check",
+                    f"You are using the latest version ({APP_VERSION}).",
+                    parent=self,
+                )
+
     def on_apply_theme(self):
         self._build_style()
         palette = self._theme_cache
         self.log_text.configure(bg=palette["alt"], fg=palette["fg"])
         if hasattr(self, "settings_sidebar"):
             self.settings_sidebar.configure(bg=palette["sel"])
-        if hasattr(self, "settings_scrim"):
-            self.settings_scrim.configure(bg=_scrim_color(palette["bg"]))
+        scrim = getattr(self, "settings_scrim", None)
+        if scrim:
+            scrim.configure(bg=_scrim_color(palette["bg"]))
         self._update_theme_preview_highlight()
         self.log("Theme applied: " + self.theme_name.get())
 
