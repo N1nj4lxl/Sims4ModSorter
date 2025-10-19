@@ -1218,7 +1218,7 @@ class Sims4ModSorterApp(tk.Tk):
         ttk.Button(top, text="Export Plan", command=self.on_export).pack(side="left", padx=4)
         ttk.Label(top, textvariable=self.status_var).pack(side="left", padx=12)
         ttk.Button(top, text="⚙", width=3, command=self.show_settings).pack(side="right")
-        ttk.Button(top, text="Mod Status", command=self.show_mod_status_popup).pack(side="right", padx=6)
+        ttk.Button(top, text="Plugin Status", command=self.show_mod_status_popup).pack(side="right", padx=6)
         ttk.Button(top, text="Undo Last", command=self.on_undo).pack(side="right", padx=6)
 
         mid = ttk.Frame(root_container)
@@ -3556,7 +3556,7 @@ class Sims4ModSorterApp(tk.Tk):
         ttk.Button(top, text="Scan", command=self.on_scan).pack(side="left", padx=4)
         ttk.Label(top, textvariable=self.status_var).pack(side="left", padx=12)
         ttk.Button(top, text="⚙", width=3, command=self.show_settings).pack(side="right")
-        ttk.Button(top, text="Mod Status", command=self.show_mod_status_popup).pack(side="right", padx=6)
+        ttk.Button(top, text="Plugin Status", command=self.show_mod_status_popup).pack(side="right", padx=6)
         ttk.Button(top, text="Undo Last", command=self.on_undo).pack(side="right", padx=6)
 
         mid = ttk.Frame(root_container); mid.pack(fill="both", expand=True, padx=12, pady=(6, 8))
