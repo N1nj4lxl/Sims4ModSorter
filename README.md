@@ -24,14 +24,13 @@ The main window lets you browse to your *Mods* directory, start a scan, and revi
 
 ### Settings and themes
 
-Click the cog button in the toolbar to open the redesigned **Settings** window. The notebook-style layout keeps related options together:
+Select the cog button in the toolbar to open the inline settings overlay. From there you can:
 
-* **General** shows version information and provides a one-click launcher for the Mod Manager, the exclusive place to enable or disable plugins.
-* **Scanning** controls whether sub-folders are inspected and which extensions or filename fragments are ignored during analysis.
-* **Appearance** presents larger live previews of every bundled theme so you can see header, table, and button colours before applying them.
-* **Plugins** aggregates any configuration panes registered by user mods.
+* Switch between built-in or custom themes using the preview grid.
+* Decide whether scans recurse into sub-folders.
+* Provide comma-separated file extensions or filename fragments to ignore during a scan.
 
-Changes apply immediately after you click **Apply** on the theme selector or close the window.
+Any changes take effect immediately when you click **Apply** or **Done**.
 
 ## Modding the sorter
 
@@ -46,7 +45,7 @@ Each mod directory should contain a `mod.json` manifest (created automatically b
 
 ### Managing mods with `mod_manager.py`
 
-Double-click `mod_manager.py` or run `python mod_manager.py` with no arguments to open the Tkinter Mod Manager. The GUI lets you import mods, review their status, and toggle enablement without editing manifests. For scripting or automation you can still reach the same features from the command line:
+Use the bundled CLI script to import, enable, or disable mods safely without editing manifests by hand:
 
 ```bash
 # List installed mods
@@ -63,7 +62,7 @@ python mod_manager.py enable "My Mod"
 python mod_manager.py disable my_mod
 ```
 
-Imported mods live in `user_mods/<folder>`. Disabling a mod toggles the `enabled` flag in its manifest so that the sorter loads without executing the plugin, keeping your main code safe from experimental additions. The sorter settings window now links directly to the Mod Manager to reinforce that plugin enablement belongs there.
+Imported mods live in `user_mods/<folder>`. Disabling a mod toggles the `enabled` flag in its manifest so that the sorter loads without executing the plugin, keeping your main code safe from experimental additions.
 
 ### Included example mod
 
