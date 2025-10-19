@@ -1,0 +1,6 @@
+{
+  "name": "Dependency Tracker",
+  "entry": "mod.py",
+  "enabled": true,
+  "callable": "register"
+}
