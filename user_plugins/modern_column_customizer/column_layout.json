@@ -1,0 +1,14 @@
+{
+  "columns": [
+    {"id": "inc", "label": "✔", "visible": true, "width": 48},
+    {"id": "rel", "label": "Folder", "visible": true, "width": 200},
+    {"id": "name", "label": "File", "visible": true, "width": 260},
+    {"id": "size", "label": "MB", "visible": true, "width": 80},
+    {"id": "type", "label": "Type", "visible": true, "width": 160},
+    {"id": "target", "label": "Target Folder", "visible": true, "width": 220},
+    {"id": "conf", "label": "Conf", "visible": true, "width": 80},
+    {"id": "linked", "label": "Linked", "visible": true, "width": 80},
+    {"id": "meta", "label": "Tags", "visible": true, "width": 220},
+    {"id": "notes", "label": "Notes", "visible": true, "width": 260}
+  ]
+}

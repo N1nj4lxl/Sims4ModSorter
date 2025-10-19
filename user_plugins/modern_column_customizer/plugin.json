@@ -1,0 +1,8 @@
+{
+  "name": "Modern Column Customizer",
+  "entry": "plugin.py",
+  "enabled": true,
+  "callable": "register",
+  "version": "1.0.0",
+  "min_sorter_version": "0.0.0"
+}

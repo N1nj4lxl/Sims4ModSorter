@@ -1554,7 +1554,7 @@ class Sims4ModSorterApp(tk.Tk):
             if manual:
                 messagebox.showerror("Update Check", error_message, parent=self)
             else:
-                self.log(error_message)
+                self.log(error_message, level="error")
             return
 
         if not result:
@@ -1564,7 +1564,7 @@ class Sims4ModSorterApp(tk.Tk):
             if manual:
                 messagebox.showerror("Update Check", result.message, parent=self)
             else:
-                self.log(result.message)
+                self.log(result.message, level="warn")
             return
 
         if result.is_newer and result.latest_version:
@@ -2681,7 +2681,7 @@ def flush_plugin_messages(app, phase: str) -> None:
         if not message:
             continue
         prefix = prefix_map.get(level, "Mod")
-        app.log(f"{prefix}: {message}")
+        app.log(f"{prefix}: {message}", level=level)
 
 # ---------------------------
 # Plugin support
@@ -3145,7 +3145,7 @@ def flush_plugin_messages(app, phase: str) -> None:
         if not message:
             continue
         prefix = prefix_map.get(level, "Mod")
-        app.log(f"{prefix}: {message}")
+        app.log(f"{prefix}: {message}", level=level)
 
 # ---------------------------
 # Plugin support
@@ -3814,6 +3814,7 @@ class Sims4ModSorterApp(tk.Tk):
         self._status_summary_var = tk.StringVar(value="")
         self._update_check_in_progress = False
         self.check_updates_button = None
+        self._log_entries: List[Tuple[str, str, str]] = []
 
         self._build_style()
         self._build_ui()
@@ -3957,8 +3958,28 @@ class Sims4ModSorterApp(tk.Tk):
         ttk.Button(bottom, text="Complete Sorting", command=self.on_complete).pack(side="right", padx=6)
 
         logf = ttk.Frame(root_container); logf.pack(fill="both", padx=12, pady=(0,10))
-        self.log_text = tk.Text(logf, height=6, wrap="word", state="disabled", relief="flat",
-                                bg=self._theme_cache["alt"], fg=self._theme_cache["fg"])
+        log_header = ttk.Frame(logf)
+        log_header.pack(fill="x", pady=(0, 6))
+        ttk.Label(log_header, text="Log Output").pack(side="left")
+        ttk.Button(
+            log_header,
+            text="Export All Logs",
+            command=lambda: self.on_export_logs(errors_only=False),
+        ).pack(side="right")
+        ttk.Button(
+            log_header,
+            text="Export Errors",
+            command=lambda: self.on_export_logs(errors_only=True),
+        ).pack(side="right", padx=(0, 8))
+        self.log_text = tk.Text(
+            logf,
+            height=6,
+            wrap="word",
+            state="disabled",
+            relief="flat",
+            bg=self._theme_cache["alt"],
+            fg=self._theme_cache["fg"],
+        )
         self.log_text.pack(fill="both", expand=False)
 
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
@@ -4215,12 +4236,63 @@ class Sims4ModSorterApp(tk.Tk):
             canvas.configure(highlightbackground=border, highlightcolor=border)
 
     # ---- helpers
-    def log(self, msg: str):
-        ts = time.strftime("%H:%M:%S")
+    def log(self, msg: str, level: str = "info"):
+        normalized = (level or "info").strip().lower()
+        if normalized not in {"info", "warn", "warning", "error"}:
+            normalized = "info"
+        if normalized == "warning":
+            normalized = "warn"
+        if normalized == "info":
+            lowered = msg.lower()
+            if "error" in lowered:
+                normalized = "error"
+            elif lowered.startswith("warn") or "warning" in lowered:
+                normalized = "warn"
+        timestamp = time.strftime("%H:%M:%S")
+        self._log_entries.append((timestamp, normalized, msg))
+        tag = normalized.upper()
+        if normalized == "info":
+            rendered = f"[{timestamp}] {msg}\n"
+        else:
+            rendered = f"[{timestamp}] [{tag}] {msg}\n"
         self.log_text.configure(state="normal")
-        self.log_text.insert("end", f"[{ts}] {msg}\n")
+        self.log_text.insert("end", rendered)
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
+
+    def on_export_logs(self, *, errors_only: bool) -> None:
+        if errors_only:
+            entries = [entry for entry in self._log_entries if entry[1] == "error"]
+        else:
+            entries = list(self._log_entries)
+        if not entries:
+            message = "No error logs to export." if errors_only else "No logs to export yet."
+            messagebox.showinfo("Export Logs", message, parent=self)
+            return
+        default_name = "modsorter-errors.log" if errors_only else "modsorter.log"
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Export Logs",
+            defaultextension=".log",
+            filetypes=[("Log files", "*.log"), ("Text files", "*.txt"), ("All files", "*.*")],
+            initialfile=default_name,
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                for timestamp, level_name, message in entries:
+                    tag = level_name.upper()
+                    if level_name == "info":
+                        handle.write(f"[{timestamp}] {message}\n")
+                    else:
+                        handle.write(f"[{timestamp}] [{tag}] {message}\n")
+        except Exception as exc:
+            messagebox.showerror("Export Logs", f"Failed to export logs: {exc}", parent=self)
+            self.log(f"Export failed: {exc}", level="error")
+            return
+        summary = "error" if errors_only else "all"
+        self.log(f"Exported {summary} logs to {path}")
 
     def _refresh_version_display(self):
         if hasattr(self, "_version_display_var"):
@@ -4327,7 +4399,7 @@ class Sims4ModSorterApp(tk.Tk):
             if done % 25 == 0 or state == "error":
                 self.status_var.set(f"Scanning {done}/{total}: {os.path.basename(path)}")
             if state == "error":
-                self.log(f"Scan error: {os.path.basename(path)}")
+                self.log(f"Scan error: {os.path.basename(path)}", level="error")
 
         def worker():
             ignore_exts = {e.strip() for e in self.ignore_exts_var.get().split(',')}
