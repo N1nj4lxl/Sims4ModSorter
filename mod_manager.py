@@ -7,11 +7,52 @@ import json
 import re
 import shutil
 import sys
+import threading
+import time
 import zipfile
 from pathlib import Path
 from typing import Dict, Optional
 
+from launch_utils import UpdateResult, check_for_update, get_local_version, log_launch_event
+
 USER_MODS_DIR = Path(__file__).resolve().parent / "user_mods"
+
+
+def _component_label(component: str) -> str:
+    return "Mod Manager" if component == "mod_manager" else component.replace("_", " ").title()
+
+
+def _process_update_result(component: str, result: UpdateResult, current_version: str) -> tuple[Optional[str], Optional[str]]:
+    label = _component_label(component)
+    if result.message:
+        log_launch_event(component, "update-check-message", {"message": result.message})
+        return result.message, None
+    if result.latest_version and result.is_newer:
+        log_launch_event(
+            component,
+            "update-available",
+            {
+                "latest": result.latest_version,
+                "current": current_version,
+                "download": result.download_url or "",
+            },
+        )
+        message = f"Update available: {label} {result.latest_version} (current {current_version})."
+        link = f"Download: {result.download_url}" if result.download_url else None
+        return message, link
+    if result.latest_version:
+        log_launch_event(component, "update-current", {"version": result.latest_version})
+        return f"{label} is up to date (version {result.latest_version}).", None
+    return None, None
+
+
+def _check_updates_for_cli(current_version: str) -> None:
+    result = check_for_update("mod_manager", current_version)
+    message, link = _process_update_result("mod_manager", result, current_version)
+    if message:
+        print(message)
+    if link:
+        print(link)
 
 
 def sanitize_name(name: str) -> str:
@@ -226,10 +267,11 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def interactive_main() -> int:
+def interactive_main(current_version: str) -> int:
     ensure_mods_dir()
     print("Sims4 Mod Sorter - Mod Manager")
     print("Manage user plugins without needing command-line arguments.")
+    _check_updates_for_cli(current_version)
     while True:
         print("\nOptions:")
         print("  1) Import mod")
@@ -274,19 +316,21 @@ def interactive_main() -> int:
             print("Invalid selection. Choose 1-5.")
 
 
-def run_gui() -> int:
+def run_gui(current_version: str) -> int:
     try:
         import tkinter as tk
         from tkinter import filedialog, messagebox, simpledialog, ttk
     except Exception as exc:
         print(f"GUI mode unavailable: {exc}", file=sys.stderr)
-        return interactive_main()
+        log_launch_event("mod_manager", "gui-import-failed", {"error": str(exc)})
+        return interactive_main(current_version)
 
     ensure_mods_dir()
     root = tk.Tk()
     root.title("Sims4 Mod Sorter - Mod Manager")
     root.geometry("560x360")
     root.minsize(520, 320)
+    log_launch_event("mod_manager", "gui-mode", {})
 
     columns = ("name", "status", "entry", "folder")
     tree = ttk.Treeview(root, columns=columns, show="headings", selectmode="browse")
@@ -414,6 +458,24 @@ def run_gui() -> int:
 
     refresh_tree()
     set_status("Manage your Sims4 Mod Sorter plugins.")
+
+    def update_worker() -> None:
+        result = check_for_update("mod_manager", current_version)
+        message, link = _process_update_result("mod_manager", result, current_version)
+
+        if not message:
+            return
+
+        combined = message if not link else f"{message}\n{link}"
+
+        def deliver() -> None:
+            set_status(combined)
+            if result.latest_version and result.is_newer:
+                messagebox.showinfo("Update Available", combined, parent=root)
+
+        root.after(0, deliver)
+
+    threading.Thread(target=update_worker, name="ModManagerUpdate", daemon=True).start()
     root.mainloop()
     return 0
 
@@ -422,25 +484,47 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     if argv is None:
         argv = sys.argv[1:]
+    current_version = get_local_version("mod_manager")
+    log_launch_event("mod_manager", "start", {"version": current_version})
     if not argv:
         parser.print_help()
         print()
         stdin = sys.stdin
         has_tty = bool(getattr(stdin, "isatty", lambda: False)()) if stdin is not None else False
         if not has_tty:
+            log_launch_event("mod_manager", "fallback-gui", {"reason": "no-tty"})
             try:
-                return run_gui()
+                return run_gui(current_version)
             except Exception as exc:
+                log_launch_event("mod_manager", "gui-start-failed", {"error": str(exc)})
                 print(f"GUI startup failed: {exc}", file=sys.stderr)
                 return 1
         try:
-            return interactive_main()
+            log_launch_event("mod_manager", "interactive-mode", {})
+            return interactive_main(current_version)
         except KeyboardInterrupt:
             print()
             return 0
     args = parser.parse_args(argv)
-    return args.func(args)
+    log_launch_event("mod_manager", "cli-command", {"command": args.command})
+    result = args.func(args)
+    _check_updates_for_cli(current_version)
+    return result
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        error_path = Path(__file__).with_name("mod_manager_error.log")
+        try:
+            with error_path.open("a", encoding="utf-8") as handle:
+                handle.write("\n=== Unhandled exception ===\n")
+                handle.write(time.strftime("%Y-%m-%d %H:%M:%S"))
+                handle.write("\n")
+                json.dump({"error": str(exc)}, handle)
+                handle.write("\n")
+        except Exception:
+            pass
+        log_launch_event("mod_manager", "unhandled-exception", {"error": str(exc)})
+        raise

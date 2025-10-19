@@ -26,6 +26,7 @@ from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence,
 import tkinter as tk
 from tkinter import filedialog, ttk
 
+from launch_utils import UpdateResult, check_for_update, get_local_version, log_launch_event
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -978,6 +979,8 @@ class Sims4ModSorterApp(tk.Tk):
         self.minsize(1100, 740)
         self.resizable(True, True)
 
+        self.app_version = get_local_version("mod_sorter")
+
         self.folder_map: Dict[str, str] = DEFAULT_FOLDER_MAP.copy()
         self.recurse_var = tk.BooleanVar(value=True)
         self.ignore_exts_var = tk.StringVar(value=".log,.cfg,.txt,.html")
@@ -1011,6 +1014,7 @@ class Sims4ModSorterApp(tk.Tk):
         self._build_settings_overlay()
         self.after(16, self._pump_ui_queue)
         self._report_mod_boot_messages()
+        self._start_update_check()
 
     # ------------------------------------------------------------------
     # Compatibility shims
@@ -1020,6 +1024,45 @@ class Sims4ModSorterApp(tk.Tk):
 
     def _report_mod_runtime_messages(self) -> None:
         flush_plugin_messages(self, "runtime")
+
+    def _start_update_check(self) -> None:
+        version = self.app_version
+
+        def worker() -> None:
+            result = check_for_update("mod_sorter", version)
+            self._enqueue_ui(lambda: self._handle_update_result(result))
+
+        thread = threading.Thread(target=worker, name="UpdateCheck", daemon=True)
+        thread.start()
+
+    def _handle_update_result(self, result: UpdateResult) -> None:
+        if result.message:
+            self.log(result.message)
+            log_launch_event("mod_sorter", "update-check-message", {"message": result.message})
+            return
+        if result.latest_version and result.is_newer:
+            message = f"Update available: {result.latest_version} (current {self.app_version})."
+            self.status_var.set("Update available")
+            self.log(message)
+            if result.download_url:
+                self.log(f"Download: {result.download_url}")
+            log_launch_event(
+                "mod_sorter",
+                "update-available",
+                {
+                    "latest": result.latest_version,
+                    "current": self.app_version,
+                    "download": result.download_url or "",
+                },
+            )
+            return
+        if result.latest_version:
+            self.log(f"Mod Sorter is up to date (version {result.latest_version}).")
+            log_launch_event(
+                "mod_sorter",
+                "update-current",
+                {"version": result.latest_version},
+            )
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
@@ -1751,6 +1794,7 @@ def main() -> None:
     try:
         app = Sims4ModSorterApp()
     except tk.TclError as exc:  # pragma: no cover - UI bootstrap guard
+        log_launch_event("mod_sorter", "tk-init-failed", {"error": str(exc)})
         print("Failed to start the Sims4 Mod Sorter UI:", exc, file=sys.stderr)
         print("Ensure you are running in a desktop session with Tk support.", file=sys.stderr)
         return
@@ -1761,10 +1805,15 @@ def main() -> None:
             handle.write(time.strftime("%Y-%m-%d %H:%M:%S"))
             handle.write("\n")
             traceback.print_exc(file=handle)
+        log_launch_event("mod_sorter", "startup-exception", {"log": error_path.name})
         print("An unexpected error prevented the Sims4 Mod Sorter UI from starting.", file=sys.stderr)
         print(f"Details were written to {error_path.name}.", file=sys.stderr)
         return
-    app.mainloop()
+    log_launch_event("mod_sorter", "startup-success", {"version": getattr(app, "app_version", get_local_version("mod_sorter"))})
+    try:
+        app.mainloop()
+    finally:
+        log_launch_event("mod_sorter", "mainloop-exit", {})
 
 
 if __name__ == "__main__":
