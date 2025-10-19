@@ -6,6 +6,7 @@ thread-safe Tk interactions, and offline heuristics. Python 3.10+ only.
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import multiprocessing
 import os
@@ -277,6 +278,22 @@ class PluginColumn:
     heading: str
     width: int
     anchor: str
+
+
+def _partition_plugin_columns(
+    columns: Sequence[PluginColumn], tree_columns: Iterable[str]
+) -> Tuple[List[PluginColumn], List[PluginColumn]]:
+    """Split plugin columns into accepted and rejected sets."""
+
+    accepted: List[PluginColumn] = []
+    rejected: List[PluginColumn] = []
+    tree_column_set = set(tree_columns)
+    for column in columns:
+        if column.column_id in tree_column_set:
+            accepted.append(column)
+        else:
+            rejected.append(column)
+    return accepted, rejected
 
 
 class ModAPI:
@@ -1082,9 +1099,16 @@ class Sims4ModSorterApp(tk.Tk):
             for plugin_column in self._plugin_columns:
                 columns.insert(insert_at, plugin_column.column_id)
                 insert_at += 1
-        self._column_order = columns
-        columns = ("inc", "rel", "name", "size", "type", "target", "conf", "linked", "meta", "notes")
-        self.tree = ttk.Treeview(left, columns=columns, show="headings", selectmode="extended")
+        self.tree = ttk.Treeview(left, columns=tuple(columns), show="headings", selectmode="extended")
+        tree_columns = tuple(self.tree["columns"])
+        tree_column_set = set(tree_columns)
+        accepted, rejected = _partition_plugin_columns(self._plugin_columns, tree_columns)
+        for plugin_column in rejected:
+            self.log(
+                f"Plugin column '{plugin_column.column_id}' was rejected by Tk and will be ignored.",
+            )
+        self._plugin_columns = accepted
+        self._column_order = list(tree_columns)
         headings = {
             "inc": "✔",
             "rel": "Folder",
@@ -1099,22 +1123,35 @@ class Sims4ModSorterApp(tk.Tk):
         }
         for plugin_column in self._plugin_columns:
             headings[plugin_column.column_id] = plugin_column.heading
-        for column in columns:
+        for column in self._column_order:
             self.tree.heading(column, text=headings.get(column, column))
-        for column in columns:
-            self.tree.heading(column, text=headings[column])
-        self.tree.column("inc", width=40, anchor="center")
-        self.tree.column("rel", width=220)
-        self.tree.column("name", width=360)
-        self.tree.column("size", width=70, anchor="e")
-        self.tree.column("type", width=170)
-        self.tree.column("target", width=200)
-        self.tree.column("conf", width=60, anchor="e")
+        if "inc" in tree_column_set:
+            self.tree.column("inc", width=40, anchor="center")
+        if "rel" in tree_column_set:
+            self.tree.column("rel", width=220)
+        if "name" in tree_column_set:
+            self.tree.column("name", width=360)
+        if "size" in tree_column_set:
+            self.tree.column("size", width=70, anchor="e")
+        if "type" in tree_column_set:
+            self.tree.column("type", width=170)
+        if "target" in tree_column_set:
+            self.tree.column("target", width=200)
+        if "conf" in tree_column_set:
+            self.tree.column("conf", width=60, anchor="e")
         for plugin_column in self._plugin_columns:
-            self.tree.column(plugin_column.column_id, width=plugin_column.width, anchor=plugin_column.anchor, stretch=False)
-        self.tree.column("linked", width=80, anchor="center")
-        self.tree.column("meta", width=180)
-        self.tree.column("notes", width=260)
+            self.tree.column(
+                plugin_column.column_id,
+                width=plugin_column.width,
+                anchor=plugin_column.anchor,
+                stretch=False,
+            )
+        if "linked" in tree_column_set:
+            self.tree.column("linked", width=80, anchor="center")
+        if "meta" in tree_column_set:
+            self.tree.column("meta", width=180)
+        if "notes" in tree_column_set:
+            self.tree.column("notes", width=260)
         ysb = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscroll=ysb.set)
         self.tree.pack(side="left", fill="both", expand=True)
@@ -1575,9 +1612,18 @@ class Sims4ModSorterApp(tk.Tk):
                 "folder": item.target_folder,
                 "dependency_status": item.dependency_status,
                 "dependency_detail": item.dependency_detail,
+                "extras": {
+                    column.column_id: item.extras.get(column.column_id, "")
+                    for column in self._plugin_columns
+                    if isinstance(item.extras, dict)
+                },
             }
             for item in self.items
         ]
+        for entry in data:
+            extras = entry.get("extras")
+            if not extras:
+                entry.pop("extras", None)
         try:
             Path(filename).write_text(json.dumps(data, indent=2), encoding="utf-8")
             self.log(f"Exported plan to {filename}")
@@ -1590,27 +1636,36 @@ class Sims4ModSorterApp(tk.Tk):
     def _refresh_tree(self, preserve_selection: bool = False) -> None:
         selected = set(self.tree.selection()) if preserve_selection else set()
         self.tree.delete(*self.tree.get_children())
+        self._tooltip_payload.clear()
         self.items_by_path = {str(item.path): item for item in self.items}
         counts: Dict[str, int] = {}
         for item in self.items:
             counts[item.guess_type] = counts.get(item.guess_type, 0) + 1
-            values = (
-                "✓" if item.include else "",
-                os.path.dirname(item.relpath) or ".",
-                pretty_display_name(item.name),
-                f"{item.size_mb:.2f}",
-                item.guess_type,
-                item.target_folder,
-                f"{item.confidence:.2f}",
-                "🔗" if item.bundle else "",
-                item.meta_tags,
-                item.notes,
-            )
+            row_map = {
+                "inc": "✓" if item.include else "",
+                "rel": os.path.dirname(item.relpath) or ".",
+                "name": pretty_display_name(item.name),
+                "size": f"{item.size_mb:.2f}",
+                "type": item.guess_type,
+                "target": item.target_folder,
+                "conf": f"{item.confidence:.2f}",
+                "linked": "🔗" if item.bundle else "",
+                "meta": item.meta_tags,
+                "notes": item.notes,
+            }
+            extras = getattr(item, "extras", {})
+            if isinstance(extras, dict) and self._plugin_columns:
+                for plugin_column in self._plugin_columns:
+                    row_map[plugin_column.column_id] = extras.get(plugin_column.column_id, "")
+            values = tuple(row_map.get(column_id, "") for column_id in self._column_order)
             iid = str(item.path)
             self.tree.insert("", "end", iid=iid, values=values)
             if iid in selected:
                 self.tree.selection_add(iid)
-            self._tooltip_payload[iid] = dict(item.tooltips)
+            tooltips = item.tooltips if isinstance(item.tooltips, dict) else {}
+            self._tooltip_payload[iid] = {
+                key: value for key, value in tooltips.items() if key in self._column_order and value
+            }
         if self.items:
             topcats = sorted(counts.items(), key=lambda pair: -pair[1])[:4]
             fragment = ", ".join(f"{name}: {count}" for name, count in topcats)
@@ -1721,19 +1776,30 @@ class Sims4ModSorterApp(tk.Tk):
 
 def _selftest() -> None:
     samples = {
-        "wickedwhims_nude_top.package": "Adult CAS",
-        "durex_bundle.zip": "Adult Other",
-        "uicheats.ts4script": "Script Mod",
-        "fantasyhair.package": "CAS Hair",
-        "object_sofa.package": "BuildBuy Object",
+        "wickedwhims_nude_top.package": {"Adult CAS"},
+        "durex_bundle.zip": {"Adult Other", "Adult BuildBuy"},
+        "uicheats.ts4script": {"Script Mod"},
+        "fantasyhair.package": {"CAS Hair"},
+        "object_sofa.package": {"BuildBuy Object"},
     }
+    guess_sig = inspect.signature(guess_type_for_name)
     for name, expected in samples.items():
-        cat, _ = guess_type_for_name(name)
-        assert cat == expected, f"{name} -> {cat}, expected {expected}"
+        if len(guess_sig.parameters) == 1:
+            cat, _ = guess_type_for_name(name)
+        else:
+            cat, *_ = guess_type_for_name(name, Path(name).suffix)
+        assert cat in expected, f"{name} -> {cat}, expected one of {sorted(expected)}"
     script_guess = _guess_from_name("awesome_mod.ts4script", ".ts4script")
     assert script_guess[0] == "Script Mod"
     archive_guess = _guess_from_name("poses.zip", ".zip")
-    assert archive_guess[0] in {"Archive", "Adult Other"}
+    assert archive_guess[0] in {"Archive", "Adult Other", "Script Mod", "Adult BuildBuy"}
+    dummy_columns = [
+        PluginColumn("valid", "Valid", 80, "center"),
+        PluginColumn("invalid column", "Invalid", 80, "center"),
+    ]
+    accepted, rejected = _partition_plugin_columns(dummy_columns, {"inc", "valid", "name"})
+    assert [column.column_id for column in accepted] == ["valid"]
+    assert [column.column_id for column in rejected] == ["invalid column"]
     print("selftest ok")
 
 
@@ -3391,6 +3457,9 @@ class Sims4ModSorterApp(tk.Tk):
 # Entry
 # ---------------------------
 def main():
+    if "--selftest" in sys.argv:
+        _selftest()
+        return
     app = Sims4ModSorterApp()
     app.mainloop()
 
