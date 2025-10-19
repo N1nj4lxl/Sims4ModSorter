@@ -34,53 +34,53 @@ Any changes take effect immediately when you click **Apply** or **Done**.
 
 ## Modding the sorter
 
-Sims4ModSorter now exposes a lightweight plugin system. Drop Python-based mods into the `user_mods/` directory next to `Sims4ModSorter.py` and they will be imported on launch. Mods receive a `ModAPI` instance and can:
+Sims4ModSorter now exposes a lightweight plugin system. Drop Python-based plugins into the `user_plugins/` directory next to `Sims4ModSorter.py` and they will be imported on launch. Plugins receive a `PluginAPI` instance and can:
 
 * Register pre-scan hooks to adjust scan parameters (ignored extensions, scan path, etc.).
 * Register post-scan hooks to inspect or modify the planned file list.
 * Register additional UI themes.
 * Emit log messages that appear in the application console.
 
-Each mod directory should contain a `mod.json` manifest (created automatically by the helper script below) that describes the entry script, registration callable, and whether the mod is enabled.
+Each plugin directory should contain a `plugin.json` manifest (created automatically by the helper script below) that describes the entry script, registration callable, and whether the plugin is enabled.
 
-### Managing mods with `mod_manager.py`
+### Managing plugins with `plugin_manager.py`
 
-Use the bundled CLI script to import, enable, or disable mods safely without editing manifests by hand:
+Use the bundled CLI script to import, enable, or disable plugins safely without editing manifests by hand:
 
 ```bash
-# List installed mods
-python mod_manager.py list
+# List installed plugins
+python plugin_manager.py list
 
 # Import a standalone script (entry callable defaults to `register`)
-python mod_manager.py import path/to/my_mod.py --name "My Mod"
+python plugin_manager.py import path/to/my_plugin.py --name "My Plugin"
 
-# Import a zipped mod but keep it disabled until you have tested it
-python mod_manager.py import path/to/my_mod.zip --disable
+# Import a zipped plugin but keep it disabled until you have tested it
+python plugin_manager.py import path/to/my_plugin.zip --disable
 
-# Enable or disable a mod by name or folder
-python mod_manager.py enable "My Mod"
-python mod_manager.py disable my_mod
+# Enable or disable a plugin by name or folder
+python plugin_manager.py enable "My Plugin"
+python plugin_manager.py disable my_plugin
 ```
 
-Imported mods live in `user_mods/<folder>`. Disabling a mod toggles the `enabled` flag in its manifest so that the sorter loads without executing the plugin, keeping your main code safe from experimental additions.
+Imported plugins live in `user_plugins/<folder>`. Disabling a plugin toggles the `enabled` flag in its manifest so that the sorter loads without executing the extension, keeping your main code safe from experimental additions.
 
-### Included example mod
+### Included example plugin
 
-The repository ships with an enabled sample plugin in `user_mods/example_theme_mod`. It demonstrates how to:
+The repository ships with an enabled sample plugin in `user_plugins/example_theme_plugin`. It demonstrates how to:
 
 * Register a custom "Ocean Breeze" theme that appears in the settings overlay previews.
 * Extend the scan by adding `.bak` and `.tmp` files to the ignored extension list.
 * Annotate `.package` files that contain "preview" in their filename so they are easy to review in the results grid.
 
-Launch the sorter normally (`python Sims4ModSorter.py`) and you will see log entries confirming that the example mod loaded. You can disable or remove it later with `python mod_manager.py disable example_theme_mod` once you are ready to build your own plugins.
+Launch the sorter normally (`python Sims4ModSorter.py`) and you will see log entries confirming that the example plugin loaded. You can disable or remove it later with `python plugin_manager.py disable example_theme_plugin` once you are ready to build your own plugins.
 
 ### Dependency Tracker plugin
 
-The `user_mods/dependency_tracker` plugin is bundled and enabled by default. It adds a **Deps** column to the results table, an export payload, and settings controls that help you stay on top of framework requirements:
+The `user_plugins/dependency_tracker` plugin is bundled and enabled by default. It adds a **Deps** column to the results table, an export payload, and settings controls that help you stay on top of framework requirements:
 
 * During scans it inspects `.package` and `.ts4script` files for phrases that match the local `known_dependencies.json` database. Recognised mods receive a ✅ icon when their dependencies are present or ⚠️ when something is missing.
 * Hover the icon to view a tooltip describing which frameworks were found or missing (for example, `Requires: UI Cheats Extension: MC Command Center (found), TS4 Script Loader (missing)`).
 * The Export Plan JSON includes `dependency_status` and `dependency_detail` keys for each entry so external tools can audit reports.
 * Open **Settings → Plugins → Dependency Tracker** to toggle tracking or reload the dependency list after editing `known_dependencies.json`. Reloading runs the analysis again without forcing a rescan.
 
-The plugin ships with common Sims 4 frameworks such as **MC Command Center**, **XML Injector**, **Basemental Drugs**, and **TS4 Script Loader**, but you can expand the JSON file with your own dependencies whenever you discover a new mod relationship.
+The plugin ships with common Sims 4 frameworks such as **MC Command Center**, **XML Injector**, **Basemental Drugs**, and **TS4 Script Loader**, but you can expand the JSON file with your own dependencies whenever you discover a new plugin relationship.

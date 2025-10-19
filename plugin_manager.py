@@ -1,4 +1,4 @@
-"""CLI utility to manage Sims4ModSorter user mods."""
+"""CLI utility to manage Sims4ModSorter user plugins."""
 from __future__ import annotations
 
 import argparse
@@ -10,21 +10,21 @@ import zipfile
 from pathlib import Path
 from typing import Dict, Optional
 
-USER_MODS_DIR = Path(__file__).resolve().parent / "user_mods"
+USER_PLUGINS_DIR = Path(__file__).resolve().parent / "user_plugins"
 
 
 def sanitize_name(name: str) -> str:
     safe = re.sub(r"[^0-9A-Za-z_-]+", "-", name.strip())
     safe = safe.strip("-_")
-    return safe or "mod"
+    return safe or "plugin"
 
 
-def ensure_mods_dir() -> None:
-    USER_MODS_DIR.mkdir(parents=True, exist_ok=True)
+def ensure_plugins_dir() -> None:
+    USER_PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def load_manifest(mod_dir: Path) -> Dict[str, object]:
-    manifest_path = mod_dir / "mod.json"
+def load_manifest(plugin_dir: Path) -> Dict[str, object]:
+    manifest_path = plugin_dir / "plugin.json"
     if manifest_path.exists():
         try:
             with open(manifest_path, "r", encoding="utf-8") as fh:
@@ -34,15 +34,15 @@ def load_manifest(mod_dir: Path) -> Dict[str, object]:
         except Exception:
             pass
     return {
-        "name": mod_dir.name,
-        "entry": "mod.py",
+        "name": plugin_dir.name,
+        "entry": "plugin.py",
         "enabled": True,
         "callable": "register",
     }
 
 
-def write_manifest(mod_dir: Path, manifest: Dict[str, object]) -> None:
-    manifest_path = mod_dir / "mod.json"
+def write_manifest(plugin_dir: Path, manifest: Dict[str, object]) -> None:
+    manifest_path = plugin_dir / "plugin.json"
     with open(manifest_path, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2, sort_keys=True)
 
@@ -56,22 +56,22 @@ def copy_directory(src: Path, dest: Path) -> None:
             shutil.copy2(item, target)
 
 
-def import_mod(args: argparse.Namespace) -> int:
+def import_plugin(args: argparse.Namespace) -> int:
     source = Path(args.source).expanduser().resolve()
     if not source.exists():
         print(f"Source not found: {source}", file=sys.stderr)
         return 1
 
-    ensure_mods_dir()
-    mod_name = args.name or source.stem
-    folder_name = sanitize_name(mod_name)
-    dest_dir = USER_MODS_DIR / folder_name
+    ensure_plugins_dir()
+    plugin_name = args.name or source.stem
+    folder_name = sanitize_name(plugin_name)
+    dest_dir = USER_PLUGINS_DIR / folder_name
 
     if dest_dir.exists():
         if args.overwrite:
             shutil.rmtree(dest_dir)
         else:
-            print(f"Mod '{folder_name}' already exists. Use --overwrite to replace it.", file=sys.stderr)
+            print(f"Plugin '{folder_name}' already exists. Use --overwrite to replace it.", file=sys.stderr)
             return 1
 
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -83,9 +83,9 @@ def import_mod(args: argparse.Namespace) -> int:
         with zipfile.ZipFile(source, "r") as zf:
             zf.extractall(dest_dir)
         if not entry:
-            potential = dest_dir / "mod.py"
+            potential = dest_dir / "plugin.py"
             if potential.exists():
-                entry = "mod.py"
+                entry = "plugin.py"
     elif source.is_file():
         entry = entry or source.name
         target_path = dest_dir / entry
@@ -94,114 +94,114 @@ def import_mod(args: argparse.Namespace) -> int:
     elif source.is_dir():
         copy_directory(source, dest_dir)
         if not entry:
-            potential = dest_dir / "mod.py"
+            potential = dest_dir / "plugin.py"
             if potential.exists():
-                entry = "mod.py"
+                entry = "plugin.py"
     else:
         print(f"Unsupported source type: {source}", file=sys.stderr)
         shutil.rmtree(dest_dir, ignore_errors=True)
         return 1
 
-    entry = entry or "mod.py"
+    entry = entry or "plugin.py"
     if not (dest_dir / entry).exists():
-        print(f"Entry file '{entry}' not found inside installed mod. Adjust --entry.", file=sys.stderr)
+        print(f"Entry file '{entry}' not found inside installed plugin. Adjust --entry.", file=sys.stderr)
         shutil.rmtree(dest_dir, ignore_errors=True)
         return 1
 
     manifest = {
-        "name": mod_name,
+        "name": plugin_name,
         "entry": entry,
         "enabled": not args.disable,
         "callable": callable_name,
     }
     write_manifest(dest_dir, manifest)
     status = "disabled" if args.disable else "enabled"
-    print(f"Imported mod '{mod_name}' into {dest_dir.name} ({status}).")
+    print(f"Imported plugin '{plugin_name}' into {dest_dir.name} ({status}).")
     return 0
 
 
-def list_mods(_args: argparse.Namespace) -> int:
-    ensure_mods_dir()
-    entries = [d for d in USER_MODS_DIR.iterdir() if d.is_dir()]
+def list_plugins(_args: argparse.Namespace) -> int:
+    ensure_plugins_dir()
+    entries = [d for d in USER_PLUGINS_DIR.iterdir() if d.is_dir()]
     if not entries:
-        print("No mods installed.")
+        print("No plugins installed.")
         return 0
 
-    print(f"Mods in {USER_MODS_DIR}:")
-    for mod_dir in sorted(entries, key=lambda d: d.name.lower()):
-        manifest = load_manifest(mod_dir)
+    print(f"Plugins in {USER_PLUGINS_DIR}:")
+    for plugin_dir in sorted(entries, key=lambda d: d.name.lower()):
+        manifest = load_manifest(plugin_dir)
         status = "enabled" if manifest.get("enabled", True) else "disabled"
-        entry = manifest.get("entry", "mod.py")
-        print(f"- {manifest.get('name', mod_dir.name)} [{status}] -> {mod_dir.name}/{entry}")
+        entry = manifest.get("entry", "plugin.py")
+        print(f"- {manifest.get('name', plugin_dir.name)} [{status}] -> {plugin_dir.name}/{entry}")
     return 0
 
 
-def find_mod(identifier: str) -> Optional[Path]:
-    ensure_mods_dir()
-    candidate = USER_MODS_DIR / sanitize_name(identifier)
+def find_plugin(identifier: str) -> Optional[Path]:
+    ensure_plugins_dir()
+    candidate = USER_PLUGINS_DIR / sanitize_name(identifier)
     if candidate.exists():
         return candidate
     identifier_lower = identifier.lower()
-    for mod_dir in USER_MODS_DIR.iterdir():
-        if not mod_dir.is_dir():
+    for plugin_dir in USER_PLUGINS_DIR.iterdir():
+        if not plugin_dir.is_dir():
             continue
-        manifest = load_manifest(mod_dir)
+        manifest = load_manifest(plugin_dir)
         name = str(manifest.get("name", ""))
         if name.lower() == identifier_lower:
-            return mod_dir
+            return plugin_dir
     return None
 
 
 def set_enabled(identifier: str, enabled: bool) -> int:
-    mod_dir = find_mod(identifier)
-    if not mod_dir:
-        print(f"Mod '{identifier}' not found.", file=sys.stderr)
+    plugin_dir = find_plugin(identifier)
+    if not plugin_dir:
+        print(f"Plugin '{identifier}' not found.", file=sys.stderr)
         return 1
-    manifest = load_manifest(mod_dir)
+    manifest = load_manifest(plugin_dir)
     manifest["enabled"] = enabled
-    write_manifest(mod_dir, manifest)
+    write_manifest(plugin_dir, manifest)
     state = "enabled" if enabled else "disabled"
-    print(f"Mod '{manifest.get('name', mod_dir.name)}' is now {state}.")
+    print(f"Plugin '{manifest.get('name', plugin_dir.name)}' is now {state}.")
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Manage Sims4ModSorter user mods.")
+    parser = argparse.ArgumentParser(description="Manage Sims4ModSorter user plugins.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    imp = subparsers.add_parser("import", help="Import a mod into the user_mods directory")
+    imp = subparsers.add_parser("import", help="Import a plugin into the user_plugins directory")
     imp.add_argument("source", help="Path to a .py file, directory, or .zip archive")
-    imp.add_argument("--name", help="Display name for the mod")
-    imp.add_argument("--entry", help="Relative entry file inside the mod", default=None)
+    imp.add_argument("--name", help="Display name for the plugin")
+    imp.add_argument("--entry", help="Relative entry file inside the plugin", default=None)
     imp.add_argument("--callable", help="Registration callable name", default="register")
-    imp.add_argument("--disable", action="store_true", help="Import the mod but leave it disabled")
-    imp.add_argument("--overwrite", action="store_true", help="Replace an existing mod with the same name")
-    imp.set_defaults(func=import_mod)
+    imp.add_argument("--disable", action="store_true", help="Import the plugin but leave it disabled")
+    imp.add_argument("--overwrite", action="store_true", help="Replace an existing plugin with the same name")
+    imp.set_defaults(func=import_plugin)
 
-    ls = subparsers.add_parser("list", help="List installed mods")
-    ls.set_defaults(func=list_mods)
+    ls = subparsers.add_parser("list", help="List installed plugins")
+    ls.set_defaults(func=list_plugins)
 
-    enable = subparsers.add_parser("enable", help="Enable a mod")
-    enable.add_argument("identifier", help="Folder name or mod display name")
+    enable = subparsers.add_parser("enable", help="Enable a plugin")
+    enable.add_argument("identifier", help="Folder name or plugin display name")
     enable.set_defaults(func=lambda args: set_enabled(args.identifier, True))
 
-    disable = subparsers.add_parser("disable", help="Disable a mod")
-    disable.add_argument("identifier", help="Folder name or mod display name")
+    disable = subparsers.add_parser("disable", help="Disable a plugin")
+    disable.add_argument("identifier", help="Folder name or plugin display name")
     disable.set_defaults(func=lambda args: set_enabled(args.identifier, False))
 
     return parser
 
 
 def interactive_main() -> int:
-    ensure_mods_dir()
-    print("Sims4 Mod Sorter - Mod Manager")
+    ensure_plugins_dir()
+    print("Sims4 Mod Sorter - Plugin Manager")
     print("Manage user plugins without needing command-line arguments.")
     while True:
         print("\nOptions:")
-        print("  1) Import mod")
-        print("  2) List mods")
-        print("  3) Enable mod")
-        print("  4) Disable mod")
+        print("  1) Import plugin")
+        print("  2) List plugins")
+        print("  3) Enable plugin")
+        print("  4) Disable plugin")
         print("  5) Quit")
         try:
             choice = input("Select an option: ").strip()
@@ -223,9 +223,9 @@ def interactive_main() -> int:
                 overwrite=overwrite,
                 disable=disable,
             )
-            import_mod(args)
+            import_plugin(args)
         elif choice == "2":
-            list_mods(argparse.Namespace())
+            list_plugins(argparse.Namespace())
         elif choice == "3":
             identifier = input("Folder name or display name: ").strip()
             if identifier:

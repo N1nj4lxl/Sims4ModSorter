@@ -1,4 +1,4 @@
-"""Explain why Sims4 Mod Sorter or the Mod Manager failed to open."""
+"""Explain why Sims4 Mod Sorter or the Plugin Manager failed to open."""
 from __future__ import annotations
 
 import argparse
@@ -11,7 +11,7 @@ from launch_utils import LAUNCH_LOG_PATH
 BASE_DIR = Path(__file__).resolve().parent
 ERROR_LOGS = {
     "mod_sorter": BASE_DIR / "Sims4ModSorter_error.log",
-    "mod_manager": BASE_DIR / "mod_manager_error.log",
+    "plugin_manager": BASE_DIR / "plugin_manager_error.log",
 }
 
 
@@ -66,11 +66,11 @@ def summarize_mod_sorter(show_logs: bool) -> None:
     print()
 
 
-def summarize_mod_manager(show_logs: bool) -> None:
-    print("== Mod Manager ==")
-    events = load_events("mod_manager")
+def summarize_plugin_manager(show_logs: bool) -> None:
+    print("== Plugin Manager ==")
+    events = load_events("plugin_manager")
     if not events:
-        print("No mod manager diagnostics logged yet. Run mod_manager.py at least once.\n")
+        print("No plugin manager diagnostics logged yet. Run plugin_manager.py at least once.\n")
         return
 
     fallback = find_last_event(events, ["fallback-gui", "gui-start-failed", "gui-import-failed"])
@@ -86,12 +86,12 @@ def summarize_mod_manager(show_logs: bool) -> None:
         print(f"Unhandled exception noted: {exception.get('details', {}).get('error', 'Unknown error')}")
 
     if show_logs:
-        log_path = ERROR_LOGS["mod_manager"]
+        log_path = ERROR_LOGS["plugin_manager"]
         if log_path.exists():
-            print("-- Mod manager error log excerpt --")
+            print("-- Plugin manager error log excerpt --")
             print(tail_file(log_path))
         else:
-            print("No mod_manager_error.log present.")
+            print("No plugin_manager_error.log present.")
     print()
 
 
@@ -106,10 +106,10 @@ def tail_file(path: Path, max_lines: int = 40) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Inspect Mod Sorter and Mod Manager fallback reasons.")
+    parser = argparse.ArgumentParser(description="Inspect Mod Sorter and Plugin Manager fallback reasons.")
     parser.add_argument(
         "--component",
-        choices=["mod_sorter", "mod_manager", "all"],
+        choices=["mod_sorter", "plugin_manager", "all"],
         default="all",
         help="Limit output to a single component.",
     )
@@ -118,8 +118,8 @@ def main() -> None:
 
     if args.component in ("mod_sorter", "all"):
         summarize_mod_sorter(args.logs)
-    if args.component in ("mod_manager", "all"):
-        summarize_mod_manager(args.logs)
+    if args.component in ("plugin_manager", "all"):
+        summarize_plugin_manager(args.logs)
 
 
 if __name__ == "__main__":
