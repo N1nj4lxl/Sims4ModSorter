@@ -2690,46 +2690,128 @@ def flush_plugin_messages(app, phase: str) -> None:
 USER_PLUGINS_DIR = Path(__file__).with_name("user_plugins")
 
 
+@dataclass
+class ToolbarButtonSpec:
+    button_id: str
+    text: str
+    command: Callable[[], None]
+    side: str = "left"
+    padx: int = 4
+    width: Optional[int] = None
+    owner: str = "core"
+
+
+@dataclass
+class PluginToolbarAction:
+    plugin_id: str
+    button_id: str
+    text: Optional[str] = None
+    command: Optional[Callable[["Sims4ModSorterApp", "PluginAPI"], None]] = None
+    side: Optional[str] = None
+    position: Optional[int] = None
+    insert_before: Optional[str] = None
+    insert_after: Optional[str] = None
+    width: Optional[int] = None
+    padx: Optional[int] = None
+    replace: bool = False
+
+
 class PluginAPI:
     """Lightweight API exposed to external plugins."""
 
-    def __init__(self, manager: "PluginManager"):
+    def __init__(self, manager: "PluginManager", plugin_id: str):
         self._manager = manager
+        self._plugin_id = plugin_id
 
     def register_pre_scan_hook(self, func):
         if callable(func):
-            self._manager.pre_scan_hooks.append(func)
+            self._manager.register_pre_scan_hook(self._plugin_id, func)
 
     def register_post_scan_hook(self, func):
         if callable(func):
-            self._manager.post_scan_hooks.append(func)
+            self._manager.register_post_scan_hook(self._plugin_id, func)
 
     def register_theme(self, name: str, palette: Dict[str, str]):
         required = {"bg", "fg", "alt", "accent", "sel"}
         if not name or not isinstance(palette, dict) or not required.issubset(palette.keys()):
-            self._manager.log_boot(f"Theme registration skipped for '{name or '?'}' (invalid palette)", level="warn")
+            self._manager.log_boot(
+                f"Theme registration skipped for '{name or '?'}' (invalid palette)",
+                level="warn",
+            )
             return
         THEMES[name] = {key: palette[key] for key in required}
         self._manager.log_boot(f"Theme registered: {name}", level="info")
 
     def log(self, message: str, level: str = "info"):
-        self._manager.log(message, level=level)
+        self._manager.log_from_plugin(self._plugin_id, message, level=level)
+
+    @property
+    def app(self) -> Optional["Sims4ModSorterApp"]:
+        return self._manager.app
+
+    def register_toolbar_button(
+        self,
+        button_id: str,
+        *,
+        text: Optional[str] = None,
+        command: Optional[Callable[["Sims4ModSorterApp", "PluginAPI"], None]] = None,
+        side: Optional[str] = None,
+        position: Optional[int] = None,
+        insert_before: Optional[str] = None,
+        insert_after: Optional[str] = None,
+        width: Optional[int] = None,
+        padx: Optional[int] = None,
+        replace: bool = False,
+    ) -> None:
+        self._manager.register_toolbar_button(
+            self._plugin_id,
+            button_id,
+            text=text,
+            command=command,
+            side=side,
+            position=position,
+            insert_before=insert_before,
+            insert_after=insert_after,
+            width=width,
+            padx=padx,
+            replace=replace,
+        )
+
+    def is_feature_enabled(self, feature_id: str, default: bool = False) -> bool:
+        return self._manager.is_feature_enabled(self._plugin_id, feature_id, default)
+
+    def request_refresh(self) -> None:
+        app = self.app
+        if app is None:
+            return
+        refresh = getattr(app, "_refresh_tree", None)
+        if callable(refresh):
+            app.after(0, refresh)
 
 
 class PluginManager:
     def __init__(self, plugins_dir: Path):
         self.plugins_dir = plugins_dir
-        self.pre_scan_hooks = []
-        self.post_scan_hooks = []
+        self.pre_scan_hooks: List[Tuple[str, Callable]] = []
+        self.post_scan_hooks: List[Tuple[str, Callable]] = []
         self.boot_messages: List[Tuple[str, str]] = []
         self.runtime_messages: List[Tuple[str, str]] = []
-        self.api = PluginAPI(self)
+        self.plugin_features: Dict[str, Dict[str, bool]] = {}
+        self.plugin_names: Dict[str, str] = {}
+        self._plugin_apis: Dict[str, PluginAPI] = {}
+        self.toolbar_actions: List[PluginToolbarAction] = []
+        self.app: Optional["Sims4ModSorterApp"] = None
 
     def log_boot(self, message: str, level: str = "info"):
         self.boot_messages.append((level, message))
 
     def log(self, message: str, level: str = "info"):
         self.runtime_messages.append((level, message))
+
+    def log_from_plugin(self, plugin_id: str, message: str, level: str = "info") -> None:
+        name = self.plugin_names.get(plugin_id, plugin_id)
+        formatted = f"[{name}] {message}" if name else message
+        self.log(formatted, level=level)
 
     def drain_boot_messages(self):
         msgs = list(self.boot_messages)
@@ -2741,8 +2823,17 @@ class PluginManager:
         self.runtime_messages.clear()
         return msgs
 
+    def attach_app(self, app: "Sims4ModSorterApp") -> None:
+        self.app = app
+
     def load(self):
         self.plugins_dir.mkdir(parents=True, exist_ok=True)
+        self.pre_scan_hooks.clear()
+        self.post_scan_hooks.clear()
+        self.toolbar_actions.clear()
+        self.plugin_features.clear()
+        self.plugin_names.clear()
+        self._plugin_apis.clear()
         for entry in sorted(self.plugins_dir.iterdir()):
             if entry.is_file() and entry.suffix == ".py":
                 manifest = {
@@ -2779,6 +2870,10 @@ class PluginManager:
             self.log_boot(f"Missing entry file for mod '{name}': {entry_path.name}", level="error")
             return
 
+        plugin_id = self._derive_plugin_id(manifest, entry_path)
+        self.plugin_names[plugin_id] = str(name)
+        self.plugin_features[plugin_id] = self._extract_feature_flags(manifest)
+
         module_name = manifest.get("import_name") or f"user_mod_{name}"
         module_name = re.sub(r"[^0-9A-Za-z_]+", "_", module_name)
         try:
@@ -2790,33 +2885,238 @@ class PluginManager:
             spec.loader.exec_module(module)
         except Exception as exc:
             self.log_boot(f"Failed to import mod '{name}': {exc}", level="error")
+            self._cleanup_plugin(plugin_id)
             return
 
         callable_name = manifest.get("callable", "register")
         register = getattr(module, callable_name, None)
         if not callable(register):
             self.log_boot(f"Plugin '{name}' missing callable '{callable_name}'", level="warn")
+            self._cleanup_plugin(plugin_id)
             return
         try:
-            register(self.api)
+            api = PluginAPI(self, plugin_id)
+            self._plugin_apis[plugin_id] = api
+            register(api)
         except Exception as exc:
             self.log_boot(f"Plugin '{name}' failed during register: {exc}", level="error")
+            self._cleanup_plugin(plugin_id)
             return
         self.log_boot(f"Loaded plugin: {name}")
 
+    def register_pre_scan_hook(self, plugin_id: str, func: Callable) -> None:
+        self.pre_scan_hooks.append((plugin_id, func))
+
+    def register_post_scan_hook(self, plugin_id: str, func: Callable) -> None:
+        self.post_scan_hooks.append((plugin_id, func))
+
     def run_pre_scan(self, context: Dict):
-        for hook in list(self.pre_scan_hooks):
+        for plugin_id, hook in list(self.pre_scan_hooks):
+            api = self._plugin_apis.get(plugin_id)
+            if not api:
+                continue
             try:
-                hook(context, self.api)
+                hook(context, api)
             except Exception as exc:
                 self.log(f"Pre-scan hook error ({hook.__module__}): {exc}", level="error")
 
     def run_post_scan(self, items: List[FileItem], context: Dict):
-        for hook in list(self.post_scan_hooks):
+        for plugin_id, hook in list(self.post_scan_hooks):
+            api = self._plugin_apis.get(plugin_id)
+            if not api:
+                continue
             try:
-                hook(items, context, self.api)
+                hook(items, context, api)
             except Exception as exc:
                 self.log(f"Post-scan hook error ({hook.__module__}): {exc}", level="error")
+
+    def register_toolbar_button(
+        self,
+        plugin_id: str,
+        button_id: str,
+        *,
+        text: Optional[str] = None,
+        command: Optional[Callable[["Sims4ModSorterApp", "PluginAPI"], None]] = None,
+        side: Optional[str] = None,
+        position: Optional[int] = None,
+        insert_before: Optional[str] = None,
+        insert_after: Optional[str] = None,
+        width: Optional[int] = None,
+        padx: Optional[int] = None,
+        replace: bool = False,
+    ) -> None:
+        if not button_id:
+            return
+        action = PluginToolbarAction(
+            plugin_id=plugin_id,
+            button_id=button_id,
+            text=text,
+            command=command,
+            side=side,
+            position=position,
+            insert_before=insert_before,
+            insert_after=insert_after,
+            width=width,
+            padx=padx,
+            replace=replace,
+        )
+        self.toolbar_actions.append(action)
+
+    def resolve_toolbar_buttons(
+        self, app: "Sims4ModSorterApp", base: List[ToolbarButtonSpec]
+    ) -> List[ToolbarButtonSpec]:
+        resolved: List[ToolbarButtonSpec] = [
+            ToolbarButtonSpec(
+                button_id=spec.button_id,
+                text=spec.text,
+                command=spec.command,
+                side=spec.side,
+                padx=spec.padx,
+                width=spec.width,
+                owner=spec.owner,
+            )
+            for spec in base
+        ]
+        spec_map = {spec.button_id: spec for spec in resolved}
+
+        def insert_spec(spec: ToolbarButtonSpec, action: PluginToolbarAction) -> None:
+            def find_index(target_id: str) -> Optional[int]:
+                for idx, existing in enumerate(resolved):
+                    if existing.button_id == target_id:
+                        return idx
+                return None
+
+            if action.insert_before:
+                idx = find_index(action.insert_before)
+                if idx is not None:
+                    resolved.insert(idx, spec)
+                    return
+            if action.insert_after:
+                idx = find_index(action.insert_after)
+                if idx is not None:
+                    resolved.insert(idx + 1, spec)
+                    return
+            if action.position is not None:
+                position = max(0, action.position)
+                count = 0
+                for idx, existing in enumerate(resolved):
+                    if existing.side == spec.side:
+                        if count >= position:
+                            resolved.insert(idx, spec)
+                            return
+                        count += 1
+                resolved.append(spec)
+                return
+            last_idx = None
+            for idx, existing in enumerate(resolved):
+                if existing.side == spec.side:
+                    last_idx = idx
+            if last_idx is None:
+                resolved.append(spec)
+            else:
+                resolved.insert(last_idx + 1, spec)
+
+        for action in self.toolbar_actions:
+            spec = spec_map.get(action.button_id)
+            if spec is not None and (action.replace or action.button_id in spec_map):
+                if action.text is not None:
+                    spec.text = action.text
+                if action.side in {"left", "right"}:
+                    spec.side = action.side
+                if action.width is not None:
+                    spec.width = action.width
+                if action.padx is not None:
+                    spec.padx = action.padx
+                if action.command is not None:
+                    spec.command = self._wrap_button_command(action, app)
+                    spec.owner = action.plugin_id
+                if any((action.insert_before, action.insert_after, action.position is not None)):
+                    resolved.remove(spec)
+                    insert_spec(spec, action)
+                continue
+            if action.button_id in spec_map and not action.replace:
+                self.log_boot(
+                    f"Toolbar button '{action.button_id}' already defined; skipping duplicate from {action.plugin_id}",
+                    level="warn",
+                )
+                continue
+            if action.command is None:
+                self.log_boot(
+                    f"Toolbar button '{action.button_id}' from {action.plugin_id} has no command and was ignored",
+                    level="warn",
+                )
+                continue
+            new_spec = ToolbarButtonSpec(
+                button_id=action.button_id,
+                text=action.text or action.button_id,
+                command=self._wrap_button_command(action, app),
+                side=action.side if action.side in {"left", "right"} else "left",
+                padx=action.padx if action.padx is not None else 4,
+                width=action.width,
+                owner=action.plugin_id,
+            )
+            spec_map[action.button_id] = new_spec
+            insert_spec(new_spec, action)
+        return resolved
+
+    def is_feature_enabled(self, plugin_id: str, feature_id: str, default: bool = False) -> bool:
+        flags = self.plugin_features.get(plugin_id)
+        if not flags:
+            return default
+        return bool(flags.get(feature_id, default))
+
+    def _wrap_button_command(self, action: PluginToolbarAction, app: "Sims4ModSorterApp") -> Callable[[], None]:
+        api = self._plugin_apis.get(action.plugin_id)
+
+        def _callback() -> None:
+            if not action.command or api is None:
+                return
+            try:
+                action.command(app, api)
+            except Exception as exc:
+                self.log(
+                    f"Toolbar button '{action.button_id}' from {action.plugin_id} failed: {exc}",
+                    level="error",
+                )
+
+        return _callback
+
+    def _derive_plugin_id(self, manifest: Dict[str, object], entry_path: Path) -> str:
+        candidate = manifest.get("id") or manifest.get("plugin_id") or manifest.get("name")
+        if isinstance(candidate, str) and candidate.strip():
+            base = candidate.strip()
+        else:
+            base = entry_path.parent.name if entry_path.parent != entry_path else entry_path.stem
+        sanitized = re.sub(r"[^0-9A-Za-z_-]+", "-", base).strip("-_")
+        return sanitized or entry_path.stem
+
+    def _extract_feature_flags(self, manifest: Dict[str, object]) -> Dict[str, bool]:
+        flags: Dict[str, bool] = {}
+        raw = manifest.get("features")
+        if not isinstance(raw, list):
+            return flags
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            feature_id = str(item.get("id") or item.get("feature_id") or "").strip()
+            if not feature_id:
+                continue
+            enabled = item.get("enabled")
+            if enabled is None:
+                default_value = item.get("default")
+                enabled_flag = bool(default_value if default_value is not None else True)
+            else:
+                enabled_flag = bool(enabled)
+            flags[feature_id] = enabled_flag
+        return flags
+
+    def _cleanup_plugin(self, plugin_id: str) -> None:
+        self.plugin_features.pop(plugin_id, None)
+        self.plugin_names.pop(plugin_id, None)
+        self._plugin_apis.pop(plugin_id, None)
+        self.pre_scan_hooks = [(pid, hook) for pid, hook in self.pre_scan_hooks if pid != plugin_id]
+        self.post_scan_hooks = [(pid, hook) for pid, hook in self.post_scan_hooks if pid != plugin_id]
+        self.toolbar_actions = [action for action in self.toolbar_actions if action.plugin_id != plugin_id]
 
 
 def load_user_plugins() -> PluginManager:
@@ -3504,6 +3804,8 @@ class Sims4ModSorterApp(tk.Tk):
         self._version_display_var = tk.StringVar(value=f"App Version: {APP_VERSION}")
         self.items: List[FileItem] = []
         self.plugin_manager = load_user_plugins()
+        if self.plugin_manager:
+            self.plugin_manager.attach_app(self)
 
         self.status_var = tk.StringVar(value="Ready")
         self.summary_var = tk.StringVar(value="No plan yet")
@@ -3516,6 +3818,7 @@ class Sims4ModSorterApp(tk.Tk):
         self._build_style()
         self._build_ui()
         self._build_settings_overlay()
+        flush_plugin_messages(self, "boot")
         self._report_mod_boot_messages()
         self.after(1000, self._check_updates_on_launch)
 
@@ -3552,12 +3855,37 @@ class Sims4ModSorterApp(tk.Tk):
         top = ttk.Frame(root_container); top.pack(fill="x", padx=12, pady=10)
         ttk.Label(top, text="Mods folder:").pack(side="left")
         self.entry_path = ttk.Entry(top, textvariable=self.mods_root, width=80); self.entry_path.pack(side="left", padx=8)
-        ttk.Button(top, text="Browse", command=self.on_browse).pack(side="left", padx=4)
-        ttk.Button(top, text="Scan", command=self.on_scan).pack(side="left", padx=4)
+        base_buttons = [
+            ToolbarButtonSpec("browse", "Browse", self.on_browse, side="left", padx=4),
+            ToolbarButtonSpec("scan", "Scan", self.on_scan, side="left", padx=4),
+            ToolbarButtonSpec("undo", "Undo Last", self.on_undo, side="right", padx=6),
+            ToolbarButtonSpec("plugin_status", "Plugin Status", self.show_mod_status_popup, side="right", padx=6),
+            ToolbarButtonSpec("settings", "⚙", self.show_settings, side="right", padx=0, width=3),
+        ]
+        if self.plugin_manager:
+            toolbar_specs = self.plugin_manager.resolve_toolbar_buttons(self, base_buttons)
+        else:
+            toolbar_specs = list(base_buttons)
+        self.toolbar_buttons: Dict[str, ttk.Button] = {}
+        left_specs = [spec for spec in toolbar_specs if spec.side == "left"]
+        right_specs = [spec for spec in toolbar_specs if spec.side == "right"]
+        for spec in left_specs:
+            button = ttk.Button(top, text=spec.text, command=spec.command)
+            if spec.width is not None:
+                button.configure(width=spec.width)
+            button.pack(side="left", padx=spec.padx)
+            self.toolbar_buttons[spec.button_id] = button
+            if spec.button_id == "scan":
+                self.btn_scan = button
         ttk.Label(top, textvariable=self.status_var).pack(side="left", padx=12)
-        ttk.Button(top, text="⚙", width=3, command=self.show_settings).pack(side="right")
-        ttk.Button(top, text="Plugin Status", command=self.show_mod_status_popup).pack(side="right", padx=6)
-        ttk.Button(top, text="Undo Last", command=self.on_undo).pack(side="right", padx=6)
+        right_frame = ttk.Frame(top)
+        right_frame.pack(side="right")
+        for spec in right_specs:
+            button = ttk.Button(right_frame, text=spec.text, command=spec.command)
+            if spec.width is not None:
+                button.configure(width=spec.width)
+            button.pack(side="left", padx=spec.padx)
+            self.toolbar_buttons[spec.button_id] = button
 
         mid = ttk.Frame(root_container); mid.pack(fill="both", expand=True, padx=12, pady=(6, 8))
         header = ttk.Frame(mid); header.pack(fill="x", pady=(0,6))
