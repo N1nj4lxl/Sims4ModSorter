@@ -7,7 +7,7 @@ import re
 import shutil
 import sys
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
@@ -85,6 +85,41 @@ def load_manifest(plugin_dir: Path) -> Dict[str, object]:
     }
 
 
+def parse_features(manifest: Dict[str, object]) -> List[PluginFeature]:
+    features: List[PluginFeature] = []
+    raw = manifest.get("features")
+    if not isinstance(raw, list):
+        return features
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        feature_id = str(item.get("id") or item.get("feature_id") or "").strip()
+        if not feature_id:
+            continue
+        name = str(item.get("name") or feature_id)
+        description = str(item.get("description") or "")
+        default_value = item.get("default")
+        if default_value is None:
+            default_enabled = True
+        else:
+            default_enabled = bool(default_value)
+        enabled_value = item.get("enabled")
+        if enabled_value is None:
+            enabled_flag = default_enabled
+        else:
+            enabled_flag = bool(enabled_value)
+        features.append(
+            PluginFeature(
+                feature_id=feature_id,
+                name=name,
+                description=description,
+                enabled=enabled_flag,
+                default=default_enabled,
+            )
+        )
+    return features
+
+
 def write_manifest(plugin_dir: Path, manifest: Dict[str, object]) -> None:
     manifest_path = plugin_dir / "plugin.json"
     with open(manifest_path, "w", encoding="utf-8") as handle:
@@ -140,6 +175,15 @@ def describe_source(path: Path) -> str:
 
 
 @dataclass
+class PluginFeature:
+    feature_id: str
+    name: str
+    description: str
+    enabled: bool
+    default: bool = True
+
+
+@dataclass
 class PluginEntry:
     name: str
     folder: str
@@ -148,6 +192,7 @@ class PluginEntry:
     source: Path
     status: str
     message: str = ""
+    features: List[PluginFeature] = field(default_factory=list)
 
 
 class PluginLibrary:
@@ -169,6 +214,7 @@ class PluginLibrary:
             version = determine_version(manifest, entry_path)
             status = "Enabled" if enabled else "Disabled"
             message = ""
+            features = parse_features(manifest)
             compat = compatibility_message(manifest)
             if compat:
                 status = "Blocked"
@@ -185,6 +231,7 @@ class PluginLibrary:
                     source=plugin_dir,
                     status=status,
                     message=message,
+                    features=features,
                 )
             )
         return entries
@@ -246,6 +293,7 @@ class PluginLibrary:
         }
         write_manifest(dest_dir, manifest)
         version = determine_version(manifest, dest_dir / chosen_entry)
+        features = parse_features(manifest)
         status = "Enabled" if manifest["enabled"] else "Disabled"
         return PluginEntry(
             name=plugin_name,
@@ -255,6 +303,7 @@ class PluginLibrary:
             source=dest_dir,
             status=status,
             message="Imported",
+            features=features,
         )
 
     def set_enabled(self, identifier: str, enabled: bool) -> PluginEntry:
@@ -263,6 +312,7 @@ class PluginLibrary:
         manifest["enabled"] = enabled
         write_manifest(plugin_dir, manifest)
         version = determine_version(manifest, plugin_dir / str(manifest.get("entry", "plugin.py")))
+        features = parse_features(manifest)
         status = "Enabled" if enabled else "Disabled"
         return PluginEntry(
             name=str(manifest.get("name") or plugin_dir.name),
@@ -272,6 +322,41 @@ class PluginLibrary:
             source=plugin_dir,
             status=status,
             message="",
+            features=features,
+        )
+
+    def set_features(self, identifier: str, feature_states: Dict[str, bool]) -> PluginEntry:
+        plugin_dir = self._resolve(identifier)
+        manifest = load_manifest(plugin_dir)
+        raw = manifest.get("features")
+        if not isinstance(raw, list):
+            raise ValueError("Plugin does not define any configurable features")
+        updated_features: List[Dict[str, object]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                updated_features.append(item)
+                continue
+            feature_id = str(item.get("id") or item.get("feature_id") or "").strip()
+            payload = dict(item)
+            if feature_id and feature_id in feature_states:
+                payload["enabled"] = bool(feature_states[feature_id])
+            updated_features.append(payload)
+        manifest["features"] = updated_features
+        write_manifest(plugin_dir, manifest)
+        entry_path = plugin_dir / str(manifest.get("entry", "plugin.py"))
+        version = determine_version(manifest, entry_path)
+        enabled = bool(manifest.get("enabled", True))
+        features = parse_features(manifest)
+        status = "Enabled" if enabled else "Disabled"
+        return PluginEntry(
+            name=str(manifest.get("name") or plugin_dir.name),
+            folder=plugin_dir.name,
+            version=version,
+            enabled=enabled,
+            source=plugin_dir,
+            status=status,
+            message="",
+            features=features,
         )
 
     def remove(self, identifier: str) -> None:
@@ -367,6 +452,8 @@ class PluginManagerApp(tk.Tk):
         self.btn_enable.pack(side="left", padx=(24, 0))
         self.btn_disable = ttk.Button(toolbar, text="Disable", command=lambda: self.on_toggle(False))
         self.btn_disable.pack(side="left", padx=(8, 0))
+        self.btn_settings = ttk.Button(toolbar, text="Settings", command=self.on_settings)
+        self.btn_settings.pack(side="left", padx=(8, 0))
         ttk.Button(toolbar, text="Remove", command=self.on_remove).pack(side="left", padx=(8, 0))
 
         columns = ("name", "folder", "version", "status", "message")
@@ -458,6 +545,26 @@ class PluginManagerApp(tk.Tk):
         state = "enabled" if enabled else "disabled"
         self.status_var.set(f"Plugin {entry.name} {state}")
 
+    def on_settings(self) -> None:
+        identifier = self._selected_folder()
+        if not identifier:
+            return
+        entry = next((e for e in self.entries if e.folder == identifier), None)
+        if not entry or not entry.features:
+            messagebox.showinfo("Plugin Settings", "Selected plugin does not expose configurable features.", parent=self)
+            return
+        dialog = PluginSettingsDialog(self, entry)
+        self.wait_window(dialog)
+        if dialog.result is None:
+            return
+        try:
+            updated = self.library.set_features(identifier, dialog.result)
+        except Exception as exc:
+            messagebox.showerror("Update failed", str(exc), parent=self)
+            return
+        self.refresh()
+        self.status_var.set(f"Updated settings for {updated.name}")
+
     def on_remove(self) -> None:
         identifier = self._selected_folder()
         if not identifier:
@@ -491,6 +598,7 @@ class PluginManagerApp(tk.Tk):
         if not folder:
             self.btn_enable.state(["disabled"])
             self.btn_disable.state(["disabled"])
+            self.btn_settings.state(["disabled"])
             return
         entry = next((e for e in self.entries if e.folder == folder), None)
         if entry and entry.enabled:
@@ -499,6 +607,10 @@ class PluginManagerApp(tk.Tk):
         else:
             self.btn_enable.state(["!disabled"])
             self.btn_disable.state(["disabled"])
+        if entry and entry.features:
+            self.btn_settings.state(["!disabled"])
+        else:
+            self.btn_settings.state(["disabled"])
 
 
 class ImportDialog(tk.Toplevel):
@@ -549,6 +661,51 @@ class ImportDialog(tk.Toplevel):
             self.disable_var.get(),
             self.overwrite_var.get(),
         )
+        self.destroy()
+
+
+class PluginSettingsDialog(tk.Toplevel):
+    def __init__(self, parent: PluginManagerApp, entry: PluginEntry) -> None:
+        super().__init__(parent)
+        self.title(f"Settings · {entry.name}")
+        self.configure(bg="#1f1f24")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self.result: Optional[Dict[str, bool]] = None
+        self._feature_vars: Dict[str, tk.BooleanVar] = {}
+
+        frame = ttk.Frame(self, padding=16)
+        frame.pack(fill="both", expand=True)
+
+        if not entry.features:
+            ttk.Label(frame, text="This plugin does not expose configurable features.").pack()
+        else:
+            for index, feature in enumerate(entry.features):
+                var = tk.BooleanVar(value=feature.enabled)
+                self._feature_vars[feature.feature_id] = var
+                ttk.Checkbutton(frame, text=feature.name, variable=var).grid(row=index * 2, column=0, sticky="w")
+                description = feature.description.strip()
+                if description:
+                    ttk.Label(frame, text=description, wraplength=420, style="Status.TLabel").grid(
+                        row=index * 2 + 1, column=0, sticky="w", pady=(0, 8)
+                    )
+                else:
+                    ttk.Frame(frame).grid(row=index * 2 + 1, column=0, pady=(0, 8))
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=len(entry.features) * 2 + 1, column=0, sticky="e", pady=(12, 0))
+        ttk.Button(buttons, text="Cancel", command=self.destroy).pack(side="right")
+        ttk.Button(buttons, text="Save", command=self._on_accept).pack(side="right", padx=(0, 8))
+
+        self.bind("<Return>", lambda _e: self._on_accept())
+        self.bind("<Escape>", lambda _e: self.destroy())
+
+    def _on_accept(self) -> None:
+        if not self._feature_vars:
+            self.result = {}
+        else:
+            self.result = {key: bool(var.get()) for key, var in self._feature_vars.items()}
         self.destroy()
 
 

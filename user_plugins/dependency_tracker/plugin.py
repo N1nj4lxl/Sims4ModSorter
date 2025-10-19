@@ -18,6 +18,9 @@ ICON_OK = "\u2705"
 SCANNED_EXTS = {".package", ".ts4script"}
 DB_PATH = Path(__file__).with_name("known_dependencies.json")
 
+FEATURE_TRACKING = "tracking"
+FEATURE_OVERLAY = "overlay"
+
 DEFAULT_DB: Dict[str, List[Dict[str, object]]] = {
     "mods": [
         {
@@ -74,10 +77,15 @@ DATABASE = {
     "frameworks": [],
     "lookup": {},
 }
+FEATURE_FLAGS: Dict[str, bool] = {FEATURE_TRACKING: True, FEATURE_OVERLAY: True}
 TRACKING_ENABLED = True
 LAST_ITEMS: List[object] = []
+LAST_RESULTS: List[Dict[str, object]] = []
 CHECK_VAR: Optional[tk.BooleanVar] = None
 INFO_LABELS: List[ttk.Label] = []
+OVERLAY_WINDOW: Optional[tk.Toplevel] = None
+OVERLAY_TREE: Optional[ttk.Treeview] = None
+OVERLAY_STATUS: Optional[tk.StringVar] = None
 
 
 def _normalise(raw: Dict[str, object]) -> Dict[str, object]:
@@ -281,6 +289,86 @@ def _log_summary(api, results: List[Dict[str, object]], duration: float, total_i
     api.log(f"[Dependency Tracker] Finished dependency analysis in {duration:.2f}s")
 
 
+def _ensure_overlay(app: tk.Tk) -> Optional[tk.Toplevel]:
+    global OVERLAY_WINDOW, OVERLAY_TREE, OVERLAY_STATUS
+    if OVERLAY_WINDOW and OVERLAY_WINDOW.winfo_exists():
+        return OVERLAY_WINDOW
+    window = tk.Toplevel(app)
+    window.title("Dependency Tracker Summary")
+    window.geometry("780x440")
+    window.transient(app)
+    frame = ttk.Frame(window, padding=12)
+    frame.pack(fill="both", expand=True)
+    columns = ("file", "mods", "status", "detail")
+    tree = ttk.Treeview(frame, columns=columns, show="headings")
+    tree.heading("file", text="File")
+    tree.heading("mods", text="Detected Mod")
+    tree.heading("status", text="Status")
+    tree.heading("detail", text="Dependencies")
+    tree.column("file", anchor="w", width=200)
+    tree.column("mods", anchor="w", width=200)
+    tree.column("status", anchor="center", width=100)
+    tree.column("detail", anchor="w", width=340)
+    tree.pack(fill="both", expand=True)
+    OVERLAY_TREE = tree
+    status_var = tk.StringVar(value="No dependencies detected.")
+    OVERLAY_STATUS = status_var
+    ttk.Label(frame, textvariable=status_var).pack(anchor="w", pady=(8, 0))
+
+    def on_close() -> None:
+        window.withdraw()
+
+    window.protocol("WM_DELETE_WINDOW", on_close)
+    OVERLAY_WINDOW = window
+    return window
+
+
+def _populate_overlay() -> None:
+    if not OVERLAY_TREE or not OVERLAY_TREE.winfo_exists():
+        return
+    tree = OVERLAY_TREE
+    tree.delete(*tree.get_children())
+    total = len(LAST_RESULTS)
+    missing = 0
+    for result in LAST_RESULTS:
+        item = result.get("item")
+        file_name = getattr(item, "name", "unknown")
+        mods = ", ".join(result.get("mods", []))
+        status = "Missing" if result.get("missing") else "OK"
+        if result.get("missing"):
+            missing += 1
+        detail = result.get("detail", "")
+        tree.insert("", "end", values=(file_name, mods, status, detail))
+    if OVERLAY_STATUS is not None:
+        try:
+            if total:
+                OVERLAY_STATUS.set(f"Tracked {total} mod(s); {missing} with missing dependencies")
+            else:
+                OVERLAY_STATUS.set("No dependencies detected.")
+        except tk.TclError:
+            pass
+
+
+def _schedule_overlay_update(api) -> None:
+    app = api.app
+    if app is None:
+        return
+
+    def _refresh() -> None:
+        _populate_overlay()
+
+    app.after(0, _refresh)
+
+
+def _show_overlay(app: tk.Tk, _api) -> None:
+    window = _ensure_overlay(app)
+    if not window:
+        return
+    window.deiconify()
+    window.lift()
+    _populate_overlay()
+
+
 def _reanalyze_async(api, reason: str) -> None:
     if not LAST_ITEMS:
         return
@@ -292,12 +380,16 @@ def _reanalyze_async(api, reason: str) -> None:
                 _clear_item(item)
             api.log("[Dependency Tracker] Tracking disabled. Dependency markers cleared.")
             api.request_refresh()
+            LAST_RESULTS.clear()
+            _schedule_overlay_update(api)
             return
         start = time.perf_counter()
         results = _analyse(items)
         duration = time.perf_counter() - start
         api.log(f"[Dependency Tracker] {reason}")
         _log_summary(api, results, duration, len(items))
+        LAST_RESULTS[:] = list(results)
+        _schedule_overlay_update(api)
         api.request_refresh()
 
     threading.Thread(target=worker, daemon=True).start()
@@ -310,6 +402,7 @@ def _build_settings(app, frame, api) -> None:
     def on_toggle() -> None:
         global TRACKING_ENABLED
         TRACKING_ENABLED = bool(CHECK_VAR.get())
+        FEATURE_FLAGS[FEATURE_TRACKING] = TRACKING_ENABLED
         state = "enabled" if TRACKING_ENABLED else "disabled"
         api.log(f"[Dependency Tracker] Tracking {state}.")
         if TRACKING_ENABLED:
@@ -338,9 +431,27 @@ def _build_settings(app, frame, api) -> None:
 
 
 def register(api) -> None:
+    global TRACKING_ENABLED
+
     _load_database(api)
+    FEATURE_FLAGS[FEATURE_TRACKING] = api.is_feature_enabled(FEATURE_TRACKING, default=True)
+    FEATURE_FLAGS[FEATURE_OVERLAY] = api.is_feature_enabled(FEATURE_OVERLAY, default=True)
+    TRACKING_ENABLED = FEATURE_FLAGS[FEATURE_TRACKING]
     api.register_column(COLUMN_ID, "Deps", width=64, anchor="center")
     api.register_settings_section("Dependency Tracker", _build_settings)
+
+    if FEATURE_FLAGS[FEATURE_OVERLAY]:
+        def on_show_overlay(app, _api) -> None:
+            _show_overlay(app, api)
+
+        api.register_toolbar_button(
+            "dependency-tracker",
+            text="Dependencies",
+            command=on_show_overlay,
+            side="right",
+            insert_before="plugin_status",
+            padx=6,
+        )
 
     def post_scan(items, context, _api) -> None:
         global LAST_ITEMS
@@ -348,11 +459,15 @@ def register(api) -> None:
         if not TRACKING_ENABLED:
             for item in items:
                 _clear_item(item)
+            LAST_RESULTS.clear()
+            _schedule_overlay_update(api)
             return
         start = time.perf_counter()
         results = _analyse(items)
         duration = time.perf_counter() - start
         _log_summary(api, results, duration, len(items))
+        LAST_RESULTS[:] = list(results)
+        _schedule_overlay_update(api)
 
     api.register_post_scan_hook(post_scan)
     api.log("[Dependency Tracker] Plugin initialised.")

@@ -3,5 +3,21 @@
   "entry": "plugin.py",
   "enabled": true,
   "callable": "register",
-  "version": "1.0.0"
+  "version": "1.0.0",
+  "features": [
+    {
+      "id": "tracking",
+      "name": "Enable dependency tracking",
+      "description": "Analyse scanned mods for known dependencies and mark missing requirements.",
+      "default": true,
+      "enabled": true
+    },
+    {
+      "id": "overlay",
+      "name": "Toolbar overlay button",
+      "description": "Add a toolbar button that opens an overlay listing detected dependencies.",
+      "default": true,
+      "enabled": true
+    }
+  ]
 }
