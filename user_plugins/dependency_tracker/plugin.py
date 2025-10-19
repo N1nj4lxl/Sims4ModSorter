@@ -434,8 +434,14 @@ def register(api) -> None:
     global TRACKING_ENABLED
 
     _load_database(api)
-    FEATURE_FLAGS[FEATURE_TRACKING] = api.is_feature_enabled(FEATURE_TRACKING, default=True)
-    FEATURE_FLAGS[FEATURE_OVERLAY] = api.is_feature_enabled(FEATURE_OVERLAY, default=True)
+
+    get_flag = getattr(api, "is_feature_enabled", None)
+    if callable(get_flag):
+        FEATURE_FLAGS[FEATURE_TRACKING] = bool(get_flag(FEATURE_TRACKING, default=True))
+        FEATURE_FLAGS[FEATURE_OVERLAY] = bool(get_flag(FEATURE_OVERLAY, default=True))
+    else:
+        FEATURE_FLAGS[FEATURE_TRACKING] = True
+        FEATURE_FLAGS[FEATURE_OVERLAY] = True
     TRACKING_ENABLED = FEATURE_FLAGS[FEATURE_TRACKING]
     api.register_column(COLUMN_ID, "Deps", width=64, anchor="center")
     api.register_settings_section("Dependency Tracker", _build_settings)

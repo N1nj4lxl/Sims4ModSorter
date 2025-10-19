@@ -454,6 +454,8 @@ class PluginManagerApp(tk.Tk):
         self.btn_disable.pack(side="left", padx=(8, 0))
         self.btn_settings = ttk.Button(toolbar, text="Settings", command=self.on_settings)
         self.btn_settings.pack(side="left", padx=(8, 0))
+        self.btn_copy_error = ttk.Button(toolbar, text="Copy Error", command=self.on_copy_error)
+        self.btn_copy_error.pack(side="left", padx=(8, 0))
         ttk.Button(toolbar, text="Remove", command=self.on_remove).pack(side="left", padx=(8, 0))
 
         columns = ("name", "folder", "version", "status", "message")
@@ -580,6 +582,23 @@ class PluginManagerApp(tk.Tk):
             self.refresh()
             self.status_var.set(f"Removed {name}")
 
+    def on_copy_error(self) -> None:
+        identifier = self._selected_folder()
+        if not identifier:
+            return
+        entry = next((e for e in self.entries if e.folder == identifier), None)
+        if not entry or not entry.message:
+            messagebox.showinfo("Copy Error", "Selected plugin has no error details to copy.", parent=self)
+            return
+        payload = f"{entry.name} [{entry.status}] - {entry.message}".strip()
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(payload)
+        except Exception as exc:
+            messagebox.showerror("Copy Error", f"Unable to copy details: {exc}", parent=self)
+            return
+        self.status_var.set(f"Copied error for {entry.name}")
+
     # Helpers ------------------------------------------------------------
     def _reload_tree(self) -> None:
         self.tree.delete(*self.tree.get_children())
@@ -599,6 +618,7 @@ class PluginManagerApp(tk.Tk):
             self.btn_enable.state(["disabled"])
             self.btn_disable.state(["disabled"])
             self.btn_settings.state(["disabled"])
+            self.btn_copy_error.state(["disabled"])
             return
         entry = next((e for e in self.entries if e.folder == folder), None)
         if entry and entry.enabled:
@@ -611,6 +631,10 @@ class PluginManagerApp(tk.Tk):
             self.btn_settings.state(["!disabled"])
         else:
             self.btn_settings.state(["disabled"])
+        if entry and entry.message:
+            self.btn_copy_error.state(["!disabled"])
+        else:
+            self.btn_copy_error.state(["disabled"])
 
 
 class ImportDialog(tk.Toplevel):
