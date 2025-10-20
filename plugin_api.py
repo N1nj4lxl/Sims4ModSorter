@@ -155,7 +155,25 @@ class ScanMetrics:
     # ------------------------------------------------------------------
     # Public API for plugins and the core app
     # ------------------------------------------------------------------
-    def begin_session(self) -> int:
+    def begin_session(self, *, plugins: Optional[Iterable[str]] = None) -> int:
+        normalized_plugins: List[str] = []
+        if plugins is not None:
+            source: Iterable[str]
+            if isinstance(plugins, str):
+                source = [plugins]
+            else:
+                source = plugins
+            seen: set[str] = set()
+            for name in source:
+                try:
+                    text = str(name)
+                except Exception:
+                    continue
+                text = text.strip()
+                if not text or text in seen:
+                    continue
+                seen.add(text)
+                normalized_plugins.append(text)
         with self._lock:
             self._finalize_active(failed=True)
             self._session_counter += 1
@@ -165,6 +183,10 @@ class ScanMetrics:
                 started_wall=now,
                 started_perf=time.perf_counter(),
             )
+            for plugin_name in normalized_plugins:
+                session.plugins[plugin_name] = _PluginStats(name=plugin_name)
+            if normalized_plugins:
+                session.plugin_count = len(session.plugins)
             self._current = session
             self._notify({"event": "session_started", "session": session.snapshot()})
             return session.session_id
