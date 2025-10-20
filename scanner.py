@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections import Counter
 import urllib.parse
 import urllib.request
 import zipfile
@@ -254,6 +255,7 @@ ADULT_SCAN_MAX_BYTES = 2 * 1024 * 1024
 ADULT_SCAN_CHUNK_SIZE = 65_536
 ADULT_SCAN_MAX_ARCHIVE_ENTRIES = 40
 ADULT_SCAN_MAX_SOURCES = 5
+ARCHIVE_SUMMARY_MAX_ENTRIES = 200
 
 TYPE_IDS: Dict[int, str] = {
     0x034AEECB: "CASP",
@@ -443,23 +445,25 @@ def _scan_stream_for_keywords(stream, limit: int) -> set[str]:
     _ensure_adult_word_cache(limit)
     hits: set[str] = set()
     remaining = limit
+    carry = ""
     while remaining > 0:
         chunk = stream.read(min(ADULT_SCAN_CHUNK_SIZE, remaining))
         if not chunk:
             break
-        try:
-            lowered = chunk.decode("utf-8", "ignore").lower()
-        except AttributeError:
-            lowered = chunk.lower()
         remaining -= len(chunk)
-        for keyword in _ADULT_WORD_CACHE:
-            if keyword and keyword in lowered:
-                hits.add(keyword)
-        if _ADULT_MAX_WORD_LEN > 1:
-            remainder = lowered[-(_ADULT_MAX_WORD_LEN - 1) :]
-            if remainder:
-                stream.seek(max(stream.tell() - len(remainder), 0))
-                remaining += len(remainder)
+        if isinstance(chunk, bytes):
+            lowered = chunk.decode("utf-8", "ignore").lower()
+        else:
+            lowered = str(chunk).lower()
+        window = carry + lowered
+        if window:
+            for keyword in _ADULT_WORD_CACHE:
+                if keyword and keyword in window:
+                    hits.add(keyword)
+        if _ADULT_MAX_WORD_LEN > 1 and window:
+            carry = window[-(_ADULT_MAX_WORD_LEN - 1) :]
+        else:
+            carry = ""
     return hits
 
 
@@ -478,6 +482,57 @@ def _scan_text_file_for_adult_keywords(path: Path, limit: int = ADULT_SCAN_MAX_B
         return set()
     snippet = text.lower()[:limit]
     return {word for word in _ADULT_WORD_CACHE if word and word in snippet}
+
+
+_ARCHIVE_SUMMARY_EXT_TYPES = {
+    ".package": "packages",
+}
+for _ext in SCRIPT_EXTS:
+    _ARCHIVE_SUMMARY_EXT_TYPES[_ext] = "ts4scripts"
+for _ext in (".py", ".pyc", ".pyo"):
+    _ARCHIVE_SUMMARY_EXT_TYPES[_ext] = "python"
+for _ext in TEXT_FILE_EXTS:
+    _ARCHIVE_SUMMARY_EXT_TYPES[_ext] = "text"
+for _ext in (".png", ".jpg", ".jpeg"):
+    _ARCHIVE_SUMMARY_EXT_TYPES[_ext] = "images"
+for _ext in ARCHIVE_EXTS:
+    _ARCHIVE_SUMMARY_EXT_TYPES[_ext] = "archives"
+
+_ARCHIVE_SUMMARY_LABELS: Dict[str, Tuple[str, str]] = {
+    "packages": ("package", "packages"),
+    "ts4scripts": ("ts4script", "ts4scripts"),
+    "python": ("python file", "python files"),
+    "text": ("text file", "text files"),
+    "images": ("image", "images"),
+    "archives": ("archive", "archives"),
+    "other": ("file", "files"),
+}
+
+
+def _summarise_archive_contents(path: Path, limit: int = ARCHIVE_SUMMARY_MAX_ENTRIES) -> Tuple[Counter[str], bool, int]:
+    counts: Counter[str] = Counter()
+    truncated = False
+    total_entries = 0
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            names = [name for name in archive.namelist() if name and not name.endswith("/")]
+        total_entries = len(names)
+        max_entries = limit if limit and limit > 0 else total_entries
+        for index, name in enumerate(names):
+            if index >= max_entries:
+                truncated = True
+                break
+            ext = Path(name).suffix.lower()
+            if not ext:
+                continue
+            category = _ARCHIVE_SUMMARY_EXT_TYPES.get(ext)
+            if category:
+                counts[category] += 1
+            else:
+                counts["other"] += 1
+    except Exception:
+        return Counter(), False, 0
+    return counts, truncated, total_entries
 
 
 def _scan_archive_for_adult_keywords(path: Path) -> Tuple[set[str], List[str]]:
@@ -1080,6 +1135,30 @@ def scan_folder(
             note_applied = True
         if not note_applied and adult_note and adult_evidence.hits:
             notes = f"{notes}; {adult_note}" if notes else adult_note
+        archive_meta_tags: List[str] = []
+        archive_extras: Dict[str, str] = {}
+        if not is_disabled_ext and ext in ARCHIVE_EXTS:
+            summary_counts, summary_truncated, summary_total = _summarise_archive_contents(path)
+            if summary_total:
+                summary_parts: List[str] = []
+                for key, (singular, plural) in _ARCHIVE_SUMMARY_LABELS.items():
+                    count = summary_counts.get(key, 0)
+                    if not count:
+                        continue
+                    label = singular if count == 1 else plural
+                    summary_parts.append(f"{count} {label}")
+                    archive_meta_tags.append(f"{count} {label}")
+                    archive_extras[f"archive_{key}"] = str(count)
+                archive_extras["archive_entries"] = str(summary_total)
+                if summary_truncated:
+                    archive_extras["archive_summary_truncated"] = "true"
+                    if summary_parts:
+                        summary_parts.append("…")
+                if not summary_parts:
+                    label = "file" if summary_total == 1 else "files"
+                    summary_parts.append(f"{summary_total} {label}")
+                archive_note = "Archive contents: " + ", ".join(summary_parts)
+                notes = f"{notes}; {archive_note}" if notes else archive_note
         if not include_adult and not is_disabled_ext and category.startswith("Adult"):
             if progress_cb:
                 progress_cb(index, total, path, "filtered")
@@ -1094,8 +1173,11 @@ def scan_folder(
             for hit in sorted(adult_evidence.hits):
                 if hit not in raw_tags:
                     raw_tags.append(hit)
+        for tag in archive_meta_tags:
+            if tag not in raw_tags:
+                raw_tags.append(tag)
         meta_tags = ", ".join(raw_tags)
-        extras: Dict[str, str] = {}
+        extras: Dict[str, str] = dict(archive_extras)
         if adult_evidence.hits:
             extras["adult_keywords"] = ", ".join(sorted(adult_evidence.hits))
         if adult_note and (adult_evidence.hits or adult_evidence.is_confident):
