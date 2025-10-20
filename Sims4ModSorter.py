@@ -1145,6 +1145,11 @@ class Sims4ModSorterApp(tk.Tk):
         self.recurse_var = tk.BooleanVar(value=True)
         self.ignore_exts_var = tk.StringVar(value=".log,.cfg,.txt,.html")
         self.ignore_names_var = tk.StringVar(value="thumbcache,desktop.ini,resource.cfg")
+        self.include_adult_var = tk.BooleanVar(value=True)
+        self.scan_package_var = tk.BooleanVar(value=True)
+        self.scan_script_var = tk.BooleanVar(value=True)
+        self.scan_archive_var = tk.BooleanVar(value=True)
+        self.scan_misc_var = tk.BooleanVar(value=True)
         self.theme_name = tk.StringVar(value="Dark Mode")
         self.mods_root = tk.StringVar(value=get_default_mods_path())
         self._version_display_var = tk.StringVar(value=f"App Version: {APP_VERSION}")
@@ -1188,9 +1193,16 @@ class Sims4ModSorterApp(tk.Tk):
         self._update_overlay_details_btn: Optional[ttk.Button] = None
         self._update_overlay_visible: bool = False
 
+        self.scan_folder_display = tk.StringVar(value="All folders")
+        self.scan_folders: Optional[set[str]] = None
+        self._available_folders: List[str] = []
+        self._folder_menu_vars: Dict[str, tk.BooleanVar] = {}
+        self._folder_menu_refresh_after: Optional[str] = None
+
         self._build_style()
         self._build_ui()
         self._build_settings_overlay()
+        self.mods_root.trace_add("write", lambda *_: self._schedule_folder_menu_refresh())
         self.after(16, self._pump_ui_queue)
         self._report_mod_boot_messages()
         self.after(1000, self._check_updates_on_launch)
@@ -3987,9 +3999,17 @@ def map_type_to_folder(cat: str, folder_map: Dict[str, str]) -> str:
 # ---------------------------
 # Scan, bundle, move, undo
 # ---------------------------
-def scan_folder(path: str, folder_map: Dict[str, str], recurse: bool = True,
-                ignore_exts: Optional[set] = None, ignore_name_contains: Optional[List[str]] = None,
-                progress_cb=None) -> List[FileItem]:
+def scan_folder(
+    path: str,
+    folder_map: Dict[str, str],
+    recurse: bool = True,
+    ignore_exts: Optional[set] = None,
+    ignore_name_contains: Optional[List[str]] = None,
+    progress_cb=None,
+    selected_folders: Optional[Sequence[str]] = None,
+    include_adult: bool = True,
+    allowed_exts: Optional[set[str]] = None,
+) -> List[FileItem]:
     if not os.path.isdir(path):
         return []
 
@@ -3998,35 +4018,89 @@ def scan_folder(path: str, folder_map: Dict[str, str], recurse: bool = True,
         for ext in (ignore_exts or set()) if ext and ext.strip()
     }
     ignore_name_contains = [tok.strip().lower() for tok in (ignore_name_contains or []) if tok and tok.strip()]
+    allowed_exts = (
+        {
+            ext.strip().lower() if ext.strip().startswith('.') else f".{ext.strip().lower()}"
+            for ext in (allowed_exts or set())
+            if ext and str(ext).strip()
+        }
+        if allowed_exts is not None
+        else None
+    )
+    base_root = os.path.normpath(path)
+    selected: Optional[List[str]] = None
+    if selected_folders:
+        seen: set[str] = set()
+        selected = []
+        for folder in selected_folders:
+            rel = str(folder).strip() or "."
+            rel = "." if rel in {".", os.curdir} else os.path.normpath(rel)
+            if rel not in seen:
+                seen.add(rel)
+                selected.append(rel)
 
-    def iter_candidates():
-        if recurse:
-            for root, _, files in os.walk(path):
-                for fname in files:
-                    yield os.path.join(root, fname)
-        else:
-            with os.scandir(path) as entries:
-                for entry in entries:
-                    if entry.is_file():
-                        yield entry.path
+    def add_candidates_for(base: str, include_children: bool, results: List[str], seen_paths: set[str]) -> None:
+        if not os.path.exists(base):
+            return
+        try:
+            if os.path.isfile(base):
+                norm = os.path.normpath(base)
+                if os.path.commonpath([base_root, norm]) != base_root:
+                    return
+                if norm not in seen_paths:
+                    seen_paths.add(norm)
+                    results.append(norm)
+                return
+            if include_children:
+                for root_dir, _, files in os.walk(base):
+                    for fname in files:
+                        full = os.path.normpath(os.path.join(root_dir, fname))
+                        if os.path.commonpath([base_root, full]) != base_root:
+                            continue
+                        if full not in seen_paths:
+                            seen_paths.add(full)
+                            results.append(full)
+            else:
+                with os.scandir(base) as entries:
+                    for entry in entries:
+                        if entry.is_file():
+                            full = os.path.normpath(entry.path)
+                            if os.path.commonpath([base_root, full]) != base_root:
+                                continue
+                            if full not in seen_paths:
+                                seen_paths.add(full)
+                                results.append(full)
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            return
 
-    def count_candidates():
-        if recurse:
-            total = 0
-            for _, _, files in os.walk(path):
-                total += len(files)
-            return total
-        with os.scandir(path) as entries:
-            return sum(1 for entry in entries if entry.is_file())
+    candidates: List[str] = []
+    seen_files: set[str] = set()
+    if selected is None:
+        add_candidates_for(base_root, recurse, candidates, seen_files)
+    else:
+        for rel in selected:
+            if rel == ".":
+                add_candidates_for(base_root, False, candidates, seen_files)
+            else:
+                target = os.path.normpath(os.path.join(base_root, rel))
+                if os.path.commonpath([base_root, target]) != base_root:
+                    continue
+                add_candidates_for(target, recurse, candidates, seen_files)
 
-    total = count_candidates()
+    total = len(candidates)
     items: List[FileItem] = []
 
-    for idx, fpath in enumerate(iter_candidates(), start=1):
+    for idx, fpath in enumerate(candidates, start=1):
         fname = os.path.basename(fpath)
         lowname = fname.lower()
         ext = os.path.splitext(fname)[1].lower()
 
+        if allowed_exts is not None and ext not in allowed_exts:
+            if progress_cb:
+                progress_cb(idx, total, fpath, "filtered")
+            continue
         if ext in ignore_exts or any(tok in lowname for tok in ignore_name_contains):
             if progress_cb:
                 progress_cb(idx, total, fpath, "ignored")
@@ -4037,6 +4111,10 @@ def scan_folder(path: str, folder_map: Dict[str, str], recurse: bool = True,
             guess = guess_type_for_name(fname, ext)
             cat, conf, notes = guess
             cat, conf, notes, tags = refine_with_metadata(fpath, guess)
+            if not include_adult and cat.startswith("Adult"):
+                if progress_cb:
+                    progress_cb(idx, total, fpath, "filtered")
+                continue
             relp = os.path.relpath(fpath, path)
             target = map_type_to_folder(cat, folder_map)
             items.append(FileItem(
@@ -4177,6 +4255,11 @@ class Sims4ModSorterApp(tk.Tk):
         self.recurse_var = tk.BooleanVar(value=True)
         self.ignore_exts_var = tk.StringVar(value=".log,.cfg,.txt,.html")
         self.ignore_names_var = tk.StringVar(value="thumbcache,desktop.ini,resource.cfg")
+        self.include_adult_var = tk.BooleanVar(value=True)
+        self.scan_package_var = tk.BooleanVar(value=True)
+        self.scan_script_var = tk.BooleanVar(value=True)
+        self.scan_archive_var = tk.BooleanVar(value=True)
+        self.scan_misc_var = tk.BooleanVar(value=True)
         self.theme_name = tk.StringVar(value="Dark Mode")
         self.mods_root = tk.StringVar(value=get_default_mods_path())
         self._version_display_var = tk.StringVar(value=f"App Version: {APP_VERSION}")
@@ -4194,9 +4277,16 @@ class Sims4ModSorterApp(tk.Tk):
         self.check_updates_button = None
         self._log_entries: List[Tuple[str, str, str]] = []
 
+        self.scan_folder_display = tk.StringVar(value="All folders")
+        self.scan_folders: Optional[set[str]] = None
+        self._available_folders: List[str] = []
+        self._folder_menu_vars: Dict[str, tk.BooleanVar] = {}
+        self._folder_menu_refresh_after: Optional[str] = None
+
         self._build_style()
         self._build_ui()
         self._build_settings_overlay()
+        self.mods_root.trace_add("write", lambda *_: self._schedule_folder_menu_refresh())
         flush_plugin_messages(self, "boot")
         self._report_mod_boot_messages()
         self.after(1000, self._check_updates_on_launch)
@@ -4234,7 +4324,16 @@ class Sims4ModSorterApp(tk.Tk):
 
         top = ttk.Frame(root_container); top.pack(fill="x", padx=12, pady=10)
         ttk.Label(top, text="Mods folder:").pack(side="left")
-        self.entry_path = ttk.Entry(top, textvariable=self.mods_root, width=80); self.entry_path.pack(side="left", padx=8)
+        self.entry_path = ttk.Entry(top, textvariable=self.mods_root, width=80)
+        self.entry_path.pack(side="left", padx=8)
+        folders_section = ttk.Frame(top)
+        folders_section.pack(side="left", padx=(8, 0))
+        ttk.Label(folders_section, text="Scan folders:").pack(side="left")
+        self.folder_menu_button = ttk.Menubutton(folders_section, textvariable=self.scan_folder_display, width=18)
+        self.folder_menu = tk.Menu(self.folder_menu_button, tearoff=False)
+        self.folder_menu_button["menu"] = self.folder_menu
+        self.folder_menu_button.pack(side="left", padx=(4, 0))
+        ttk.Button(folders_section, text="Refresh", command=self._refresh_folder_menu).pack(side="left", padx=(4, 0))
         base_buttons = [
             ToolbarButtonSpec("browse", "Browse", self.on_browse, side="left", padx=4),
             ToolbarButtonSpec("scan", "Scan", self.on_scan, side="left", padx=4),
@@ -4361,8 +4460,121 @@ class Sims4ModSorterApp(tk.Tk):
         )
         self.log_text.pack(fill="both", expand=False)
 
+        self._refresh_folder_menu()
+
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
         self.tree.bind("<Double-1>", self.on_double_click)
+
+    def _schedule_folder_menu_refresh(self) -> None:
+        job = getattr(self, "_folder_menu_refresh_after", None)
+        if job:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+        self._folder_menu_refresh_after = self.after(250, self._refresh_folder_menu)
+
+    def _refresh_folder_menu(self) -> None:
+        menu = getattr(self, "folder_menu", None)
+        button = getattr(self, "folder_menu_button", None)
+        if not menu or not button:
+            return
+        root = Path(self.mods_root.get()).expanduser()
+        available: List[str] = ["."]
+        if root.is_dir():
+            try:
+                children = sorted(child for child in root.iterdir() if child.is_dir())
+            except PermissionError:
+                children = []
+            for child in children:
+                available.append(child.name)
+        self._available_folders = available
+        menu.delete(0, "end")
+        menu.add_command(label="All folders", command=self._select_all_folders)
+        menu.add_separator()
+        self._folder_menu_vars = {}
+        for rel in self._available_folders:
+            label = "Root files" if rel in (".", "") else rel
+            var = tk.BooleanVar(value=True)
+            self._folder_menu_vars[rel] = var
+            menu.add_checkbutton(
+                label=label,
+                variable=var,
+                command=lambda folder=rel: self._on_folder_toggle(folder),
+            )
+        self._prune_scan_folders()
+        self._sync_folder_menu_vars()
+        self._update_folder_display()
+        self._folder_menu_refresh_after = None
+
+    def _select_all_folders(self) -> None:
+        self.scan_folders = None
+        self._sync_folder_menu_vars()
+        self._update_folder_display()
+
+    def _sync_folder_menu_vars(self) -> None:
+        selected = set(self._available_folders if self.scan_folders is None else self.scan_folders)
+        for folder, var in self._folder_menu_vars.items():
+            var.set(folder in selected)
+
+    def _update_folder_display(self) -> None:
+        if self.scan_folders is None or not self._available_folders:
+            self.scan_folder_display.set("All folders")
+            return
+        if not self.scan_folders:
+            self.scan_folder_display.set("No folders")
+            return
+        labels = ["Root files" if folder in (".", "") else folder for folder in sorted(self.scan_folders)]
+        self.scan_folder_display.set(", ".join(labels[:4]) + ("…" if len(labels) > 4 else ""))
+
+    def _prune_scan_folders(self) -> None:
+        if self.scan_folders is None:
+            return
+        available_set = set(self._available_folders)
+        self.scan_folders = {folder for folder in self.scan_folders if folder in available_set}
+        if self.scan_folders and self.scan_folders >= available_set:
+            self.scan_folders = None
+
+    def _on_folder_toggle(self, folder: str) -> None:
+        var = self._folder_menu_vars.get(folder)
+        if not var:
+            return
+        available_set = set(self._available_folders)
+        is_selected = bool(var.get())
+        if is_selected:
+            if self.scan_folders is not None:
+                self.scan_folders.add(folder)
+        else:
+            if self.scan_folders is None:
+                self.scan_folders = set(available_set)
+            if self.scan_folders is not None and folder in self.scan_folders:
+                self.scan_folders.remove(folder)
+        if self.scan_folders is not None and self.scan_folders >= available_set:
+            self.scan_folders = None
+        self._sync_folder_menu_vars()
+        self._update_folder_display()
+
+    def _resolve_selected_folders(self) -> Optional[List[str]]:
+        if self.scan_folders is None:
+            return None
+        return sorted(self.scan_folders)
+
+    def _resolve_allowed_extensions(self) -> Optional[set[str]]:
+        allowed: set[str] = set()
+        if self.scan_package_var.get():
+            allowed.update(PACKAGE_EXTS)
+        if self.scan_script_var.get():
+            allowed.update(SCRIPT_EXTS)
+        if self.scan_archive_var.get():
+            allowed.update(ARCHIVE_EXTS)
+        if self.scan_misc_var.get():
+            other = SUPPORTED_EXTS - PACKAGE_EXTS - SCRIPT_EXTS - ARCHIVE_EXTS
+            allowed.update(other)
+        if not allowed:
+            return set()
+        if allowed >= SUPPORTED_EXTS:
+            return None
+        return {ext.lower() for ext in allowed}
 
     # In-window settings overlay (no OS pop-up)
     def _build_settings_overlay(self):
@@ -4434,6 +4646,34 @@ class Sims4ModSorterApp(tk.Tk):
         ttk.Entry(scan, textvariable=self.ignore_exts_var).grid(row=3, column=0, sticky="ew")
         ttk.Label(scan, text="Ignore names containing (comma separated)").grid(row=4, column=0, sticky="w", pady=(10, 2))
         ttk.Entry(scan, textvariable=self.ignore_names_var).grid(row=5, column=0, sticky="ew")
+        ttk.Label(scan, text="File types to include").grid(row=6, column=0, sticky="w", pady=(12, 2))
+        type_frame = ttk.Frame(scan)
+        type_frame.grid(row=7, column=0, sticky="w")
+        ttk.Checkbutton(
+            type_frame,
+            text="Packages (.package)",
+            variable=self.scan_package_var,
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(
+            type_frame,
+            text="Scripts (.ts4script)",
+            variable=self.scan_script_var,
+        ).grid(row=0, column=1, sticky="w", padx=(12, 0))
+        ttk.Checkbutton(
+            type_frame,
+            text="Archives (.zip/.rar/.7z)",
+            variable=self.scan_archive_var,
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(
+            type_frame,
+            text="Other supported files",
+            variable=self.scan_misc_var,
+        ).grid(row=1, column=1, sticky="w", padx=(12, 0), pady=(4, 0))
+        ttk.Checkbutton(
+            scan,
+            text="Include adult content",
+            variable=self.include_adult_var,
+        ).grid(row=8, column=0, sticky="w", pady=(12, 0))
         row += 1
         actions = ttk.Frame(container)
         actions.grid(row=row + 1, column=0, sticky="e", pady=(20, 0))
@@ -4768,9 +5008,31 @@ class Sims4ModSorterApp(tk.Tk):
         mods = self.mods_root.get()
         if not os.path.isdir(mods):
             self.log("Error: folder not found"); self.status_var.set("Folder not found"); return
+        self._refresh_folder_menu()
+        allowed_exts_preview = self._resolve_allowed_extensions()
+        if allowed_exts_preview is not None and not allowed_exts_preview:
+            messagebox.showwarning("Scan", "Enable at least one file type before scanning.", parent=self)
+            return
+        selected_folders_preview = self._resolve_selected_folders()
+        if selected_folders_preview is not None and not selected_folders_preview:
+            messagebox.showwarning("Scan", "No folders are selected to scan.", parent=self)
+            return
+        include_adult = self.include_adult_var.get()
         self.status_var.set("Scanning…")
         self.progress.configure(maximum=100, value=0)
         self.items = []
+        if hasattr(self, "btn_scan"):
+            try:
+                self.btn_scan.configure(state="disabled")
+            except Exception:
+                pass
+        folder_desc = "All folders" if not selected_folders_preview else ", ".join(
+            "Root files" if f in (".", "") else f for f in selected_folders_preview
+        )
+        type_desc = "all file types" if allowed_exts_preview is None else ", ".join(sorted(allowed_exts_preview)) or "(none)"
+        self.log(
+            f"Starting scan in {folder_desc} ({'including' if include_adult else 'excluding'} adult content, {type_desc})."
+        )
 
         def progress_cb(done, total, path, state):
             pct = int((done/total)*100) if total else 0
@@ -4783,12 +5045,18 @@ class Sims4ModSorterApp(tk.Tk):
         def worker():
             ignore_exts = {e.strip() for e in self.ignore_exts_var.get().split(',')}
             ignore_names = [t.strip() for t in self.ignore_names_var.get().split(',')]
+            allowed_exts = None if allowed_exts_preview is None else set(allowed_exts_preview)
+            selected_folders = None if selected_folders_preview is None else list(selected_folders_preview)
+            include_adult_scan = include_adult
             context = {
                 "mods_root": mods,
                 "recurse": self.recurse_var.get(),
                 "ignore_exts": ignore_exts,
                 "ignore_names": ignore_names,
                 "folder_map": self.folder_map,
+                "allowed_exts": allowed_exts,
+                "selected_folders": selected_folders,
+                "include_adult": include_adult_scan,
             }
             if self.plugin_manager:
                 self.plugin_manager.run_pre_scan(context)
@@ -4798,38 +5066,78 @@ class Sims4ModSorterApp(tk.Tk):
                     ignore_names = [str(name).strip() for name in context["ignore_names"] if str(name).strip()]
                 if context.get("mods_root"):
                     context["mods_root"] = str(context["mods_root"])
+                if "allowed_exts" in context:
+                    ext_value = context["allowed_exts"]
+                    if ext_value is None:
+                        allowed_exts = None
+                    elif isinstance(ext_value, (list, set, tuple)):
+                        allowed_exts = {
+                            (str(ext).lower() if str(ext).startswith('.') else f".{str(ext).lower()}")
+                            for ext in ext_value
+                            if str(ext).strip()
+                        }
+                    else:
+                        allowed_exts = None if not ext_value else {
+                            (str(ext_value).lower() if str(ext_value).startswith('.') else f".{str(ext_value).lower()}")
+                        }
+                if "selected_folders" in context:
+                    folders_val = context["selected_folders"]
+                    if folders_val is None:
+                        selected_folders = None
+                    elif isinstance(folders_val, (list, tuple, set)):
+                        selected_folders = [str(folder) for folder in folders_val]
+                    else:
+                        selected_folders = [str(folders_val)]
+                include_adult_scan = bool(context.get("include_adult", include_adult_scan))
             scan_root = str(context.get("mods_root", mods) or mods)
             if scan_root != mods:
                 try:
                     self.mods_root.set(scan_root)
                 except Exception:
                     pass
-
-            items = scan_folder(
-                scan_root, self.folder_map,
-                recurse=self.recurse_var.get(),
-                ignore_exts=ignore_exts,
-                ignore_name_contains=ignore_names,
-                progress_cb=progress_cb,
-            )
-            stats = bundle_scripts_and_packages(items, self.folder_map)
-            if self.plugin_manager:
-                context.update({
-                    "bundle_stats": stats,
-                    "items": items,
-                    "scan_root": scan_root,
-                })
-                self.plugin_manager.run_post_scan(items, context)
-                items.sort(key=lambda fi: (
-                    CATEGORY_INDEX.get(fi.guess_type, len(CATEGORY_ORDER)),
-                    _natural_key(os.path.dirname(fi.relpath) or '.'),
-                    _natural_key(fi.name),
-                ))
-            self.items = items
-            self._refresh_tree()
-            self.status_var.set(f"Plan: {len(self.items)} files")
-            self.log(f"Scan complete. Planned {len(self.items)} files. Linked packages: {stats['linked']} across {stats['scripts']} script(s).")
-            self._report_mod_runtime_messages()
+            if allowed_exts is not None and not allowed_exts:
+                self.log("Scan cancelled: no file types allowed after plugin adjustments.", level="warning")
+                self.status_var.set("Scan cancelled")
+                return
+            if selected_folders is not None and not selected_folders:
+                self.log("Scan cancelled: no folders selected after plugin adjustments.", level="warning")
+                self.status_var.set("Scan cancelled")
+                return
+            try:
+                items = scan_folder(
+                    scan_root,
+                    self.folder_map,
+                    recurse=self.recurse_var.get(),
+                    ignore_exts=ignore_exts,
+                    ignore_name_contains=ignore_names,
+                    progress_cb=progress_cb,
+                    selected_folders=selected_folders,
+                    include_adult=include_adult_scan,
+                    allowed_exts=allowed_exts,
+                )
+                stats = bundle_scripts_and_packages(items, self.folder_map)
+                if self.plugin_manager:
+                    context.update({
+                        "bundle_stats": stats,
+                        "items": items,
+                        "scan_root": scan_root,
+                    })
+                    self.plugin_manager.run_post_scan(items, context)
+                    items.sort(key=lambda fi: (
+                        CATEGORY_INDEX.get(fi.guess_type, len(CATEGORY_ORDER)),
+                        _natural_key(os.path.dirname(fi.relpath) or '.'),
+                        _natural_key(fi.name),
+                    ))
+                self.items = items
+                self._refresh_tree()
+                self.status_var.set(f"Plan: {len(self.items)} files")
+                self.log(
+                    f"Scan complete. Planned {len(self.items)} files. Linked packages: {stats['linked']} across {stats['scripts']} script(s)."
+                )
+                self._report_mod_runtime_messages()
+            finally:
+                if hasattr(self, "btn_scan"):
+                    self.after(0, lambda: self.btn_scan.configure(state="normal"))
 
         threading.Thread(target=worker, daemon=True).start()
 
