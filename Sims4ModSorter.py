@@ -31,6 +31,7 @@ import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
 from launch_utils import UpdateResult, check_for_update
+from plugin_api import scan_metrics
 
 
 def center_window(window: tk.Tk) -> None:
@@ -1685,6 +1686,9 @@ class Sims4ModSorterApp(tk.Tk):
         self._available_folders: List[str] = []
         self._folder_menu_vars: Dict[str, tk.BooleanVar] = {}
         self._folder_menu_refresh_after: Optional[str] = None
+        self.view_menu_button: Optional[ttk.Menubutton] = None
+        self.view_menu: Optional[tk.Menu] = None
+        self._view_menu_actions: List[ResolvedViewAction] = []
 
         self._build_style()
         self._build_ui()
@@ -3251,7 +3255,13 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # Legacy entry point kept for archival purposes. The modern application
+    # definitions that follow provide the active ``main`` implementation and
+    # UI.  Running the old entry here would launch the outdated interface,
+    # preventing recently added features (like the disabled mods manager) from
+    # appearing.  We intentionally defer startup so that the refreshed
+    # definitions later in this file take effect before ``main`` executes.
+    pass
 # Sims4 Mod Sorter — single file
 # Python 3.10+
 import importlib.util
@@ -3769,6 +3779,20 @@ class PluginToolbarAction:
     replace: bool = False
 
 
+@dataclass
+class PluginViewAction:
+    plugin_id: str
+    label: str
+    command: Callable[["Sims4ModSorterApp", "PluginAPI"], None]
+
+
+@dataclass
+class ResolvedViewAction:
+    label: str
+    command: Callable[[], None]
+    owner: str
+
+
 class PluginAPI:
     """Lightweight API exposed to external plugins."""
 
@@ -3842,6 +3866,13 @@ class PluginAPI:
             replace=replace,
         )
 
+    def register_view_action(
+        self,
+        label: str,
+        command: Callable[["Sims4ModSorterApp", "PluginAPI"], None],
+    ) -> None:
+        self._manager.register_view_action(self._plugin_id, label, command)
+
     def is_feature_enabled(self, feature_id: str, default: bool = False) -> bool:
         return self._manager.is_feature_enabled(self._plugin_id, feature_id, default)
 
@@ -3865,6 +3896,7 @@ class PluginManager:
         self.plugin_names: Dict[str, str] = {}
         self._plugin_apis: Dict[str, PluginAPI] = {}
         self.toolbar_actions: List[PluginToolbarAction] = []
+        self.view_actions: List[PluginViewAction] = []
         self.columns: Dict[str, PluginColumn] = {}
         self.column_order: List[str] = []
         self.column_owners: Dict[str, str] = {}
@@ -3903,6 +3935,7 @@ class PluginManager:
         self.pre_scan_hooks.clear()
         self.post_scan_hooks.clear()
         self.toolbar_actions.clear()
+        self.view_actions.clear()
         self.plugin_features.clear()
         self.plugin_names.clear()
         self._plugin_apis.clear()
@@ -4012,20 +4045,36 @@ class PluginManager:
             api = self._plugin_apis.get(plugin_id)
             if not api:
                 continue
+            display_name = self.plugin_names.get(plugin_id, plugin_id)
+            scan_metrics.start(display_name, display=display_name)
             try:
                 hook(context, api)
             except Exception as exc:
                 self.log(f"Pre-scan hook error ({hook.__module__}): {exc}", level="error")
+                scan_metrics.log(
+                    f"Pre-scan hook error for {display_name}: {exc}",
+                    level="error",
+                )
+            finally:
+                scan_metrics.stop(display_name, display=display_name)
 
     def run_post_scan(self, items: List[FileItem], context: Dict):
         for plugin_id, hook in list(self.post_scan_hooks):
             api = self._plugin_apis.get(plugin_id)
             if not api:
                 continue
+            display_name = self.plugin_names.get(plugin_id, plugin_id)
+            scan_metrics.start(display_name, display=display_name)
             try:
                 hook(items, context, api)
             except Exception as exc:
                 self.log(f"Post-scan hook error ({hook.__module__}): {exc}", level="error")
+                scan_metrics.log(
+                    f"Post-scan hook error for {display_name}: {exc}",
+                    level="error",
+                )
+            finally:
+                scan_metrics.stop(display_name, display=display_name)
 
     def register_column(self, plugin_id: str, column_id: str, heading: str, width: int, anchor: str) -> None:
         normalized = column_id.strip()
@@ -4088,6 +4137,24 @@ class PluginManager:
             replace=replace,
         )
         self.toolbar_actions.append(action)
+
+    def register_view_action(
+        self,
+        plugin_id: str,
+        label: str,
+        command: Callable[["Sims4ModSorterApp", "PluginAPI"], None],
+    ) -> None:
+        cleaned = str(label).strip()
+        if not cleaned or not callable(command):
+            return
+        action = PluginViewAction(plugin_id=plugin_id, label=cleaned, command=command)
+        self.view_actions = [
+            existing
+            for existing in self.view_actions
+            if not (existing.plugin_id == plugin_id and existing.label == cleaned)
+        ]
+        self.view_actions.append(action)
+        self._notify_view_actions_changed()
 
     def resolve_toolbar_buttons(
         self, app: "Sims4ModSorterApp", base: List[ToolbarButtonSpec]
@@ -4186,6 +4253,14 @@ class PluginManager:
             insert_spec(new_spec, action)
         return resolved
 
+    def resolve_view_actions(self, app: "Sims4ModSorterApp") -> List[ResolvedViewAction]:
+        resolved: List[ResolvedViewAction] = []
+        for action in self.view_actions:
+            callback = self._wrap_view_command(action, app)
+            resolved.append(ResolvedViewAction(label=action.label, command=callback, owner=action.plugin_id))
+        resolved.sort(key=lambda entry: entry.label.lower())
+        return resolved
+
     def is_feature_enabled(self, plugin_id: str, feature_id: str, default: bool = False) -> bool:
         flags = self.plugin_features.get(plugin_id)
         if not flags:
@@ -4207,6 +4282,35 @@ class PluginManager:
                 )
 
         return _callback
+
+    def _wrap_view_command(
+        self, action: PluginViewAction, app: "Sims4ModSorterApp"
+    ) -> Callable[[], None]:
+        api = self._plugin_apis.get(action.plugin_id)
+
+        def _callback() -> None:
+            if api is None:
+                return
+            try:
+                action.command(app, api)
+            except Exception as exc:
+                self.log(
+                    f"View action '{action.label}' from {action.plugin_id} failed: {exc}",
+                    level="error",
+                )
+
+        return _callback
+
+    def _notify_view_actions_changed(self) -> None:
+        app = self.app
+        if app and hasattr(app, "_refresh_view_menu"):
+            try:
+                app.after(0, app._refresh_view_menu)
+            except Exception:
+                pass
+
+    def get_plugin_display_names(self) -> List[str]:
+        return sorted({name for name in self.plugin_names.values() if name})
 
     def _derive_plugin_id(self, manifest: Dict[str, object], entry_path: Path) -> str:
         candidate = manifest.get("id") or manifest.get("plugin_id") or manifest.get("name")
@@ -4253,6 +4357,11 @@ class PluginManager:
         sections = self._settings_by_plugin.pop(plugin_id, [])
         if sections:
             self.settings_sections = [entry for entry in self.settings_sections if entry not in sections]
+        if self.view_actions:
+            before = len(self.view_actions)
+            self.view_actions = [action for action in self.view_actions if action.plugin_id != plugin_id]
+            if len(self.view_actions) != before:
+                self._notify_view_actions_changed()
 
     def _ensure_toolbar_api(self, api: PluginAPI, plugin_id: str, plugin_name: str) -> None:
         if hasattr(api, "register_toolbar_button"):
@@ -4901,6 +5010,10 @@ class Sims4ModSorterApp(tk.Tk):
         ttk.Label(top, textvariable=self.status_var).pack(side="left", padx=12)
         right_frame = ttk.Frame(top)
         right_frame.pack(side="right")
+        self.view_menu_button = ttk.Menubutton(right_frame, text="View", width=8)
+        self.view_menu = tk.Menu(self.view_menu_button, tearoff=False)
+        self.view_menu_button["menu"] = self.view_menu
+        self.view_menu_button.pack(side="left", padx=6)
         for spec in right_specs:
             button = ttk.Button(right_frame, text=spec.text, command=spec.command)
             if spec.width is not None:
@@ -5006,6 +5119,7 @@ class Sims4ModSorterApp(tk.Tk):
         )
         self.log_text.pack(fill="both", expand=False)
 
+        self._refresh_view_menu()
         self._refresh_folder_menu()
 
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
@@ -5072,6 +5186,30 @@ class Sims4ModSorterApp(tk.Tk):
             return
         labels = ["Root files" if folder in (".", "") else folder for folder in sorted(self.scan_folders)]
         self.scan_folder_display.set(", ".join(labels[:4]) + ("…" if len(labels) > 4 else ""))
+
+    def _refresh_view_menu(self) -> None:
+        menu = getattr(self, "view_menu", None)
+        button = getattr(self, "view_menu_button", None)
+        if not menu or button is None:
+            return
+        menu.delete(0, "end")
+        actions: List[ResolvedViewAction] = []
+        if self.plugin_manager:
+            actions = self.plugin_manager.resolve_view_actions(self)
+        self._view_menu_actions = list(actions)
+        if not actions:
+            menu.add_command(label="No insights available", state="disabled")
+            try:
+                button.state(["disabled"])
+            except Exception:
+                button.configure(state="disabled")
+            return
+        try:
+            button.state(["!disabled"])
+        except Exception:
+            button.configure(state="normal")
+        for action in actions:
+            menu.add_command(label=action.label, command=action.command)
 
     def _prune_scan_folders(self) -> None:
         if self.scan_folders is None:
@@ -5553,7 +5691,9 @@ class Sims4ModSorterApp(tk.Tk):
         _load_relatedwords_condom()
         mods = self.mods_root.get()
         if not os.path.isdir(mods):
-            self.log("Error: folder not found"); self.status_var.set("Folder not found"); return
+            self.log("Error: folder not found", level="error")
+            self.status_var.set("Folder not found")
+            return
         self._refresh_folder_menu()
         allowed_exts_preview = self._resolve_allowed_extensions()
         if allowed_exts_preview is not None and not allowed_exts_preview:
@@ -5565,36 +5705,44 @@ class Sims4ModSorterApp(tk.Tk):
             return
         include_adult = self.include_adult_var.get()
         self.status_var.set("Scanning…")
-        self.progress.configure(maximum=100, value=0)
+        self.progress.configure(mode="determinate", maximum=100, value=0)
         self.items = []
+        self.disabled_items = []
+        self._refresh_disabled_tree()
         if hasattr(self, "btn_scan"):
             try:
                 self.btn_scan.configure(state="disabled")
             except Exception:
                 pass
         folder_desc = "All folders" if not selected_folders_preview else ", ".join(
-            "Root files" if f in (".", "") else f for f in selected_folders_preview
+            "Root files" if folder in (".", "") else folder for folder in selected_folders_preview
         )
-        type_desc = "all file types" if allowed_exts_preview is None else ", ".join(sorted(allowed_exts_preview)) or "(none)"
-        self.log(
-            f"Starting scan in {folder_desc} ({'including' if include_adult else 'excluding'} adult content, {type_desc})."
+        type_desc = (
+            "all file types"
+            if allowed_exts_preview is None
+            else ", ".join(sorted(allowed_exts_preview)) or "(none)"
         )
+        start_message = (
+            f"Starting scan in {folder_desc} "
+            f"({'including' if include_adult else 'excluding'} adult content, {type_desc})."
+        )
+        self.log(start_message)
+        plugin_names = self.plugin_manager.get_plugin_display_names() if self.plugin_manager else []
+        scan_metrics.begin_session(plugins=plugin_names)
+        scan_metrics.log(start_message)
 
-        def progress_cb(done, total, path, state):
-            pct = int((done/total)*100) if total else 0
-            self.progress.configure(value=pct, maximum=100)
-            if done % 25 == 0 or state == "error":
-                self.status_var.set(f"Scanning {done}/{total}: {os.path.basename(path)}")
-            if state == "error":
-                self.log(f"Scan error: {os.path.basename(path)}", level="error")
+        def progress_cb(done: int, total: int, path: str, state: str) -> None:
+            percent = int((done / total) * 100) if total else 0
+            name = os.path.basename(path)
+            self.after(0, lambda: self._update_scan_progress_ui(percent, done, total, name, state))
 
-        def worker():
-            ignore_exts = {e.strip() for e in self.ignore_exts_var.get().split(',')}
-            ignore_names = [t.strip() for t in self.ignore_names_var.get().split(',')]
+        def worker() -> None:
+            ignore_exts = {token.strip() for token in self.ignore_exts_var.get().split(",") if token.strip()}
+            ignore_names = [token.strip() for token in self.ignore_names_var.get().split(",") if token.strip()]
             allowed_exts = None if allowed_exts_preview is None else set(allowed_exts_preview)
             selected_folders = None if selected_folders_preview is None else list(selected_folders_preview)
             include_adult_scan = include_adult
-            context = {
+            context: Dict[str, object] = {
                 "mods_root": mods,
                 "recurse": self.recurse_var.get(),
                 "ignore_exts": ignore_exts,
@@ -5604,52 +5752,66 @@ class Sims4ModSorterApp(tk.Tk):
                 "selected_folders": selected_folders,
                 "include_adult": include_adult_scan,
             }
-            if self.plugin_manager:
-                self.plugin_manager.run_pre_scan(context)
-                if isinstance(context.get("ignore_exts"), (list, set, tuple)):
-                    ignore_exts = {str(ext).strip() for ext in context["ignore_exts"] if str(ext).strip()}
-                if isinstance(context.get("ignore_names"), (list, set, tuple)):
-                    ignore_names = [str(name).strip() for name in context["ignore_names"] if str(name).strip()]
-                if context.get("mods_root"):
-                    context["mods_root"] = str(context["mods_root"])
-                if "allowed_exts" in context:
-                    ext_value = context["allowed_exts"]
-                    if ext_value is None:
-                        allowed_exts = None
-                    elif isinstance(ext_value, (list, set, tuple)):
-                        allowed_exts = {
-                            (str(ext).lower() if str(ext).startswith('.') else f".{str(ext).lower()}")
-                            for ext in ext_value
-                            if str(ext).strip()
-                        }
-                    else:
-                        allowed_exts = None if not ext_value else {
-                            (str(ext_value).lower() if str(ext_value).startswith('.') else f".{str(ext_value).lower()}")
-                        }
-                if "selected_folders" in context:
-                    folders_val = context["selected_folders"]
-                    if folders_val is None:
-                        selected_folders = None
-                    elif isinstance(folders_val, (list, tuple, set)):
-                        selected_folders = [str(folder) for folder in folders_val]
-                    else:
-                        selected_folders = [str(folders_val)]
-                include_adult_scan = bool(context.get("include_adult", include_adult_scan))
-            scan_root = str(context.get("mods_root", mods) or mods)
-            if scan_root != mods:
-                try:
-                    self.mods_root.set(scan_root)
-                except Exception:
-                    pass
-            if allowed_exts is not None and not allowed_exts:
-                self.log("Scan cancelled: no file types allowed after plugin adjustments.", level="warning")
-                self.status_var.set("Scan cancelled")
-                return
-            if selected_folders is not None and not selected_folders:
-                self.log("Scan cancelled: no folders selected after plugin adjustments.", level="warning")
-                self.status_var.set("Scan cancelled")
-                return
             try:
+                if self.plugin_manager:
+                    self.plugin_manager.run_pre_scan(context)
+                    if isinstance(context.get("ignore_exts"), (list, set, tuple)):
+                        ignore_exts = {
+                            str(ext).strip() for ext in context["ignore_exts"] if str(ext).strip()
+                        }
+                    if isinstance(context.get("ignore_names"), (list, set, tuple)):
+                        ignore_names = [
+                            str(name).strip() for name in context["ignore_names"] if str(name).strip()
+                        ]
+                    if context.get("mods_root"):
+                        context["mods_root"] = str(context["mods_root"])
+                    if "allowed_exts" in context:
+                        ext_value = context["allowed_exts"]
+                        if ext_value is None:
+                            allowed_exts = None
+                        elif isinstance(ext_value, (list, set, tuple)):
+                            allowed_exts = {
+                                (
+                                    str(ext).lower()
+                                    if str(ext).startswith(".")
+                                    else f".{str(ext).lower()}"
+                                )
+                                for ext in ext_value
+                                if str(ext).strip()
+                            }
+                        else:
+                            allowed_exts = None if not ext_value else {
+                                (
+                                    str(ext_value).lower()
+                                    if str(ext_value).startswith(".")
+                                    else f".{str(ext_value).lower()}"
+                                )
+                            }
+                    if "selected_folders" in context:
+                        folders_val = context["selected_folders"]
+                        if folders_val is None:
+                            selected_folders = None
+                        elif isinstance(folders_val, (list, tuple, set)):
+                            selected_folders = [str(folder) for folder in folders_val if str(folder).strip()]
+                        else:
+                            token = str(folders_val).strip()
+                            selected_folders = [token] if token else []
+                    include_adult_scan = bool(context.get("include_adult", include_adult_scan))
+                scan_root = str(context.get("mods_root", mods) or mods)
+                if scan_root != mods:
+                    self.after(0, lambda value=scan_root: self.mods_root.set(value))
+                if allowed_exts is not None and not allowed_exts:
+                    warning = "Scan cancelled: no file types allowed after plugin adjustments."
+                    scan_metrics.log(warning, level="warn")
+                    scan_metrics.complete_session(total_files=0, cancelled=True)
+                    self.after(0, lambda msg=warning: self._complete_scan_cancelled(msg))
+                    return
+                if selected_folders is not None and not selected_folders:
+                    warning = "Scan cancelled: no folders selected after plugin adjustments."
+                    scan_metrics.log(warning, level="warn")
+                    scan_metrics.complete_session(total_files=0, cancelled=True)
+                    self.after(0, lambda msg=warning: self._complete_scan_cancelled(msg))
+                    return
                 result = scan_folder(
                     scan_root,
                     self.folder_map,
@@ -5662,36 +5824,58 @@ class Sims4ModSorterApp(tk.Tk):
                     allowed_exts=allowed_exts,
                 )
                 items = list(result.items)
+                disabled_items = list(result.disabled_items)
                 stats = bundle_scripts_and_packages(items, self.folder_map)
                 if self.plugin_manager:
-                    context.update({
-                        "bundle_stats": stats,
-                        "items": items,
-                        "scan_root": scan_root,
-                    })
-                    self.plugin_manager.run_post_scan(items, context)
-                    items.sort(
-                        key=lambda fi: (
-                            CATEGORY_INDEX.get(fi.guess_type, len(CATEGORY_ORDER)),
-                            _natural_key(os.path.dirname(fi.relpath) or '.'),
-                            _natural_key(fi.name),
-                        )
+                    context.update(
+                        {
+                            "bundle_stats": stats,
+                            "items": items,
+                            "scan_root": scan_root,
+                        }
                     )
-                self.items = items
-                self.disabled_items = list(result.disabled_items)
-                self._refresh_tree()
-                self._refresh_disabled_tree()
-                disabled_count = len(self.disabled_items)
-                plan_summary = f"Plan: {len(self.items)} files"
-                if disabled_count:
-                    plan_summary += f" ({disabled_count} disabled)"
-                self.status_var.set(plan_summary)
-                self.log(
-                    f"Scan complete. Planned {len(self.items)} files (disabled: {disabled_count}). Linked packages: {stats['linked']} across {stats['scripts']} script(s)."
+                    self.plugin_manager.run_post_scan(items, context)
+                items.sort(
+                    key=lambda fi: (
+                        CATEGORY_INDEX.get(fi.guess_type, len(CATEGORY_ORDER)),
+                        _natural_key(os.path.dirname(fi.relpath) or "."),
+                        _natural_key(fi.name),
+                    )
                 )
-                for warning in result.errors:
-                    self.log(f"Scan warning: {warning}", level="warning")
-                self._report_mod_runtime_messages()
+                total_files = len(items) + len(disabled_items)
+                scan_metrics.complete_session(
+                    total_files=total_files,
+                    warnings=len(result.errors),
+                    extras={"disabled": len(disabled_items)},
+                )
+
+                def apply_result() -> None:
+                    self.items = items
+                    self.disabled_items = disabled_items
+                    self._refresh_tree()
+                    self._refresh_disabled_tree()
+                    summary_text = scan_metrics.latest_summary()
+                    if summary_text:
+                        self.status_var.set(summary_text)
+                        self.log(summary_text)
+                    else:
+                        plan_summary = f"Plan: {len(items)} files"
+                        if disabled_items:
+                            plan_summary += f" ({len(disabled_items)} disabled)"
+                        self.status_var.set(plan_summary)
+                        self.log(plan_summary)
+                    self.log(
+                        f"Linked packages: {stats['linked']} across {stats['scripts']} script(s)."
+                    )
+                    for warning in result.errors:
+                        self.log(f"Scan warning: {warning}", level="warning")
+                    self._report_mod_runtime_messages()
+
+                self.after(0, apply_result)
+            except Exception as exc:
+                scan_metrics.log(f"Scan failed: {exc}", level="error")
+                scan_metrics.complete_session(total_files=0, error=True)
+                self.after(0, lambda e=exc: self._handle_scan_failure(e))
             finally:
                 if hasattr(self, "btn_scan"):
                     self.after(0, lambda: self.btn_scan.configure(state="normal"))
@@ -5787,6 +5971,26 @@ class Sims4ModSorterApp(tk.Tk):
         self.on_scan()
 
     # Table refresh and responsive widths
+    def _update_scan_progress_ui(self, percent: int, done: int, total: int, name: str, state: str) -> None:
+        try:
+            self.progress.configure(value=percent, maximum=100)
+        except Exception:
+            pass
+        if total:
+            self.status_var.set(f"Scanning {done}/{total}: {name}")
+        else:
+            self.status_var.set("Scanning…")
+        if state == "error":
+            self.log(f"Scan error: {name}", level="error")
+
+    def _complete_scan_cancelled(self, message: str) -> None:
+        self.status_var.set("Scan cancelled")
+        self.log(message, level="warning")
+
+    def _handle_scan_failure(self, exc: Exception) -> None:
+        self.status_var.set("Scan failed")
+        self.log(f"Scan failed: {exc}", level="error")
+
     def _refresh_tree(self, preserve_selection: bool = False):
         selected_iids = set(self.tree.selection()) if preserve_selection else set()
         self.tree.delete(*self.tree.get_children())

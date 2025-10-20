@@ -1,0 +1,8 @@
+{
+  "name": "Scan Timeline Visualizer",
+  "entry": "plugin.py",
+  "enabled": true,
+  "callable": "register",
+  "version": "1.0.0",
+  "type": "diagnostic"
+}

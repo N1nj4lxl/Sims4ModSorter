@@ -13,6 +13,8 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import tkinter as tk
 from tkinter import ttk
 
+from plugin_api import scan_metrics
+
 COLUMN_ID = "dependency"
 ICON_MISSING = "\u26a0\ufe0f"
 ICON_OK = "\u2705"
@@ -515,9 +517,16 @@ class DependencyPlugin:
             self.last_results.clear()
             self.overlay.sync(self.last_results)
             return
+        scan_metrics.start("Dependency Tracker")
         start = time.perf_counter()
         results = self.analyser.analyse(self.last_items)
         duration = time.perf_counter() - start
+        missing_total = sum(1 for result in results if result.missing)
+        scan_metrics.stop(
+            "Dependency Tracker",
+            files_processed=len(self.last_items),
+            warnings=missing_total,
+        )
         self.last_results = list(results)
         self.overlay.sync(self.last_results)
         self._log_summary(results, duration, len(self.last_items))
