@@ -31,6 +31,31 @@ from tkinter import filedialog, messagebox, ttk
 
 from launch_utils import UpdateResult, check_for_update
 
+
+def center_window(window: tk.Tk) -> None:
+    """Center a Tk window on the active screen."""
+
+    try:
+        window.update_idletasks()
+        width = window.winfo_width()
+        height = window.winfo_height()
+        if width <= 1 or height <= 1:
+            geometry = window.geometry()
+            size = geometry.split("+", 1)[0]
+            if "x" in size:
+                width_str, height_str = size.split("x", 1)
+                width = int(width_str)
+                height = int(height_str)
+            else:
+                width, height = 800, 600
+        screen_w = window.winfo_screenwidth()
+        screen_h = window.winfo_screenheight()
+        x = max(int((screen_w - width) / 2), 0)
+        y = max(int((screen_h - height) / 2), 0)
+        window.geometry(f"{width}x{height}+{x}+{y}")
+    except Exception:
+        pass
+
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
@@ -1169,6 +1194,7 @@ class Sims4ModSorterApp(tk.Tk):
         self.after(16, self._pump_ui_queue)
         self._report_mod_boot_messages()
         self.after(1000, self._check_updates_on_launch)
+        self.after(0, lambda: center_window(self))
 
     # ------------------------------------------------------------------
     # Compatibility shims
@@ -4174,6 +4200,7 @@ class Sims4ModSorterApp(tk.Tk):
         flush_plugin_messages(self, "boot")
         self._report_mod_boot_messages()
         self.after(1000, self._check_updates_on_launch)
+        self.after(0, lambda: center_window(self))
 
     def _build_style(self):
         style = ttk.Style()
