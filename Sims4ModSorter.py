@@ -1147,6 +1147,16 @@ class Sims4ModSorterApp(tk.Tk):
         self._status_summary_var = tk.StringVar(value="")
         self._update_check_in_progress = False
         self.check_updates_button: Optional[ttk.Button] = None
+        self._latest_version: Optional[str] = None
+        self._update_download_url: Optional[str] = None
+        self._update_available: bool = False
+        self._update_overlay: Optional[tk.Toplevel] = None
+        self._update_overlay_message = tk.StringVar(value="")
+        self._update_overlay_progress: Optional[ttk.Progressbar] = None
+        self._update_overlay_download_btn: Optional[ttk.Button] = None
+        self._update_overlay_skip_btn: Optional[ttk.Button] = None
+        self._update_overlay_button_frame: Optional[ttk.Frame] = None
+        self._update_overlay_visible: bool = False
 
         self._build_style()
         self._build_ui()
@@ -1499,10 +1509,13 @@ class Sims4ModSorterApp(tk.Tk):
     def schedule_refresh(self) -> None:
         self._enqueue_ui(lambda: self._refresh_tree(preserve_selection=True))
 
-    def log(self, message: str) -> None:
+    def log(self, message: str, level: str = "info") -> None:
         timestamp = time.strftime("%H:%M:%S")
+        prefix = ""
+        if level and level.lower() != "info":
+            prefix = f"[{level.upper()}] "
         self.log_text.configure(state="normal")
-        self.log_text.insert("end", f"[{timestamp}] {message}\n")
+        self.log_text.insert("end", f"[{timestamp}] {prefix}{message}\n")
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
@@ -1511,7 +1524,141 @@ class Sims4ModSorterApp(tk.Tk):
     # ------------------------------------------------------------------
     def _refresh_version_display(self) -> None:
         if hasattr(self, "_version_display_var"):
-            self._version_display_var.set(f"App Version: {APP_VERSION}")
+            if self._update_available and self._latest_version:
+                self._version_display_var.set(
+                    f"App Version: {APP_VERSION} (Update available: {self._latest_version})"
+                )
+            else:
+                self._version_display_var.set(f"App Version: {APP_VERSION}")
+
+    def _ensure_update_overlay(self) -> tk.Toplevel:
+        overlay = self._update_overlay
+        if overlay and overlay.winfo_exists():
+            self._refresh_update_overlay_theme()
+            return overlay
+
+        overlay = tk.Toplevel(self)
+        overlay.withdraw()
+        overlay.title("Checking for Updates")
+        overlay.transient(self)
+        overlay.resizable(False, False)
+        overlay.protocol("WM_DELETE_WINDOW", lambda: None)
+        palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
+        overlay.configure(bg=palette.get("bg", "#111316"))
+
+        container = ttk.Frame(overlay, padding=20)
+        container.pack(fill="both", expand=True)
+
+        message = ttk.Label(
+            container,
+            textvariable=self._update_overlay_message,
+            wraplength=360,
+            justify="center",
+        )
+        message.pack(fill="x")
+
+        progress = ttk.Progressbar(container, mode="indeterminate")
+        progress.pack(fill="x", pady=(16, 12))
+
+        buttons = ttk.Frame(container)
+        buttons.pack()
+
+        download_btn = ttk.Button(
+            buttons,
+            text="Download Update",
+            command=self._on_update_overlay_download,
+            state="disabled",
+        )
+        download_btn.pack(side="left", padx=4)
+
+        skip_btn = ttk.Button(
+            buttons,
+            text="Skip for Now",
+            command=self._on_update_overlay_skip,
+            state="disabled",
+        )
+        skip_btn.pack(side="left", padx=4)
+
+        self._update_overlay = overlay
+        self._update_overlay_progress = progress
+        self._update_overlay_download_btn = download_btn
+        self._update_overlay_skip_btn = skip_btn
+        self._update_overlay_button_frame = buttons
+        return overlay
+
+    def _refresh_update_overlay_theme(self) -> None:
+        overlay = getattr(self, "_update_overlay", None)
+        if overlay and overlay.winfo_exists():
+            palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
+            overlay.configure(bg=palette.get("bg", "#111316"))
+
+    def _center_update_overlay(self) -> None:
+        overlay = getattr(self, "_update_overlay", None)
+        if not overlay or not overlay.winfo_exists():
+            return
+        self.update_idletasks()
+        try:
+            ow = overlay.winfo_width()
+            oh = overlay.winfo_height()
+            if ow <= 1 and oh <= 1:
+                overlay.update_idletasks()
+                ow = overlay.winfo_width()
+                oh = overlay.winfo_height()
+            x = self.winfo_rootx() + max((self.winfo_width() - ow) // 2, 0)
+            y = self.winfo_rooty() + max((self.winfo_height() - oh) // 2, 0)
+            overlay.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+
+    def _show_update_overlay(self, message: str, *, progress: bool, enable_download: bool, enable_skip: bool) -> None:
+        overlay = self._ensure_update_overlay()
+        self._update_overlay_message.set(message)
+        if self._update_overlay_progress:
+            if progress:
+                if not self._update_overlay_progress.winfo_manager():
+                    self._update_overlay_progress.pack(fill="x", pady=(16, 12))
+                self._update_overlay_progress.start(12)
+            else:
+                self._update_overlay_progress.stop()
+                if self._update_overlay_progress.winfo_manager():
+                    self._update_overlay_progress.pack_forget()
+        if self._update_overlay_download_btn:
+            state = "normal" if enable_download else "disabled"
+            self._update_overlay_download_btn.configure(state=state)
+        if self._update_overlay_skip_btn:
+            state = "normal" if enable_skip else "disabled"
+            self._update_overlay_skip_btn.configure(state=state)
+        overlay.deiconify()
+        overlay.lift()
+        try:
+            overlay.grab_set()
+        except tk.TclError:
+            pass
+        self._center_update_overlay()
+        self._update_overlay_visible = True
+
+    def _hide_update_overlay(self) -> None:
+        overlay = getattr(self, "_update_overlay", None)
+        if overlay and overlay.winfo_exists():
+            try:
+                overlay.grab_release()
+            except tk.TclError:
+                pass
+            overlay.withdraw()
+        if self._update_overlay_progress:
+            self._update_overlay_progress.stop()
+        self._update_overlay_visible = False
+
+    def _on_update_overlay_download(self) -> None:
+        url = self._update_download_url
+        if url:
+            webbrowser.open(url)
+        else:
+            messagebox.showinfo("Update Available", "Download URL is not configured.", parent=self)
+        self._hide_update_overlay()
+
+    def _on_update_overlay_skip(self) -> None:
+        self._hide_update_overlay()
 
     def _check_updates_on_launch(self) -> None:
         self._start_update_check(manual=False)
@@ -1528,6 +1675,13 @@ class Sims4ModSorterApp(tk.Tk):
         button = getattr(self, "check_updates_button", None)
         if manual and button and button.winfo_exists():
             button.configure(state="disabled")
+        if not manual:
+            self._show_update_overlay(
+                "Checking for updates…",
+                progress=True,
+                enable_download=False,
+                enable_skip=False,
+            )
 
         def worker() -> None:
             error_message: Optional[str] = None
@@ -1548,16 +1702,23 @@ class Sims4ModSorterApp(tk.Tk):
         button = getattr(self, "check_updates_button", None)
         if button and button.winfo_exists():
             button.configure(state="normal")
-        self._refresh_version_display()
 
         if error_message:
             if manual:
                 messagebox.showerror("Update Check", error_message, parent=self)
             else:
                 self.log(error_message, level="error")
+                self._show_update_overlay(
+                    error_message,
+                    progress=False,
+                    enable_download=False,
+                    enable_skip=True,
+                )
             return
 
         if not result:
+            if not manual:
+                self._hide_update_overlay()
             return
 
         if result.message:
@@ -1565,21 +1726,49 @@ class Sims4ModSorterApp(tk.Tk):
                 messagebox.showerror("Update Check", result.message, parent=self)
             else:
                 self.log(result.message, level="warn")
+                self._show_update_overlay(
+                    result.message,
+                    progress=False,
+                    enable_download=False,
+                    enable_skip=True,
+                )
             return
 
-        if result.is_newer and result.latest_version:
+        if result.download_url:
+            self._update_download_url = result.download_url
+        update_available = bool(result.is_newer and result.latest_version)
+        self._update_available = update_available
+        if result.latest_version:
+            self._latest_version = result.latest_version
+        elif not update_available:
+            self._latest_version = None
+        self._refresh_version_display()
+
+        if update_available and result.latest_version:
             self.log(f"Update available: {result.latest_version}")
             prompt = (
                 f"Version {result.latest_version} is available (current version is {APP_VERSION}).\n"
                 "Would you like to open the download page?"
             )
-            if messagebox.askyesno("Update Available", prompt, parent=self):
-                if result.download_url:
-                    webbrowser.open(result.download_url)
-                else:
-                    messagebox.showinfo(
-                        "Update Available", "Download URL is not configured.", parent=self
-                    )
+            if manual:
+                if messagebox.askyesno("Update Available", prompt, parent=self):
+                    if self._update_download_url:
+                        webbrowser.open(self._update_download_url)
+                    else:
+                        messagebox.showinfo(
+                            "Update Available", "Download URL is not configured.", parent=self
+                        )
+            else:
+                message = (
+                    f"Version {result.latest_version} is available (current version is {APP_VERSION}).\n"
+                    "Choose 'Download Update' to open the release page or 'Skip for Now' to continue."
+                )
+                self._show_update_overlay(
+                    message,
+                    progress=False,
+                    enable_download=True,
+                    enable_skip=True,
+                )
         else:
             if manual:
                 messagebox.showinfo(
@@ -1587,6 +1776,8 @@ class Sims4ModSorterApp(tk.Tk):
                     f"You are using the latest version ({APP_VERSION}).",
                     parent=self,
                 )
+            else:
+                self._hide_update_overlay()
 
     # ------------------------------------------------------------------
     # Settings overlay
@@ -1725,6 +1916,7 @@ class Sims4ModSorterApp(tk.Tk):
         scrim = getattr(self, "settings_scrim", None)
         if scrim:
             scrim.configure(bg=_scrim_color(palette.get("bg", "#111316")))
+        self._refresh_update_overlay_theme()
         self._update_theme_preview_highlight()
         self.log(f"Theme applied: {self.theme_name.get()}")
     # ------------------------------------------------------------------
