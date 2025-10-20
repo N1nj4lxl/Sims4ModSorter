@@ -2941,6 +2941,18 @@ class PluginAPI:
     def app(self) -> Optional["Sims4ModSorterApp"]:
         return self._manager.app
 
+    def register_column(self, column_id: str, heading: str, *, width: int = 80, anchor: str = "center") -> None:
+        if column_id and heading:
+            self._manager.register_column(self._plugin_id, column_id, heading, width, anchor)
+
+    def register_settings_section(
+        self,
+        title: str,
+        builder: Callable[["Sims4ModSorterApp", ttk.Frame, "PluginAPI"], None],
+    ) -> None:
+        if callable(builder) and title:
+            self._manager.register_settings_section(self._plugin_id, title, builder)
+
     def register_toolbar_button(
         self,
         button_id: str,
@@ -2992,7 +3004,13 @@ class PluginManager:
         self.plugin_names: Dict[str, str] = {}
         self._plugin_apis: Dict[str, PluginAPI] = {}
         self.toolbar_actions: List[PluginToolbarAction] = []
+        self.columns: Dict[str, PluginColumn] = {}
+        self.column_order: List[str] = []
+        self.column_owners: Dict[str, str] = {}
+        self.settings_sections: List[Tuple[str, Callable[["Sims4ModSorterApp", ttk.Frame, PluginAPI], None]]] = []
+        self._settings_by_plugin: Dict[str, List[Tuple[str, Callable]]] = {}
         self.app: Optional["Sims4ModSorterApp"] = None
+        self.statuses: List[PluginStatus] = []
 
     def log_boot(self, message: str, level: str = "info"):
         self.boot_messages.append((level, message))
@@ -3026,6 +3044,12 @@ class PluginManager:
         self.plugin_features.clear()
         self.plugin_names.clear()
         self._plugin_apis.clear()
+        self.statuses.clear()
+        self.columns.clear()
+        self.column_order.clear()
+        self.column_owners.clear()
+        self.settings_sections.clear()
+        self._settings_by_plugin.clear()
         for entry in sorted(self.plugins_dir.iterdir()):
             if entry.is_file() and entry.suffix == ".py":
                 manifest = {
@@ -3054,16 +3078,26 @@ class PluginManager:
                 self._load_mod(manifest, entry / manifest.get("entry", "plugin.py"))
 
     def _load_mod(self, manifest: Dict[str, object], entry_path: Path):
-        name = manifest.get("name") or entry_path.stem
+        name = str(manifest.get("name") or entry_path.stem)
+        folder = entry_path.parent.name if entry_path.parent != entry_path else entry_path.stem
+        version = _extract_plugin_version(manifest, entry_path)
+        compatibility = _manifest_compatibility(manifest)
+        if compatibility:
+            self.log_boot(f"Plugin '{name}' skipped: {compatibility}", level="warn")
+            self.statuses.append(PluginStatus(name, folder, version, "incompatible", compatibility))
+            return
         if not manifest.get("enabled", True):
             self.log_boot(f"Skipping disabled plugin: {name}")
+            self.statuses.append(PluginStatus(name, folder, version, "disabled", "Disabled"))
             return
         if not entry_path.exists():
+            message = f"Missing entry: {entry_path.name}"
             self.log_boot(f"Missing entry file for mod '{name}': {entry_path.name}", level="error")
+            self.statuses.append(PluginStatus(name, folder, version, "error", message))
             return
 
         plugin_id = self._derive_plugin_id(manifest, entry_path)
-        self.plugin_names[plugin_id] = str(name)
+        self.plugin_names[plugin_id] = name
         self.plugin_features[plugin_id] = self._extract_feature_flags(manifest)
 
         module_name = manifest.get("import_name") or f"user_mod_{name}"
@@ -3076,14 +3110,18 @@ class PluginManager:
             sys.modules[module_name] = module
             spec.loader.exec_module(module)
         except Exception as exc:
+            message = str(exc)
             self.log_boot(f"Failed to import mod '{name}': {exc}", level="error")
+            self.statuses.append(PluginStatus(name, folder, version, "error", message))
             self._cleanup_plugin(plugin_id)
             return
 
         callable_name = manifest.get("callable", "register")
         register = getattr(module, callable_name, None)
         if not callable(register):
+            message = f"Missing callable '{callable_name}'"
             self.log_boot(f"Plugin '{name}' missing callable '{callable_name}'", level="warn")
+            self.statuses.append(PluginStatus(name, folder, version, "error", message))
             self._cleanup_plugin(plugin_id)
             return
         try:
@@ -3091,10 +3129,13 @@ class PluginManager:
             self._plugin_apis[plugin_id] = api
             register(api)
         except Exception as exc:
+            message = str(exc)
             self.log_boot(f"Plugin '{name}' failed during register: {exc}", level="error")
+            self.statuses.append(PluginStatus(name, folder, version, "error", message))
             self._cleanup_plugin(plugin_id)
             return
         self.log_boot(f"Loaded plugin: {name}")
+        self.statuses.append(PluginStatus(name, folder, version, "loaded", ""))
 
     def register_pre_scan_hook(self, plugin_id: str, func: Callable) -> None:
         self.pre_scan_hooks.append((plugin_id, func))
@@ -3121,6 +3162,36 @@ class PluginManager:
                 hook(items, context, api)
             except Exception as exc:
                 self.log(f"Post-scan hook error ({hook.__module__}): {exc}", level="error")
+
+    def register_column(self, plugin_id: str, column_id: str, heading: str, width: int, anchor: str) -> None:
+        normalized = column_id.strip()
+        if not normalized:
+            return
+        owner = self.column_owners.get(normalized)
+        if owner and owner != plugin_id:
+            self.log_boot(
+                f"Plugin column '{normalized}' already defined; skipping duplicate from {self.plugin_names.get(plugin_id, plugin_id)}",
+                level="warn",
+            )
+            return
+        self.columns[normalized] = PluginColumn(normalized, heading, width, anchor)
+        self.column_owners[normalized] = plugin_id
+        if normalized not in self.column_order:
+            self.column_order.append(normalized)
+
+    def get_columns(self) -> List[PluginColumn]:
+        return [self.columns[column_id] for column_id in self.column_order if column_id in self.columns]
+
+    def register_settings_section(self, plugin_id: str, title: str, builder: Callable) -> None:
+        cleaned = title.strip()
+        if not cleaned or not callable(builder):
+            return
+        entry = (cleaned, builder)
+        self.settings_sections.append(entry)
+        self._settings_by_plugin.setdefault(plugin_id, []).append(entry)
+
+    def get_statuses(self) -> List[PluginStatus]:
+        return list(self.statuses)
 
     def register_toolbar_button(
         self,
@@ -3309,6 +3380,15 @@ class PluginManager:
         self.pre_scan_hooks = [(pid, hook) for pid, hook in self.pre_scan_hooks if pid != plugin_id]
         self.post_scan_hooks = [(pid, hook) for pid, hook in self.post_scan_hooks if pid != plugin_id]
         self.toolbar_actions = [action for action in self.toolbar_actions if action.plugin_id != plugin_id]
+        for column_id, owner in list(self.column_owners.items()):
+            if owner == plugin_id:
+                self.column_owners.pop(column_id, None)
+                self.columns.pop(column_id, None)
+                if column_id in self.column_order:
+                    self.column_order.remove(column_id)
+        sections = self._settings_by_plugin.pop(plugin_id, [])
+        if sections:
+            self.settings_sections = [entry for entry in self.settings_sections if entry not in sections]
 
 
 def load_user_plugins() -> PluginManager:
@@ -3338,150 +3418,6 @@ def flush_plugin_messages(app, phase: str) -> None:
             continue
         prefix = prefix_map.get(level, "Mod")
         app.log(f"{prefix}: {message}", level=level)
-
-# ---------------------------
-# Plugin support
-# ---------------------------
-
-USER_PLUGINS_DIR = Path(__file__).with_name("user_plugins")
-
-
-class PluginAPI:
-    """Lightweight API exposed to external plugins."""
-
-    def __init__(self, manager: "PluginManager"):
-        self._manager = manager
-
-    def register_pre_scan_hook(self, func):
-        if callable(func):
-            self._manager.pre_scan_hooks.append(func)
-
-    def register_post_scan_hook(self, func):
-        if callable(func):
-            self._manager.post_scan_hooks.append(func)
-
-    def register_theme(self, name: str, palette: Dict[str, str]):
-        required = {"bg", "fg", "alt", "accent", "sel"}
-        if not name or not isinstance(palette, dict) or not required.issubset(palette.keys()):
-            self._manager.log_boot(f"Theme registration skipped for '{name or '?'}' (invalid palette)", level="warn")
-            return
-        THEMES[name] = {key: palette[key] for key in required}
-        self._manager.log_boot(f"Theme registered: {name}", level="info")
-
-    def log(self, message: str, level: str = "info"):
-        self._manager.log(message, level=level)
-
-
-class PluginManager:
-    def __init__(self, plugins_dir: Path):
-        self.plugins_dir = plugins_dir
-        self.pre_scan_hooks = []
-        self.post_scan_hooks = []
-        self.boot_messages: List[Tuple[str, str]] = []
-        self.runtime_messages: List[Tuple[str, str]] = []
-        self.api = PluginAPI(self)
-
-    def log_boot(self, message: str, level: str = "info"):
-        self.boot_messages.append((level, message))
-
-    def log(self, message: str, level: str = "info"):
-        self.runtime_messages.append((level, message))
-
-    def drain_boot_messages(self):
-        msgs = list(self.boot_messages)
-        self.boot_messages.clear()
-        return msgs
-
-    def drain_runtime_messages(self):
-        msgs = list(self.runtime_messages)
-        self.runtime_messages.clear()
-        return msgs
-
-    def load(self):
-        self.plugins_dir.mkdir(parents=True, exist_ok=True)
-        for entry in sorted(self.plugins_dir.iterdir()):
-            if entry.is_file() and entry.suffix == ".py":
-                manifest = {
-                    "name": entry.stem,
-                    "entry": entry.name,
-                    "enabled": True,
-                    "callable": "register",
-                }
-                self._load_mod(manifest, entry)
-            elif entry.is_dir():
-                manifest_path = entry / "plugin.json"
-                if manifest_path.exists():
-                    try:
-                        with open(manifest_path, "r", encoding="utf-8") as fh:
-                            manifest = json.load(fh)
-                    except Exception as exc:
-                        self.log_boot(f"Failed to read manifest for {entry.name}: {exc}", level="error")
-                        continue
-                else:
-                    manifest = {
-                        "name": entry.name,
-                        "entry": "plugin.py",
-                        "enabled": True,
-                        "callable": "register",
-                    }
-                self._load_mod(manifest, entry / manifest.get("entry", "plugin.py"))
-
-    def _load_mod(self, manifest: Dict[str, object], entry_path: Path):
-        name = manifest.get("name") or entry_path.stem
-        if not manifest.get("enabled", True):
-            self.log_boot(f"Skipping disabled plugin: {name}")
-            return
-        if not entry_path.exists():
-            self.log_boot(f"Missing entry file for mod '{name}': {entry_path.name}", level="error")
-            return
-
-        module_name = manifest.get("import_name") or f"user_mod_{name}"
-        module_name = re.sub(r"[^0-9A-Za-z_]+", "_", module_name)
-        try:
-            spec = importlib.util.spec_from_file_location(module_name, entry_path)
-            if spec is None or spec.loader is None:
-                raise ImportError("Could not create spec")
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[module_name] = module
-            spec.loader.exec_module(module)
-        except Exception as exc:
-            self.log_boot(f"Failed to import mod '{name}': {exc}", level="error")
-            return
-
-        callable_name = manifest.get("callable", "register")
-        register = getattr(module, callable_name, None)
-        if not callable(register):
-            self.log_boot(f"Plugin '{name}' missing callable '{callable_name}'", level="warn")
-            return
-        try:
-            register(self.api)
-        except Exception as exc:
-            self.log_boot(f"Plugin '{name}' failed during register: {exc}", level="error")
-            return
-        self.log_boot(f"Loaded plugin: {name}")
-
-    def run_pre_scan(self, context: Dict):
-        for hook in list(self.pre_scan_hooks):
-            try:
-                hook(context, self.api)
-            except Exception as exc:
-                self.log(f"Pre-scan hook error ({hook.__module__}): {exc}", level="error")
-
-    def run_post_scan(self, items: List[FileItem], context: Dict):
-        for hook in list(self.post_scan_hooks):
-            try:
-                hook(items, context, self.api)
-            except Exception as exc:
-                self.log(f"Post-scan hook error ({hook.__module__}): {exc}", level="error")
-
-
-def load_user_plugins() -> PluginManager:
-    manager = PluginManager(USER_PLUGINS_DIR)
-    try:
-        manager.load()
-    except Exception as exc:
-        manager.log_boot(f"Plugin loading aborted: {exc}", level="error")
-    return manager
 
 # ---------------------------
 # Utilities
