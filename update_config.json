@@ -2,5 +2,6 @@
   "repo_owner": "N1nj4lxl",
   "repo_name": "Sims4ModSorter",
   "branch": "main",
-  "download_url": "https://github.com/N1nj4lxl/Sims4ModSorter/releases"
+  "download_url": "https://github.com/N1nj4lxl/Sims4ModSorter/releases",
+  "release_api_url": "https://api.github.com/repos/N1nj4lxl/Sims4ModSorter/releases/latest"
 }
