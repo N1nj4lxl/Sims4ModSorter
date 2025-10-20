@@ -4040,7 +4040,7 @@ class PluginManager:
             if not api:
                 continue
             display_name = self.plugin_names.get(plugin_id, plugin_id)
-            scan_metrics.start(display_name, display=display_name)
+            scan_metrics.start(display_name)
             try:
                 hook(context, api)
             except Exception as exc:
@@ -4050,7 +4050,7 @@ class PluginManager:
                     level="error",
                 )
             finally:
-                scan_metrics.stop(display_name, display=display_name)
+                scan_metrics.stop(display_name)
 
     def run_post_scan(self, items: List[FileItem], context: Dict):
         for plugin_id, hook in list(self.post_scan_hooks):
@@ -4058,7 +4058,7 @@ class PluginManager:
             if not api:
                 continue
             display_name = self.plugin_names.get(plugin_id, plugin_id)
-            scan_metrics.start(display_name, display=display_name)
+            scan_metrics.start(display_name)
             try:
                 hook(items, context, api)
             except Exception as exc:
@@ -4068,7 +4068,7 @@ class PluginManager:
                     level="error",
                 )
             finally:
-                scan_metrics.stop(display_name, display=display_name)
+                scan_metrics.stop(display_name)
 
     def register_column(self, plugin_id: str, column_id: str, heading: str, width: int, anchor: str) -> None:
         normalized = column_id.strip()
