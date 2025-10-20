@@ -5733,7 +5733,32 @@ class Sims4ModSorterApp(tk.Tk):
             except Exception as exc:
                 plugin_warning = f"Unable to load plugin list: {exc}"
                 self.log(plugin_warning, level="warning")
-        scan_metrics.begin_session(plugins=plugin_names)
+        begin_session = getattr(scan_metrics, "begin_session", None)
+        if callable(begin_session):
+            invoked = False
+            try:
+                signature = inspect.signature(begin_session)
+            except (TypeError, ValueError):
+                signature = None
+            if signature is not None:
+                params = signature.parameters
+                if "plugins" in params:
+                    try:
+                        begin_session(plugins=plugin_names)
+                        invoked = True
+                    except TypeError:
+                        pass
+                elif params:
+                    try:
+                        begin_session(plugin_names)
+                        invoked = True
+                    except TypeError:
+                        pass
+            if not invoked:
+                try:
+                    begin_session()
+                except TypeError:
+                    begin_session(plugin_names)
         scan_metrics.log("Starting scan…")
         scan_metrics.log(
             f"Scope: {folder_desc} — {type_desc}; adult content {'included' if include_adult else 'excluded'}."
