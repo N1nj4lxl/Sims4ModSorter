@@ -2164,5 +2164,5 @@ def main() -> None:
     app.mainloop()
 
 
-if __name__ == "__main__" and os.environ.get("MODSORTER_USE_LEGACY_UI"):
+if __name__ == "__main__":
     main()
