@@ -24,7 +24,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MethodType
-from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, Union
 
 import tkinter as tk
 import tkinter.font as tkfont
@@ -79,6 +79,8 @@ class FileItem:
     dependency_detail: str = ""
     extras: Dict[str, str] = field(default_factory=dict)
     tooltips: Dict[str, str] = field(default_factory=dict)
+    disabled: bool = False
+    original_ext: str = ""
 
 
 @dataclass(slots=True)
@@ -86,6 +88,7 @@ class ScanResult:
     items: List[FileItem]
     total_files: int
     errors: List[str] = field(default_factory=list)
+    disabled_items: List[FileItem] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -207,6 +210,13 @@ SUPPORTED_EXTS = PACKAGE_EXTS | SCRIPT_EXTS | ARCHIVE_EXTS | {
 }
 
 TEXT_FILE_EXTS = {".txt", ".cfg", ".ini", ".log", ".rtf"}
+
+
+def normalize_extension(ext: str) -> Tuple[str, bool]:
+    lowered = ext.lower()
+    if lowered.endswith("off") and len(lowered) > 4:
+        return lowered[:-3], True
+    return lowered, False
 
 ADULT_CATEGORY_PROMOTIONS: Dict[str, str] = {
     "Script Mod": "Adult Script",
@@ -337,11 +347,62 @@ ADULT_WORDS_BASE: Tuple[str, ...] = (
     "trojan",
     "std",
     "sti",
+    "petplay",
+    "pet play",
+    "nudity",
+    "desires",
+    "deviantcore",
+    "deviant core",
+    "deviant",
+    "devious",
+    "deviousdesires",
+    "devious desires",
+    "dd",
+    "kink",
+    "flirtyfetishes",
+    "flirty fetishes",
+    "fetishes",
+    "ww",
+    "gay",
+    "pubichair",
+    "pubic hair",
+    "pubic",
+    "watersports",
+    "water sports",
 )
 
 ADULT_WORDS: set[str] = set(ADULT_WORDS_BASE)
 _ADULT_WORD_CACHE: Tuple[str, ...] = ()
 _ADULT_MAX_WORD_LEN: int = 0
+
+ADULT_AUTHORS: Tuple[str, ...] = (
+    "onizu",
+    "amozidan22",
+    "oll",
+    "nisak",
+    "cherrypie",
+    "!chingyu",
+    "chingyu",
+    "turbodriver",
+    "khlas",
+    "lychee",
+    "alchemist",
+    "falsehope",
+)
+
+_AUTHOR_NORMALIZE_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _normalise_author_token(value: str) -> str:
+    return _AUTHOR_NORMALIZE_RE.sub("", value.lower())
+
+
+ADULT_AUTHOR_ALIASES: Dict[str, str] = {
+    token: name
+    for name in ADULT_AUTHORS
+    for token in {_normalise_author_token(name)}
+    if token
+}
 
 
 def _refresh_adult_word_cache() -> None:
@@ -509,11 +570,38 @@ def _scan_content_for_adult_keywords(path: Path, ext: str) -> List[Tuple[set[str
     return results
 
 
-def inspect_adult_content(path: Path, ext: str, tokens: Tuple[str, ...], initial_category: str) -> AdultEvidence:
+def inspect_adult_content(
+    path: Path,
+    ext: str,
+    tokens: Tuple[str, ...],
+    initial_category: str,
+    *,
+    relpath: Optional[str] = None,
+    folder_tokens: Tuple[str, ...] = (),
+) -> AdultEvidence:
     evidence = AdultEvidence()
     token_hits = {token for token in tokens if token in ADULT_WORDS}
     if token_hits:
         evidence.add(token_hits, 0.25, "filename tokens")
+    if folder_tokens:
+        folder_hits = {token for token in folder_tokens if token in ADULT_WORDS}
+        if folder_hits:
+            evidence.add(folder_hits, 0.2, "folder name keywords")
+    author_sources = set()
+    if relpath:
+        author_sources.add(_normalise_author_token(relpath))
+    author_sources.add(_normalise_author_token(path.name))
+    if folder_tokens:
+        author_sources.add(_normalise_author_token("".join(folder_tokens)))
+    author_hits: set[str] = set()
+    for source in author_sources:
+        if not source:
+            continue
+        for token, name in ADULT_AUTHOR_ALIASES.items():
+            if token and token in source:
+                author_hits.add(name)
+    if author_hits:
+        evidence.add(author_hits, 0.3, "known adult author")
     if initial_category.startswith("Adult"):
         evidence.add((), 0.2, f"initial category '{initial_category}'")
     for hits, reason, score in _scan_content_for_adult_keywords(path, ext):
@@ -990,11 +1078,38 @@ _KEYWORD_MAP: Tuple[Tuple[str, str], ...] = (
 
 _SCRIPT_HINTS = ("script", "ts4script", "py", "python")
 
+_CAMEL_CASE_BOUNDARY_RE = re.compile(
+    r"(?<=[A-Za-z])(?=[A-Z][a-z])|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])"
+)
+
 
 def _tokenise(name: str) -> Tuple[str, ...]:
-    base = re.sub(r"\.[^.]+$", "", name.lower())
-    base = re.sub(r"[^a-z0-9]+", " ", base)
-    return tuple(token for token in base.split(" ") if token)
+    raw = re.sub(r"\.[^.]+$", "", name)
+    base = _CAMEL_CASE_BOUNDARY_RE.sub(" ", raw)
+    base = re.sub(r"[_\-]+", " ", base)
+    base = re.sub(r"[^A-Za-z0-9]+", " ", base)
+    tokens: List[str] = []
+    for chunk in base.split():
+        lowered = chunk.lower()
+        if lowered:
+            tokens.append(lowered)
+    compact = re.sub(r"[^A-Za-z0-9]+", "", raw).lower()
+    if compact and compact not in tokens:
+        tokens.append(compact)
+    return tuple(tokens)
+
+
+def _tokenise_path_parts(relpath: Union[str, Path]) -> Tuple[str, ...]:
+    if isinstance(relpath, Path):
+        parts = relpath.parts
+    else:
+        parts = Path(relpath).parts
+    tokens: List[str] = []
+    for part in parts:
+        if part in {".", ""}:
+            continue
+        tokens.extend(_tokenise(part))
+    return tuple(tokens)
 
 
 def _keyword_matches(keyword: str, tokens: Tuple[str, ...], joined: str) -> bool:
@@ -1151,9 +1266,14 @@ def classify_from_types(types: Dict[int, int], filename: str, adult_hint: bool) 
 
 def refine_with_metadata(path: Path, current: Tuple[str, float, str, Tuple[str, ...]]) -> Tuple[str, float, str, Tuple[str, ...]]:
     category, confidence, notes, tags = current
-    if path.suffix.lower() not in PACKAGE_EXTS:
+    suffix_raw = path.suffix
+    ext, disabled_flag = normalize_extension(suffix_raw)
+    if ext not in PACKAGE_EXTS:
         return category, confidence, notes, tags
-    adult_hint = any(token in ADULT_WORDS for token in _tokenise(path.name))
+    display_name = path.name
+    if disabled_flag and display_name.lower().endswith("off"):
+        display_name = display_name[:-3]
+    adult_hint = any(token in ADULT_WORDS for token in _tokenise(display_name))
     types = dbpf_scan_types(path)
     if not types:
         return category, confidence, notes, tags
@@ -1226,22 +1346,25 @@ def scan_folder(
                 seen_paths.add(token)
                 selected_paths.append(token)
     items: List[FileItem] = []
+    disabled_items: List[FileItem] = []
     errors: List[str] = []
     candidates = list(_iter_files(root, recurse))
     total = len(candidates)
     for index, path in enumerate(candidates, start=1):
         name = path.name
-        ext = path.suffix.lower()
-        lowered = name.lower()
+        ext_raw = path.suffix
+        ext, is_disabled_ext = normalize_extension(ext_raw)
+        lowered_actual = name.lower()
+        effective_name = name[:-3] if is_disabled_ext and lowered_actual.endswith("off") else name
         if allowed_exts_set is not None and ext not in allowed_exts_set:
             if progress_cb:
                 progress_cb(index, total, path, "filtered")
             continue
-        if ignore_exts_set and ext in ignore_exts_set:
+        if ignore_exts_set and (ext in ignore_exts_set or ext_raw.lower() in ignore_exts_set):
             if progress_cb:
                 progress_cb(index, total, path, "ignored")
             continue
-        if ignore_names_tokens and any(token in lowered for token in ignore_names_tokens):
+        if ignore_names_tokens and any(token in lowered_actual for token in ignore_names_tokens):
             if progress_cb:
                 progress_cb(index, total, path, "ignored")
             continue
@@ -1271,11 +1394,19 @@ def scan_folder(
                 if progress_cb:
                     progress_cb(index, total, path, "filtered")
                 continue
-        tokens = _tokenise(name)
-        initial = _guess_from_name(name, ext)
-        refined = refine_with_metadata(path, initial)
-        category, confidence, notes, tags = refined
-        adult_evidence = inspect_adult_content(path, ext, tokens, category)
+        relpath = str(relpath_obj) if path != root else name
+        folder_tokens = _tokenise_path_parts(relpath_obj.parent)
+        tokens = _tokenise(effective_name)
+        initial_category, confidence, notes, tags = _guess_from_name(effective_name, ext)
+        category, confidence, notes, tags = refine_with_metadata(path, (initial_category, confidence, notes, tags))
+        adult_evidence = inspect_adult_content(
+            path,
+            ext,
+            tokens,
+            category,
+            relpath=relpath,
+            folder_tokens=folder_tokens,
+        )
         adult_note = adult_evidence.format_note()
         note_applied = False
         if adult_evidence.is_confident:
@@ -1293,39 +1424,52 @@ def scan_folder(
             note_applied = True
         if not note_applied and adult_note and adult_evidence.hits:
             notes = f"{notes}; {adult_note}" if notes else adult_note
-        if not include_adult and category.startswith("Adult"):
+        if not include_adult and not is_disabled_ext and category.startswith("Adult"):
             if progress_cb:
                 progress_cb(index, total, path, "filtered")
             continue
         target_folder = folder_map.get(category, folder_map.get("Unknown", "Unsorted"))
-        relpath = str(relpath_obj) if path != root else name
-        tag_parts = list(tags)
+        raw_tags: List[str]
+        if isinstance(tags, (list, tuple)):
+            raw_tags = [str(tag) for tag in tags if str(tag).strip()]
+        else:
+            raw_tags = [tag.strip() for tag in str(tags).split(",") if tag.strip()] if tags else []
         if adult_evidence.hits:
             for hit in sorted(adult_evidence.hits):
-                if hit not in tag_parts:
-                    tag_parts.append(hit)
-        meta_tags = ", ".join(tag_parts)
+                if hit not in raw_tags:
+                    raw_tags.append(hit)
+        meta_tags = ", ".join(raw_tags)
         extras: Dict[str, str] = {}
         if adult_evidence.hits:
             extras["adult_keywords"] = ", ".join(sorted(adult_evidence.hits))
         if adult_note and (adult_evidence.hits or adult_evidence.is_confident):
             extras["adult_note"] = adult_note
-        items.append(
-            FileItem(
-                path=path,
-                name=name,
-                ext=ext,
-                size_mb=size,
-                relpath=relpath,
-                guess_type=category,
-                confidence=confidence,
-                notes=notes,
-                target_folder=target_folder,
-                include=True,
-                meta_tags=meta_tags,
-                extras=extras,
-            )
+        if is_disabled_ext:
+            extras["disabled"] = "extension renamed"
+            if notes:
+                notes = f"{notes}; Disabled extension"
+            else:
+                notes = "Disabled extension"
+        item = FileItem(
+            path=path,
+            name=name,
+            ext=ext,
+            size_mb=size,
+            relpath=relpath,
+            guess_type=category,
+            confidence=confidence,
+            notes=notes,
+            include=not is_disabled_ext,
+            target_folder=target_folder,
+            meta_tags=meta_tags,
+            extras=extras,
+            disabled=is_disabled_ext,
+            original_ext=ext,
         )
+        if is_disabled_ext:
+            disabled_items.append(item)
+        else:
+            items.append(item)
         if progress_cb:
             progress_cb(index, total, path, "scanned")
     items.sort(
@@ -1335,7 +1479,13 @@ def scan_folder(
             _natural_key(item.name),
         )
     )
-    return ScanResult(items, total, errors)
+    disabled_items.sort(
+        key=lambda item: (
+            _natural_key(os.path.dirname(item.relpath) or "."),
+            _natural_key(item.name),
+        )
+    )
+    return ScanResult(items, total, errors, disabled_items)
 
 # ---------------------------------------------------------------------------
 # Bundling and move helpers
@@ -1347,10 +1497,14 @@ LOG_NAME = ".sims4_modsorter_moves.json"
 def bundle_scripts_and_packages(items: Sequence[FileItem], folder_map: Dict[str, str]) -> Dict[str, int]:
     script_lookup: Dict[str, FileItem] = {}
     for item in items:
+        if item.disabled:
+            continue
         if item.ext in SCRIPT_EXTS and item.guess_type in {"Script Mod", "Adult Script"}:
             script_lookup[normalize_key(item.name)] = item
     linked = 0
     for item in items:
+        if item.disabled:
+            continue
         if item.ext == ".package":
             key = normalize_key(item.name)
             if key in script_lookup:
@@ -4317,11 +4471,15 @@ def _natural_key(value: str):
 ADULT_TOKENS = {
     "wickedwhims", "turbodriver", "basemental", "nisa", "wild_guy",
     "nsfw", "porn", "sex", "nude", "naked", "strip", "lapdance", "prostitution",
-    "genital", "penis", "vagina", "condom", "dildo", "vibrator", "plug", "cum"
+    "genital", "penis", "vagina", "condom", "dildo", "vibrator", "plug", "cum",
+    "petplay", "nudity", "desires", "deviant", "deviantcore", "devious", "deviousdesires",
+    "dd", "kink", "flirtyfetishes", "fetish", "fetishes", "ww", "gay", "pubic", "pubichair",
+    "watersports", "brothel"
 }
 
 def is_ts4script_or_zip_script(path: str) -> bool:
-    ext = os.path.splitext(path)[1].lower()
+    ext_raw = os.path.splitext(path)[1]
+    ext, _ = normalize_extension(ext_raw)
     if ext not in SCRIPT_EXTS:
         return False
     try:
@@ -4371,10 +4529,14 @@ def guess_type_for_name(name: str, ext: str) -> Tuple[str, float, str]:
     # union of your existing adult hints + live terms from relatedwords.io/condom
     base_adult = {
         "wickedwhims","turbodriver","basemental","nisa","wild_guy","nsfw","porn","sex","nude",
-        "naked","strip","lapdance","prostitution","erotic","aphrodisiac","genital","penis","vagina"
+        "naked","strip","lapdance","prostitution","erotic","aphrodisiac","genital","penis","vagina",
+        "petplay","nudity","desires","deviant","deviantcore","devious","deviousdesires","dd","kink",
+        "flirtyfetishes","fetish","fetishes","ww","gay","pubic","pubichair","watersports"
     }
+    author_terms = {name.lower() for name in ADULT_AUTHORS}
+    author_terms.update(ADULT_AUTHOR_ALIASES.keys())
     condom_terms = _load_relatedwords_condom()     # fetched once per run
-    adult_terms = base_adult | condom_terms
+    adult_terms = base_adult | condom_terms | author_terms
 
     is_adult = any(t in n for t in adult_terms)
 
@@ -4467,8 +4629,11 @@ def guess_type_for_name(name: str, ext: str) -> Tuple[str, float, str]:
 
 def refine_with_metadata(path: str, current: Tuple[str, float, str]) -> Tuple[str, float, str, str]:
     name, conf, notes = current
-    ext = os.path.splitext(path)[1].lower()
+    ext_raw = os.path.splitext(path)[1]
+    ext, disabled_flag = normalize_extension(ext_raw)
     filename = os.path.basename(path)
+    if disabled_flag and filename.lower().endswith("off"):
+        filename = filename[:-3]
     adult_hint = any(k in filename.lower() for k in ADULT_TOKENS)
 
     # Script check for zip/ts4script
@@ -4498,162 +4663,31 @@ def map_type_to_folder(cat: str, folder_map: Dict[str, str]) -> str:
 # ---------------------------
 # Scan, bundle, move, undo
 # ---------------------------
+_scan_folder_impl = scan_folder
+
+
 def scan_folder(
     path: str,
     folder_map: Dict[str, str],
     recurse: bool = True,
-    ignore_exts: Optional[set] = None,
-    ignore_name_contains: Optional[List[str]] = None,
+    ignore_exts: Optional[Iterable[str]] = None,
+    ignore_name_contains: Optional[Iterable[str]] = None,
     progress_cb=None,
     selected_folders: Optional[Sequence[str]] = None,
     include_adult: bool = True,
-    allowed_exts: Optional[set[str]] = None,
-) -> List[FileItem]:
-    if not os.path.isdir(path):
-        return []
-
-    ignore_exts = {
-        ext.strip().lower() if ext.strip().startswith('.') else f".{ext.strip().lower()}"
-        for ext in (ignore_exts or set()) if ext and ext.strip()
-    }
-    ignore_name_contains = [tok.strip().lower() for tok in (ignore_name_contains or []) if tok and tok.strip()]
-    allowed_exts = (
-        {
-            ext.strip().lower() if ext.strip().startswith('.') else f".{ext.strip().lower()}"
-            for ext in (allowed_exts or set())
-            if ext and str(ext).strip()
-        }
-        if allowed_exts is not None
-        else None
+    allowed_exts: Optional[Iterable[str]] = None,
+) -> ScanResult:
+    return _scan_folder_impl(
+        Path(path),
+        folder_map=folder_map,
+        recurse=recurse,
+        ignore_exts=ignore_exts,
+        ignore_names=ignore_name_contains,
+        progress_cb=progress_cb,
+        selected_folders=selected_folders,
+        include_adult=include_adult,
+        allowed_exts=allowed_exts,
     )
-    base_root = os.path.normpath(path)
-    selected: Optional[List[str]] = None
-    if selected_folders:
-        seen: set[str] = set()
-        selected = []
-        for folder in selected_folders:
-            rel = str(folder).strip() or "."
-            rel = "." if rel in {".", os.curdir} else os.path.normpath(rel)
-            if rel not in seen:
-                seen.add(rel)
-                selected.append(rel)
-
-    def add_candidates_for(base: str, include_children: bool, results: List[str], seen_paths: set[str]) -> None:
-        if not os.path.exists(base):
-            return
-        try:
-            if os.path.isfile(base):
-                norm = os.path.normpath(base)
-                if os.path.commonpath([base_root, norm]) != base_root:
-                    return
-                if norm not in seen_paths:
-                    seen_paths.add(norm)
-                    results.append(norm)
-                return
-            if include_children:
-                for root_dir, _, files in os.walk(base):
-                    for fname in files:
-                        full = os.path.normpath(os.path.join(root_dir, fname))
-                        if os.path.commonpath([base_root, full]) != base_root:
-                            continue
-                        if full not in seen_paths:
-                            seen_paths.add(full)
-                            results.append(full)
-            else:
-                with os.scandir(base) as entries:
-                    for entry in entries:
-                        if entry.is_file():
-                            full = os.path.normpath(entry.path)
-                            if os.path.commonpath([base_root, full]) != base_root:
-                                continue
-                            if full not in seen_paths:
-                                seen_paths.add(full)
-                                results.append(full)
-        except FileNotFoundError:
-            return
-        except PermissionError:
-            return
-
-    candidates: List[str] = []
-    seen_files: set[str] = set()
-    if selected is None:
-        add_candidates_for(base_root, recurse, candidates, seen_files)
-    else:
-        for rel in selected:
-            if rel == ".":
-                add_candidates_for(base_root, False, candidates, seen_files)
-            else:
-                target = os.path.normpath(os.path.join(base_root, rel))
-                if os.path.commonpath([base_root, target]) != base_root:
-                    continue
-                add_candidates_for(target, recurse, candidates, seen_files)
-
-    total = len(candidates)
-    items: List[FileItem] = []
-
-    for idx, fpath in enumerate(candidates, start=1):
-        fname = os.path.basename(fpath)
-        lowname = fname.lower()
-        ext = os.path.splitext(fname)[1].lower()
-
-        if allowed_exts is not None and ext not in allowed_exts:
-            if progress_cb:
-                progress_cb(idx, total, fpath, "filtered")
-            continue
-        if ext in ignore_exts or any(tok in lowname for tok in ignore_name_contains):
-            if progress_cb:
-                progress_cb(idx, total, fpath, "ignored")
-            continue
-
-        try:
-            size_mb = human_mb(os.path.getsize(fpath))
-            guess = guess_type_for_name(fname, ext)
-            cat, conf, notes = guess
-            cat, conf, notes, tags = refine_with_metadata(fpath, guess)
-            if not include_adult and cat.startswith("Adult"):
-                if progress_cb:
-                    progress_cb(idx, total, fpath, "filtered")
-                continue
-            relp = os.path.relpath(fpath, path)
-            target = map_type_to_folder(cat, folder_map)
-            items.append(FileItem(
-                path=fpath,
-                name=fname,
-                ext=ext,
-                size_mb=size_mb,
-                relpath=relp,
-                guess_type=cat,
-                confidence=conf,
-                notes=notes,
-                include=True,
-                target_folder=target,
-                meta_tags=tags,
-            ))
-            if progress_cb:
-                progress_cb(idx, total, fpath, "scanned")
-        except Exception as e:
-            relp = os.path.relpath(fpath, path) if os.path.exists(fpath) else fname
-            items.append(FileItem(
-                path=fpath,
-                name=fname,
-                ext=ext,
-                size_mb=0.0,
-                relpath=relp,
-                guess_type="Unknown",
-                confidence=0.0,
-                notes=f"scan error: {e}",
-                include=False,
-                target_folder=map_type_to_folder("Unknown", folder_map),
-            ))
-            if progress_cb:
-                progress_cb(idx, total, fpath, "error")
-
-    items.sort(key=lambda fi: (
-        CATEGORY_INDEX.get(fi.guess_type, len(CATEGORY_ORDER)),
-        _natural_key(os.path.dirname(fi.relpath) or '.'),
-        _natural_key(fi.name),
-    ))
-    return items
 
 def ensure_folder(path: str):
     if not os.path.isdir(path):
@@ -4726,10 +4760,14 @@ def undo_last_moves(mods_root: str):
 def bundle_scripts_and_packages(items: List[FileItem], folder_map: Dict[str, str]):
     scripts: Dict[str, FileItem] = {}
     for it in items:
+        if it.disabled:
+            continue
         if it.ext in SCRIPT_EXTS and it.guess_type in {"Script Mod", "Adult Script"}:
             scripts[normalize_key(it.name)] = it
     linked = 0
     for it in items:
+        if it.disabled:
+            continue
         if it.ext == ".package":
             key = normalize_key(it.name)
             if key in scripts:
@@ -4763,6 +4801,11 @@ class Sims4ModSorterApp(tk.Tk):
         self.mods_root = tk.StringVar(value=get_default_mods_path())
         self._version_display_var = tk.StringVar(value=f"App Version: {APP_VERSION}")
         self.items: List[FileItem] = []
+        self.disabled_items: List[FileItem] = []
+        self._disabled_items_by_path: Dict[str, FileItem] = {}
+        self._disabled_window: Optional[tk.Toplevel] = None
+        self._disabled_tree: Optional[ttk.Treeview] = None
+        self._disabled_status_var = tk.StringVar(value="No disabled mods")
         self.plugin_manager = load_user_plugins()
         if self.plugin_manager:
             self.plugin_manager.attach_app(self)
@@ -4910,6 +4953,7 @@ class Sims4ModSorterApp(tk.Tk):
         xsb.grid(row=1, column=0, sticky="ew")
         tree_frame.grid_columnconfigure(0, weight=1)
         tree_frame.grid_rowconfigure(0, weight=1)
+        self.tree.tag_configure("adult", foreground="#d12a2a")
 
         right = ttk.Frame(mid); right.pack(side="left", fill="y", padx=(10, 0))
         ttk.Label(right, text="Selection").pack(anchor="w")
@@ -4920,6 +4964,9 @@ class Sims4ModSorterApp(tk.Tk):
         self.target_entry = ttk.Entry(right); self.target_entry.pack(fill="x", pady=(0, 8))
         ttk.Button(right, text="Apply to Selected", command=self.on_apply_selected).pack(fill="x", pady=4)
         ttk.Button(right, text="Toggle Include", command=self.on_toggle_include).pack(fill="x", pady=4)
+        ttk.Button(right, text="Disable Selected", command=self.on_disable_selected).pack(fill="x", pady=4)
+        ttk.Button(right, text="Show Disabled Mods", command=self.show_disabled_mods).pack(fill="x", pady=4)
+        ttk.Label(right, textvariable=self._disabled_status_var).pack(anchor="w", pady=(0, 8))
         ttk.Separator(right).pack(fill="x", pady=10)
         ttk.Label(right, text="Batch assign by keyword").pack(anchor="w")
         self.batch_keyword = ttk.Entry(right); self.batch_keyword.pack(fill="x", pady=(0, 6))
@@ -5603,7 +5650,7 @@ class Sims4ModSorterApp(tk.Tk):
                 self.status_var.set("Scan cancelled")
                 return
             try:
-                items = scan_folder(
+                result = scan_folder(
                     scan_root,
                     self.folder_map,
                     recurse=self.recurse_var.get(),
@@ -5614,6 +5661,7 @@ class Sims4ModSorterApp(tk.Tk):
                     include_adult=include_adult_scan,
                     allowed_exts=allowed_exts,
                 )
+                items = list(result.items)
                 stats = bundle_scripts_and_packages(items, self.folder_map)
                 if self.plugin_manager:
                     context.update({
@@ -5622,17 +5670,27 @@ class Sims4ModSorterApp(tk.Tk):
                         "scan_root": scan_root,
                     })
                     self.plugin_manager.run_post_scan(items, context)
-                    items.sort(key=lambda fi: (
-                        CATEGORY_INDEX.get(fi.guess_type, len(CATEGORY_ORDER)),
-                        _natural_key(os.path.dirname(fi.relpath) or '.'),
-                        _natural_key(fi.name),
-                    ))
+                    items.sort(
+                        key=lambda fi: (
+                            CATEGORY_INDEX.get(fi.guess_type, len(CATEGORY_ORDER)),
+                            _natural_key(os.path.dirname(fi.relpath) or '.'),
+                            _natural_key(fi.name),
+                        )
+                    )
                 self.items = items
+                self.disabled_items = list(result.disabled_items)
                 self._refresh_tree()
-                self.status_var.set(f"Plan: {len(self.items)} files")
+                self._refresh_disabled_tree()
+                disabled_count = len(self.disabled_items)
+                plan_summary = f"Plan: {len(self.items)} files"
+                if disabled_count:
+                    plan_summary += f" ({disabled_count} disabled)"
+                self.status_var.set(plan_summary)
                 self.log(
-                    f"Scan complete. Planned {len(self.items)} files. Linked packages: {stats['linked']} across {stats['scripts']} script(s)."
+                    f"Scan complete. Planned {len(self.items)} files (disabled: {disabled_count}). Linked packages: {stats['linked']} across {stats['scripts']} script(s)."
                 )
+                for warning in result.errors:
+                    self.log(f"Scan warning: {warning}", level="warning")
                 self._report_mod_runtime_messages()
             finally:
                 if hasattr(self, "btn_scan"):
@@ -5733,6 +5791,7 @@ class Sims4ModSorterApp(tk.Tk):
         selected_iids = set(self.tree.selection()) if preserve_selection else set()
         self.tree.delete(*self.tree.get_children())
         total = len(self.items); by_cat: Dict[str, int] = {}
+        disabled_count = len(self.disabled_items)
         for idx, it in enumerate(self.items):
             by_cat[it.guess_type] = by_cat.get(it.guess_type, 0) + 1
             inc = "✓" if it.include else ""
@@ -5743,16 +5802,177 @@ class Sims4ModSorterApp(tk.Tk):
                 it.guess_type, it.target_folder, f"{it.confidence:.2f}", linked, it.meta_tags, it.notes,
             )
             iid = str(idx)
-            self.tree.insert("", "end", iid=iid, values=vals)
+            extras = it.extras if isinstance(it.extras, dict) else {}
+            adult_tag = (
+                "adult"
+                if it.guess_type.startswith("Adult")
+                or extras.get("adult_keywords")
+                or extras.get("adult_note")
+                else None
+            )
+            tags = (adult_tag,) if adult_tag else ()
+            self.tree.insert("", "end", iid=iid, values=vals, tags=tags)
             if preserve_selection and iid in selected_iids:
                 self.tree.selection_add(iid)
         if total:
             topcats = sorted(by_cat.items(), key=lambda kv: -kv[1])[:4]
             frag = ", ".join(f"{k}: {v}" for k, v in topcats)
-            self.summary_var.set(f"Planned {total} files | {frag}")
+            summary = f"Planned {total} files"
+            if disabled_count:
+                summary += f" (+{disabled_count} disabled)"
+            summary += f" | {frag}"
+            self.summary_var.set(summary)
         else:
             self.summary_var.set("No plan yet")
+        if disabled_count:
+            self._disabled_status_var.set(f"Disabled mods: {disabled_count}")
+        else:
+            self._disabled_status_var.set("No disabled mods")
         self._auto_size_columns()
+
+    def on_disable_selected(self):
+        sel = list(self.tree.selection())
+        if not sel:
+            messagebox.showinfo("Disable Mods", "Select one or more mods to disable.", parent=self)
+            return
+        disabled = 0
+        errors: List[str] = []
+        for iid in sel:
+            try:
+                idx = int(iid)
+            except ValueError:
+                continue
+            if idx < 0 or idx >= len(self.items):
+                continue
+            item = self.items[idx]
+            if item.disabled:
+                continue
+            path = Path(item.path)
+            target = path.with_name(path.name + "OFF")
+            if target.exists():
+                errors.append(f"Disable failed: {target.name} already exists")
+                continue
+            try:
+                path.rename(target)
+                disabled += 1
+            except Exception as exc:
+                errors.append(f"Disable failed for {path.name}: {exc}")
+        if disabled:
+            self.log(f"Disabled {disabled} mod(s).")
+        for message in errors[:50]:
+            self.log(message, level="error")
+        if disabled or errors:
+            self.on_scan()
+
+    def show_disabled_mods(self):
+        window = self._disabled_window
+        if window is not None and window.winfo_exists():
+            window.lift()
+            self._refresh_disabled_tree()
+            return
+        win = tk.Toplevel(self)
+        win.title("Disabled Mods")
+        win.geometry("720x360")
+        win.transient(self)
+        try:
+            win.grab_set()
+        except tk.TclError:
+            pass
+        columns = ("name", "folder", "type", "notes")
+        tree = ttk.Treeview(win, columns=columns, show="headings", selectmode="extended")
+        headings = {
+            "name": "File",
+            "folder": "Folder",
+            "type": "Type",
+            "notes": "Notes",
+        }
+        for column in columns:
+            tree.heading(column, text=headings[column])
+            tree.column(column, width=160 if column != "notes" else 280, anchor="w")
+        tree.tag_configure("adult", foreground="#d12a2a")
+        tree.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+        button_row = ttk.Frame(win)
+        button_row.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Button(button_row, text="Enable Selected", command=self._enable_disabled_selection).pack(side="left")
+        ttk.Button(button_row, text="Close", command=self._close_disabled_window).pack(side="right")
+        win.protocol("WM_DELETE_WINDOW", self._close_disabled_window)
+        self._disabled_window = win
+        self._disabled_tree = tree
+        self._refresh_disabled_tree()
+
+    def _close_disabled_window(self):
+        window = self._disabled_window
+        if window is not None and window.winfo_exists():
+            window.destroy()
+        self._disabled_window = None
+        self._disabled_tree = None
+
+    def _refresh_disabled_tree(self):
+        tree = self._disabled_tree
+        if tree is None or not tree.winfo_exists():
+            return
+        tree.delete(*tree.get_children())
+        self._disabled_items_by_path = {}
+        for item in self.disabled_items:
+            path_str = str(item.path)
+            self._disabled_items_by_path[path_str] = item
+            folder_rel = os.path.dirname(item.relpath) if item.relpath else "."
+            extras = item.extras if isinstance(item.extras, dict) else {}
+            adult_tag = (
+                "adult"
+                if item.guess_type.startswith("Adult")
+                or extras.get("adult_keywords")
+                or extras.get("adult_note")
+                else None
+            )
+            tags = (adult_tag,) if adult_tag else ()
+            tree.insert(
+                "",
+                "end",
+                iid=path_str,
+                values=(
+                    pretty_display_name(item.name),
+                    folder_rel or ".",
+                    item.guess_type,
+                    item.notes,
+                ),
+                tags=tags,
+            )
+
+    def _enable_disabled_selection(self):
+        tree = self._disabled_tree
+        if tree is None or not tree.winfo_exists():
+            return
+        selection = tree.selection()
+        if not selection:
+            messagebox.showinfo("Enable Mods", "Select one or more disabled mods to enable.", parent=self._disabled_window)
+            return
+        enabled = 0
+        errors: List[str] = []
+        for iid in selection:
+            item = self._disabled_items_by_path.get(iid)
+            if not item:
+                continue
+            path = Path(item.path)
+            ext_raw = path.suffix
+            normalized_ext, disabled_flag = normalize_extension(ext_raw)
+            if not disabled_flag:
+                continue
+            target = path.with_suffix(normalized_ext)
+            if target.exists():
+                errors.append(f"Enable failed: {target.name} already exists")
+                continue
+            try:
+                path.rename(target)
+                enabled += 1
+            except Exception as exc:
+                errors.append(f"Enable failed for {path.name}: {exc}")
+        if enabled:
+            self.log(f"Enabled {enabled} mod(s).")
+        for message in errors[:50]:
+            self.log(message, level="error")
+        if enabled or errors:
+            self.on_scan()
 
 # ---------------------------
 # Entry
