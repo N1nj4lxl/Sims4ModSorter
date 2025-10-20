@@ -87,6 +87,40 @@ class ScanResult:
     errors: List[str] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class AdultEvidence:
+    score: float = 0.0
+    hits: set[str] = field(default_factory=set)
+    reasons: List[str] = field(default_factory=list)
+
+    def add(self, hits: Iterable[str], score: float, reason: str) -> None:
+        hits_set = {token for token in hits if isinstance(token, str) and token}
+        if hits_set:
+            self.hits.update(hits_set)
+        if score:
+            if score < 0:
+                self.score = max(0.0, min(1.0, self.score + score))
+            else:
+                self.score = min(1.0, self.score + score)
+        if reason:
+            self.reasons.append(reason)
+
+    @property
+    def is_confident(self) -> bool:
+        if self.score >= 0.75:
+            return True
+        return self.score >= 0.5 and bool(self.hits)
+
+    def format_note(self) -> str:
+        parts: List[str] = []
+        if self.hits:
+            parts.append("keywords: " + ", ".join(sorted(self.hits)))
+        if self.reasons:
+            parts.append("; ".join(self.reasons))
+        if not parts:
+            return ""
+        return "Adult evidence - " + " | ".join(parts)
+
 # ---------------------------------------------------------------------------
 # Classification constants
 # ---------------------------------------------------------------------------
@@ -171,6 +205,47 @@ SUPPORTED_EXTS = PACKAGE_EXTS | SCRIPT_EXTS | ARCHIVE_EXTS | {
     ".rtf",
 }
 
+TEXT_FILE_EXTS = {".txt", ".cfg", ".ini", ".log", ".rtf"}
+
+ADULT_CATEGORY_PROMOTIONS: Dict[str, str] = {
+    "Script Mod": "Adult Script",
+    "Gameplay Tuning": "Adult Gameplay",
+    "Animation": "Adult Animation",
+    "Pose": "Adult Pose",
+    "CAS Hair": "Adult CAS",
+    "CAS Clothing": "Adult CAS",
+    "CAS Makeup": "Adult CAS",
+    "CAS Skin": "Adult CAS",
+    "CAS Eyes": "Adult CAS",
+    "CAS Accessories": "Adult CAS",
+    "BuildBuy Object": "Adult BuildBuy",
+    "BuildBuy Recolour": "Adult BuildBuy",
+    "Preset": "Adult Other",
+    "Slider": "Adult Other",
+    "World": "Adult Other",
+    "Override": "Adult Override",
+    "Archive": "Adult Other",
+    "Other": "Adult Other",
+    "Unknown": "Adult Other",
+    "Utility Tool": "Adult Other",
+}
+
+ADULT_CATEGORY_DEMOTIONS: Dict[str, str] = {
+    "Adult Script": "Script Mod",
+    "Adult Gameplay": "Gameplay Tuning",
+    "Adult Animation": "Animation",
+    "Adult Pose": "Pose",
+    "Adult CAS": "CAS Clothing",
+    "Adult BuildBuy": "BuildBuy Object",
+    "Adult Override": "Override",
+    "Adult Other": "Other",
+}
+
+ADULT_SCAN_MAX_BYTES = 2 * 1024 * 1024
+ADULT_SCAN_CHUNK_SIZE = 65_536
+ADULT_SCAN_MAX_ARCHIVE_ENTRIES = 40
+ADULT_SCAN_MAX_SOURCES = 5
+
 TYPE_IDS: Dict[int, str] = {
     0x034AEECB: "CASP",
     0x319E4F1D: "COBJ/OBJD",
@@ -220,6 +295,20 @@ ADULT_WORDS_BASE: Tuple[str, ...] = (
     "orgasm",
     "bdsm",
     "fetish",
+    "bondage",
+    "dominatrix",
+    "orgy",
+    "hentai",
+    "lewd",
+    "xxx",
+    "xrated",
+    "x-rated",
+    "taboo",
+    "sensual",
+    "seduce",
+    "seduction",
+    "sultry",
+    "provocative",
     "lingerie",
     "nipple",
     "areola",
@@ -229,6 +318,16 @@ ADULT_WORDS_BASE: Tuple[str, ...] = (
     "aphrodisiac",
     "escort",
     "brothel",
+    "stripclub",
+    "swinger",
+    "swingers",
+    "kamasutra",
+    "playboy",
+    "onlyfans",
+    "camboy",
+    "camgirl",
+    "cammodel",
+    "camshow",
     "latex",
     "polyurethane",
     "polyisoprene",
@@ -240,6 +339,19 @@ ADULT_WORDS_BASE: Tuple[str, ...] = (
 )
 
 ADULT_WORDS: set[str] = set(ADULT_WORDS_BASE)
+_ADULT_WORD_CACHE: Tuple[str, ...] = ()
+_ADULT_MAX_WORD_LEN: int = 0
+
+
+def _refresh_adult_word_cache() -> None:
+    global _ADULT_WORD_CACHE, _ADULT_MAX_WORD_LEN
+    _ADULT_WORD_CACHE = tuple(
+        sorted((word for word in ADULT_WORDS if word), key=len, reverse=True)
+    )
+    _ADULT_MAX_WORD_LEN = max((len(word) for word in _ADULT_WORD_CACHE), default=0)
+
+
+_refresh_adult_word_cache()
 
 
 def _load_adult_words_override() -> None:
@@ -258,6 +370,7 @@ def _load_adult_words_override() -> None:
         for word in words:
             if isinstance(word, str) and word.strip():
                 ADULT_WORDS.add(word.strip().lower())
+    _refresh_adult_word_cache()
 
 
 _load_adult_words_override()
@@ -266,6 +379,146 @@ _load_adult_words_override()
 # ---------------------------------------------------------------------------
 # Theme registry
 # ---------------------------------------------------------------------------
+
+
+def _ensure_adult_category(category: str) -> str:
+    if category.startswith("Adult"):
+        return category
+    return ADULT_CATEGORY_PROMOTIONS.get(category, "Adult Other")
+
+
+def _strip_adult_category(category: str) -> str:
+    if not category.startswith("Adult"):
+        return category
+    base = ADULT_CATEGORY_DEMOTIONS.get(category)
+    if base:
+        return base
+    return category.replace("Adult ", "", 1) or "Other"
+
+
+def _scan_binary_stream(stream, limit: int) -> set[str]:
+    hits: set[str] = set()
+    if not _ADULT_WORD_CACHE or limit <= 0:
+        return hits
+    remaining = limit
+    remainder = ""
+    while remaining > 0:
+        chunk = stream.read(min(ADULT_SCAN_CHUNK_SIZE, remaining))
+        if not chunk:
+            break
+        remaining -= len(chunk)
+        try:
+            decoded = chunk.decode("utf-8", "ignore")
+        except Exception:
+            decoded = chunk.decode("latin-1", "ignore")
+        lowered = (remainder + decoded).lower()
+        for keyword in _ADULT_WORD_CACHE:
+            if keyword and keyword in lowered:
+                hits.add(keyword)
+        if _ADULT_MAX_WORD_LEN > 1:
+            remainder = lowered[-(_ADULT_MAX_WORD_LEN - 1) :]
+        else:
+            remainder = ""
+    return hits
+
+
+def _scan_file_for_adult_keywords(path: Path, limit: int = ADULT_SCAN_MAX_BYTES) -> set[str]:
+    try:
+        with path.open("rb") as handle:
+            return _scan_binary_stream(handle, limit)
+    except Exception:
+        return set()
+
+
+def _scan_text_file_for_adult_keywords(path: Path, limit: int = ADULT_SCAN_MAX_BYTES) -> set[str]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        try:
+            text = path.read_text(encoding="latin-1", errors="ignore")
+        except Exception:
+            return set()
+    snippet = text[:limit].lower()
+    return {word for word in _ADULT_WORD_CACHE if word and word in snippet}
+
+
+def _scan_zip_for_adult_keywords(path: Path) -> Tuple[set[str], List[str]]:
+    hits: set[str] = set()
+    sources: List[str] = []
+    try:
+        with zipfile.ZipFile(path) as archive:
+            for index, info in enumerate(archive.infolist()):
+                if index >= ADULT_SCAN_MAX_ARCHIVE_ENTRIES:
+                    break
+                name = info.filename
+                lowered = name.lower()
+                name_hits = {word for word in _ADULT_WORD_CACHE if word and word in lowered}
+                if name_hits:
+                    hits.update(name_hits)
+                    if len(sources) < ADULT_SCAN_MAX_SOURCES:
+                        sources.append(f"{name} (name)")
+                if info.is_dir():
+                    continue
+                limit = min(info.file_size, ADULT_SCAN_MAX_BYTES)
+                if limit <= 0:
+                    continue
+                try:
+                    with archive.open(info) as entry:
+                        entry_hits = _scan_binary_stream(entry, int(limit))
+                except Exception:
+                    continue
+                if entry_hits:
+                    hits.update(entry_hits)
+                    if len(sources) < ADULT_SCAN_MAX_SOURCES:
+                        sources.append(f"{name} (content)")
+    except (zipfile.BadZipFile, OSError, RuntimeError, ValueError):
+        return set(), []
+    return hits, sources
+
+
+def _summarize_archive_sources(label: str, sources: Sequence[str]) -> str:
+    if not sources:
+        return f"{label} content"
+    display = ", ".join(sources[:ADULT_SCAN_MAX_SOURCES])
+    if len(sources) > ADULT_SCAN_MAX_SOURCES:
+        display += ", ..."
+    return f"{label} content ({display})"
+
+
+def _scan_content_for_adult_keywords(path: Path, ext: str) -> List[Tuple[set[str], str, float]]:
+    ext = ext.lower()
+    results: List[Tuple[set[str], str, float]] = []
+    if ext == ".package":
+        hits = _scan_file_for_adult_keywords(path)
+        if hits:
+            results.append((hits, "package content", 0.6))
+    elif ext in SCRIPT_EXTS or ext == ".zip":
+        hits, sources = _scan_zip_for_adult_keywords(path)
+        if hits:
+            label = "script archive" if ext in SCRIPT_EXTS else "zip archive"
+            results.append((hits, _summarize_archive_sources(label, sources), 0.65 if ext in SCRIPT_EXTS else 0.55))
+    elif ext in ARCHIVE_EXTS:
+        hits = _scan_file_for_adult_keywords(path)
+        if hits:
+            results.append((hits, f"{ext[1:]} archive binary content", 0.45))
+    elif ext in TEXT_FILE_EXTS:
+        hits = _scan_text_file_for_adult_keywords(path)
+        if hits:
+            results.append((hits, "text content", 0.4))
+    return results
+
+
+def inspect_adult_content(path: Path, ext: str, tokens: Tuple[str, ...], initial_category: str) -> AdultEvidence:
+    evidence = AdultEvidence()
+    token_hits = {token for token in tokens if token in ADULT_WORDS}
+    if token_hits:
+        evidence.add(token_hits, 0.25, "filename tokens")
+    if initial_category.startswith("Adult"):
+        evidence.add((), 0.2, f"initial category '{initial_category}'")
+    for hits, reason, score in _scan_content_for_adult_keywords(path, ext):
+        evidence.add(hits, score, reason)
+    return evidence
+
 
 THEMES: Dict[str, Dict[str, str]] = {
     "Dark Mode": {"bg": "#111316", "fg": "#E6E6E6", "alt": "#161A1E", "accent": "#4C8BF5", "sel": "#2A2F3A"},
@@ -1017,15 +1270,45 @@ def scan_folder(
                 if progress_cb:
                     progress_cb(index, total, path, "filtered")
                 continue
+        tokens = _tokenise(name)
         initial = _guess_from_name(name, ext)
         refined = refine_with_metadata(path, initial)
         category, confidence, notes, tags = refined
+        adult_evidence = inspect_adult_content(path, ext, tokens, category)
+        adult_note = adult_evidence.format_note()
+        note_applied = False
+        if adult_evidence.is_confident:
+            promoted = _ensure_adult_category(category)
+            if promoted != category:
+                category = promoted
+            confidence = max(confidence, min(1.0, 0.5 + adult_evidence.score / 2))
+            if adult_note:
+                notes = f"{notes}; {adult_note}" if notes else adult_note
+                note_applied = True
+        elif category.startswith("Adult") and not adult_evidence.hits and adult_evidence.score < 0.35:
+            category = _strip_adult_category(category)
+            demote_note = "Adult deep scan found no explicit keywords"
+            notes = f"{notes}; {demote_note}" if notes else demote_note
+            note_applied = True
+        if not note_applied and adult_note and adult_evidence.hits:
+            notes = f"{notes}; {adult_note}" if notes else adult_note
         if not include_adult and category.startswith("Adult"):
             if progress_cb:
                 progress_cb(index, total, path, "filtered")
             continue
         target_folder = folder_map.get(category, folder_map.get("Unknown", "Unsorted"))
         relpath = str(relpath_obj) if path != root else name
+        tag_parts = list(tags)
+        if adult_evidence.hits:
+            for hit in sorted(adult_evidence.hits):
+                if hit not in tag_parts:
+                    tag_parts.append(hit)
+        meta_tags = ", ".join(tag_parts)
+        extras: Dict[str, str] = {}
+        if adult_evidence.hits:
+            extras["adult_keywords"] = ", ".join(sorted(adult_evidence.hits))
+        if adult_note and (adult_evidence.hits or adult_evidence.is_confident):
+            extras["adult_note"] = adult_note
         items.append(
             FileItem(
                 path=path,
@@ -1038,7 +1321,8 @@ def scan_folder(
                 notes=notes,
                 target_folder=target_folder,
                 include=True,
-                meta_tags=", ".join(tags),
+                meta_tags=meta_tags,
+                extras=extras,
             )
         )
         if progress_cb:
