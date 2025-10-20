@@ -5904,7 +5904,8 @@ class Sims4ModSorterApp(tk.Tk):
                         CATEGORY_INDEX.get(fi.guess_type, len(CATEGORY_ORDER)),
                         _natural_key(os.path.dirname(fi.relpath) or "."),
                         _natural_key(fi.name),
-                    )
+                    ),
+                )
                 self.items = items
                 self.disabled_items = list(result.disabled_items)
                 self._refresh_tree()
