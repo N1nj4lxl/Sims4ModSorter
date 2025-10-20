@@ -121,6 +121,7 @@ class ColumnCustomizerPlugin:
 
     def _save_layout(self) -> bool:
         try:
+            self.config_path.parent.mkdir(parents=True, exist_ok=True)
             data = {"columns": [state.to_dict() for state in self.layout]}
             self.config_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
             return True

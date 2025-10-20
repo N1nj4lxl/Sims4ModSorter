@@ -1,11 +1,13 @@
 """Interactive Plugin Manager for Sims4 Mod Sorter."""
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
 import shutil
 import sys
+import traceback
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -195,6 +197,16 @@ class PluginEntry:
     features: List[PluginFeature] = field(default_factory=list)
 
 
+@dataclass
+class DiagnosisResult:
+    errors: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+
+    @property
+    def has_errors(self) -> bool:
+        return bool(self.errors)
+
+
 class PluginLibrary:
     """Filesystem operations for plugins."""
 
@@ -363,6 +375,52 @@ class PluginLibrary:
         plugin_dir = self._resolve(identifier)
         shutil.rmtree(plugin_dir, ignore_errors=True)
 
+    def diagnose(self, identifier: str) -> DiagnosisResult:
+        plugin_dir = self._resolve(identifier)
+        manifest = load_manifest(plugin_dir)
+        entry_name = str(manifest.get("entry") or "plugin.py")
+        entry_path = plugin_dir / entry_name
+        result = DiagnosisResult()
+
+        if not entry_path.exists():
+            result.errors.append(f"Missing entry file: {entry_name}")
+            return result
+
+        callable_name = str(manifest.get("callable") or "register")
+        module_name = f"plugin_diagnose_{plugin_dir.name}"
+        sys.modules.pop(module_name, None)
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, entry_path)
+        except Exception as exc:
+            result.errors.append(f"Unable to load plugin entry: {exc}")
+            return result
+        if not spec or not spec.loader:
+            result.errors.append("Unable to create a module spec for the plugin entry point.")
+            return result
+
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)  # type: ignore[call-arg]
+        except Exception as exc:
+            summary = f"Import failed: {exc}"
+            result.errors.append(summary)
+            tb = traceback.format_exception(type(exc), exc, exc.__traceback__)
+            snippet = "".join(tb[-5:]).strip()
+            if snippet:
+                result.warnings.append(snippet)
+        else:
+            if not hasattr(module, callable_name):
+                result.warnings.append(
+                    f"Callable '{callable_name}' was not found in {entry_name}."
+                )
+        finally:
+            sys.modules.pop(module_name, None)
+
+        compat = compatibility_message(manifest)
+        if compat:
+            result.warnings.append(compat)
+        return result
+
     def open_folder(self) -> None:
         ensure_plugins_dir()
         if sys.platform.startswith("win"):
@@ -456,6 +514,8 @@ class PluginManagerApp(tk.Tk):
         self.btn_settings.pack(side="left", padx=(8, 0))
         self.btn_copy_error = ttk.Button(toolbar, text="Copy Error", command=self.on_copy_error)
         self.btn_copy_error.pack(side="left", padx=(8, 0))
+        self.btn_diagnose = ttk.Button(toolbar, text="Diagnose", command=self.on_diagnose)
+        self.btn_diagnose.pack(side="left", padx=(8, 0))
         ttk.Button(toolbar, text="Remove", command=self.on_remove).pack(side="left", padx=(8, 0))
 
         columns = ("name", "folder", "version", "status", "message")
@@ -599,6 +659,35 @@ class PluginManagerApp(tk.Tk):
             return
         self.status_var.set(f"Copied error for {entry.name}")
 
+    def on_diagnose(self) -> None:
+        identifier = self._selected_folder()
+        if not identifier:
+            return
+        try:
+            report = self.library.diagnose(identifier)
+        except Exception as exc:
+            messagebox.showerror("Diagnosis Failed", str(exc), parent=self)
+            return
+        entry = next((e for e in self.entries if e.folder == identifier), None)
+        title = entry.name if entry else identifier
+        lines: List[str] = []
+        if report.errors:
+            lines.append("Errors:")
+            lines.extend(f" • {error}" for error in report.errors)
+        if report.warnings:
+            if report.errors:
+                lines.append("")
+            lines.append("Warnings:")
+            lines.extend(f" • {warning}" for warning in report.warnings)
+        if not lines:
+            lines.append("No blocking issues detected.")
+        message = "\n".join(lines)
+        if report.has_errors:
+            messagebox.showerror("Plugin Diagnosis", message, parent=self)
+        else:
+            messagebox.showinfo("Plugin Diagnosis", message, parent=self)
+        self.status_var.set(f"Diagnosis completed for {title}")
+
     # Helpers ------------------------------------------------------------
     def _reload_tree(self) -> None:
         self.tree.delete(*self.tree.get_children())
@@ -619,6 +708,7 @@ class PluginManagerApp(tk.Tk):
             self.btn_disable.state(["disabled"])
             self.btn_settings.state(["disabled"])
             self.btn_copy_error.state(["disabled"])
+            self.btn_diagnose.state(["disabled"])
             return
         entry = next((e for e in self.entries if e.folder == folder), None)
         if entry and entry.enabled:
@@ -635,6 +725,7 @@ class PluginManagerApp(tk.Tk):
             self.btn_copy_error.state(["!disabled"])
         else:
             self.btn_copy_error.state(["disabled"])
+        self.btn_diagnose.state(["!disabled"])
 
 
 class ImportDialog(tk.Toplevel):

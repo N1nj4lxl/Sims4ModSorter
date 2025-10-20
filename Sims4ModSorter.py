@@ -17,6 +17,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 import webbrowser
 import zipfile
 from dataclasses import dataclass, field
@@ -1149,6 +1151,8 @@ class Sims4ModSorterApp(tk.Tk):
         self.check_updates_button: Optional[ttk.Button] = None
         self._latest_version: Optional[str] = None
         self._update_download_url: Optional[str] = None
+        self._update_release_page_url: Optional[str] = None
+        self._update_download_filename: Optional[str] = None
         self._update_available: bool = False
         self._update_overlay: Optional[tk.Toplevel] = None
         self._update_overlay_message = tk.StringVar(value="")
@@ -1156,6 +1160,7 @@ class Sims4ModSorterApp(tk.Tk):
         self._update_overlay_download_btn: Optional[ttk.Button] = None
         self._update_overlay_skip_btn: Optional[ttk.Button] = None
         self._update_overlay_button_frame: Optional[ttk.Frame] = None
+        self._update_overlay_details_btn: Optional[ttk.Button] = None
         self._update_overlay_visible: bool = False
 
         self._build_style()
@@ -1571,6 +1576,14 @@ class Sims4ModSorterApp(tk.Tk):
         )
         download_btn.pack(side="left", padx=4)
 
+        details_btn = ttk.Button(
+            buttons,
+            text="View Release",
+            command=self._on_update_overlay_details,
+            state="disabled",
+        )
+        details_btn.pack(side="left", padx=4)
+
         skip_btn = ttk.Button(
             buttons,
             text="Skip for Now",
@@ -1582,6 +1595,7 @@ class Sims4ModSorterApp(tk.Tk):
         self._update_overlay = overlay
         self._update_overlay_progress = progress
         self._update_overlay_download_btn = download_btn
+        self._update_overlay_details_btn = details_btn
         self._update_overlay_skip_btn = skip_btn
         self._update_overlay_button_frame = buttons
         return overlay
@@ -1610,13 +1624,22 @@ class Sims4ModSorterApp(tk.Tk):
         except Exception:
             pass
 
-    def _show_update_overlay(self, message: str, *, progress: bool, enable_download: bool, enable_skip: bool) -> None:
+    def _show_update_overlay(
+        self,
+        message: str,
+        *,
+        progress: bool,
+        enable_download: bool,
+        enable_skip: bool,
+        enable_details: bool,
+    ) -> None:
         overlay = self._ensure_update_overlay()
         self._update_overlay_message.set(message)
         if self._update_overlay_progress:
             if progress:
                 if not self._update_overlay_progress.winfo_manager():
                     self._update_overlay_progress.pack(fill="x", pady=(16, 12))
+                self._update_overlay_progress.configure(mode="indeterminate", value=0)
                 self._update_overlay_progress.start(12)
             else:
                 self._update_overlay_progress.stop()
@@ -1625,6 +1648,9 @@ class Sims4ModSorterApp(tk.Tk):
         if self._update_overlay_download_btn:
             state = "normal" if enable_download else "disabled"
             self._update_overlay_download_btn.configure(state=state)
+        if self._update_overlay_details_btn:
+            state = "normal" if enable_details else "disabled"
+            self._update_overlay_details_btn.configure(state=state)
         if self._update_overlay_skip_btn:
             state = "normal" if enable_skip else "disabled"
             self._update_overlay_skip_btn.configure(state=state)
@@ -1647,18 +1673,166 @@ class Sims4ModSorterApp(tk.Tk):
             overlay.withdraw()
         if self._update_overlay_progress:
             self._update_overlay_progress.stop()
+            self._update_overlay_progress.configure(mode="indeterminate", value=0)
+        if self._update_overlay_download_btn:
+            self._update_overlay_download_btn.configure(state="disabled")
+        if self._update_overlay_details_btn:
+            self._update_overlay_details_btn.configure(state="disabled")
+        if self._update_overlay_skip_btn:
+            self._update_overlay_skip_btn.configure(state="disabled")
         self._update_overlay_visible = False
 
     def _on_update_overlay_download(self) -> None:
-        url = self._update_download_url
-        if url:
-            webbrowser.open(url)
-        else:
-            messagebox.showinfo("Update Available", "Download URL is not configured.", parent=self)
-        self._hide_update_overlay()
+        self._start_update_download(manual=False)
+
+    def _on_update_overlay_details(self) -> None:
+        self._open_release_page()
 
     def _on_update_overlay_skip(self) -> None:
         self._hide_update_overlay()
+
+    def _start_update_download(self, *, manual: bool) -> None:
+        url = self._update_download_url
+        if not url:
+            if self._update_release_page_url:
+                self._open_release_page()
+            else:
+                messagebox.showinfo("Update Available", "Download information is not configured.", parent=self)
+            if not manual:
+                self._hide_update_overlay()
+            return
+
+        destination = self._prompt_update_destination()
+        if not destination:
+            if not manual and self._update_overlay_visible:
+                if self._update_overlay_download_btn:
+                    self._update_overlay_download_btn.configure(state="normal")
+                if self._update_overlay_skip_btn:
+                    self._update_overlay_skip_btn.configure(state="normal")
+                if self._update_overlay_details_btn and self._update_release_page_url:
+                    self._update_overlay_details_btn.configure(state="normal")
+            return
+
+        target_path = Path(destination)
+        self._show_update_overlay(
+            "Downloading update…",
+            progress=True,
+            enable_download=False,
+            enable_skip=False,
+            enable_details=False,
+        )
+        if self._update_overlay_progress:
+            self._update_overlay_progress.configure(mode="determinate", maximum=100, value=0)
+
+        threading.Thread(
+            target=self._download_update_worker,
+            args=(url, target_path, manual),
+            daemon=True,
+        ).start()
+
+    def _prompt_update_destination(self) -> Optional[str]:
+        default_name = self._update_download_filename or f"Sims4ModSorter-{self._latest_version or 'update'}.zip"
+        try:
+            initial_dir = Path.home()
+        except Exception:
+            initial_dir = Path.cwd()
+        downloads = initial_dir / "Downloads"
+        if downloads.exists():
+            initial_dir = downloads
+        return filedialog.asksaveasfilename(
+            parent=self,
+            title="Save Update Package As",
+            initialfile=default_name,
+            defaultextension=Path(default_name).suffix or ".zip",
+            filetypes=[("All files", "*.*")],
+            initialdir=str(initial_dir),
+        ) or None
+
+    def _download_update_worker(self, url: str, target_path: Path, manual: bool) -> None:
+        try:
+            with urllib.request.urlopen(url) as response:
+                total = int(response.headers.get("Content-Length") or 0)
+                chunk_size = 1024 * 64
+                written = 0
+                with target_path.open("wb") as handle:
+                    while True:
+                        chunk = response.read(chunk_size)
+                        if not chunk:
+                            break
+                        handle.write(chunk)
+                        written += len(chunk)
+                        self._enqueue_ui(lambda w=written, t=total: self._update_download_progress(w, t))
+        except Exception as exc:
+            self._enqueue_ui(lambda e=exc: self._handle_update_download_failure(target_path, e, manual))
+        else:
+            self._enqueue_ui(lambda: self._handle_update_download_success(target_path, manual))
+
+    def _update_download_progress(self, written: int, total: int) -> None:
+        if self._update_overlay_progress:
+            progress = self._update_overlay_progress
+            progress.stop()
+            if total > 0:
+                progress.configure(mode="determinate", maximum=total, value=written)
+            else:
+                progress.configure(mode="indeterminate", value=0)
+                progress.start(12)
+        if total > 0:
+            percent = min(100, max(0, int((written / total) * 100)))
+            human_total = total / (1024 * 1024)
+            human_written = written / (1024 * 1024)
+            self._update_overlay_message.set(
+                f"Downloading update… {percent}% ({human_written:.2f} / {human_total:.2f} MB)"
+            )
+        else:
+            human_written = written / (1024 * 1024)
+            self._update_overlay_message.set(f"Downloading update… {human_written:.2f} MB")
+
+    def _handle_update_download_success(self, target_path: Path, manual: bool) -> None:
+        self._hide_update_overlay()
+        self.log(f"Update downloaded to {target_path}")
+        message = f"Saved update to {target_path}\nInstall the update by running the downloaded package."
+        if messagebox.askyesno("Update Downloaded", message + "\nOpen the containing folder?", parent=self):
+            self._open_path(target_path.parent)
+
+    def _handle_update_download_failure(self, target_path: Path, error: BaseException, manual: bool) -> None:
+        if target_path.exists():
+            try:
+                target_path.unlink()
+            except Exception:
+                pass
+        self._hide_update_overlay()
+        reason = error
+        if isinstance(error, urllib.error.URLError) and hasattr(error, "reason"):
+            reason = error.reason  # type: ignore[assignment]
+        messagebox.showerror("Update Download Failed", f"Unable to download update: {reason}", parent=self)
+        self.log(f"Update download failed: {error}", level="error")
+        if manual and self._update_release_page_url and messagebox.askyesno(
+            "Update Download Failed",
+            "Would you like to open the release page instead?",
+            parent=self,
+        ):
+            self._open_release_page()
+
+    def _open_release_page(self) -> None:
+        url = self._update_release_page_url or self._update_download_url
+        if not url:
+            messagebox.showinfo("Update Available", "Release information is not configured.", parent=self)
+            return
+        try:
+            webbrowser.open(url)
+        except Exception as exc:
+            messagebox.showerror("Update Available", f"Unable to open release page: {exc}", parent=self)
+
+    def _open_path(self, path: Path) -> None:
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(str(path))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.run(["open", str(path)], check=False)
+            else:
+                subprocess.run(["xdg-open", str(path)], check=False)
+        except Exception as exc:
+            self.log(f"Open failed: {exc}")
 
     def _check_updates_on_launch(self) -> None:
         self._start_update_check(manual=False)
@@ -1681,6 +1855,7 @@ class Sims4ModSorterApp(tk.Tk):
                 progress=True,
                 enable_download=False,
                 enable_skip=False,
+                enable_details=False,
             )
 
         def worker() -> None:
@@ -1704,6 +1879,9 @@ class Sims4ModSorterApp(tk.Tk):
             button.configure(state="normal")
 
         if error_message:
+            self._update_download_url = None
+            self._update_release_page_url = None
+            self._update_download_filename = None
             if manual:
                 messagebox.showerror("Update Check", error_message, parent=self)
             else:
@@ -1713,15 +1891,22 @@ class Sims4ModSorterApp(tk.Tk):
                     progress=False,
                     enable_download=False,
                     enable_skip=True,
+                    enable_details=False,
                 )
             return
 
         if not result:
+            self._update_download_url = None
+            self._update_release_page_url = None
+            self._update_download_filename = None
             if not manual:
                 self._hide_update_overlay()
             return
 
         if result.message:
+            self._update_download_url = None
+            self._update_release_page_url = None
+            self._update_download_filename = None
             if manual:
                 messagebox.showerror("Update Check", result.message, parent=self)
             else:
@@ -1731,11 +1916,17 @@ class Sims4ModSorterApp(tk.Tk):
                     progress=False,
                     enable_download=False,
                     enable_skip=True,
+                    enable_details=False,
                 )
             return
 
         if result.download_url:
             self._update_download_url = result.download_url
+        else:
+            self._update_download_url = None
+        self._update_release_page_url = result.release_page_url
+        self._update_download_filename = result.asset_name
+
         update_available = bool(result.is_newer and result.latest_version)
         self._update_available = update_available
         if result.latest_version:
@@ -1746,30 +1937,63 @@ class Sims4ModSorterApp(tk.Tk):
 
         if update_available and result.latest_version:
             self.log(f"Update available: {result.latest_version}")
-            prompt = (
-                f"Version {result.latest_version} is available (current version is {APP_VERSION}).\n"
-                "Would you like to open the download page?"
+            base_message = (
+                f"Version {result.latest_version} is available (current version is {APP_VERSION})."
             )
             if manual:
-                if messagebox.askyesno("Update Available", prompt, parent=self):
-                    if self._update_download_url:
-                        webbrowser.open(self._update_download_url)
+                download_available = bool(self._update_download_url)
+                if download_available:
+                    prompt = base_message + "\nWould you like to download the update now?"
+                    if messagebox.askyesno("Update Available", prompt, parent=self):
+                        self._start_update_download(manual=True)
+                    elif self._update_release_page_url and messagebox.askyesno(
+                        "Update Available",
+                        "Would you like to open the release page instead?",
+                        parent=self,
+                    ):
+                        self._open_release_page()
+                else:
+                    info = (
+                        base_message
+                        + "\nDownload information is not configured. Would you like to view the release page?"
+                    )
+                    if self._update_release_page_url and messagebox.askyesno(
+                        "Update Available", info, parent=self
+                    ):
+                        self._open_release_page()
                     else:
                         messagebox.showinfo(
-                            "Update Available", "Download URL is not configured.", parent=self
+                            "Update Available",
+                            "Download information is not configured for this release.",
+                            parent=self,
                         )
             else:
-                message = (
-                    f"Version {result.latest_version} is available (current version is {APP_VERSION}).\n"
-                    "Choose 'Download Update' to open the release page or 'Skip for Now' to continue."
-                )
+                if self._update_download_url:
+                    message = (
+                        base_message
+                        + "\nChoose 'Download Update' to save the update automatically or 'Skip for Now' to continue."
+                    )
+                elif self._update_release_page_url:
+                    message = (
+                        base_message
+                        + "\nUse 'View Release' to open the release page or 'Skip for Now' to continue."
+                    )
+                else:
+                    message = (
+                        base_message
+                        + "\nDownload information is not configured for this release."
+                    )
                 self._show_update_overlay(
                     message,
                     progress=False,
-                    enable_download=True,
+                    enable_download=bool(self._update_download_url),
                     enable_skip=True,
+                    enable_details=bool(self._update_release_page_url),
                 )
         else:
+            self._update_download_url = None
+            self._update_release_page_url = None
+            self._update_download_filename = None
             if manual:
                 messagebox.showinfo(
                     "Update Check",
