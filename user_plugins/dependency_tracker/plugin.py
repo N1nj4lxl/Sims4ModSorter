@@ -142,12 +142,24 @@ def _load_database(api) -> None:
         api.log(
             f"[Dependency Tracker] Dependency list missing. Using built-in defaults ({len(DATABASE['mods'])} mods)."
         )
+        try:
+            DB_PATH.write_text(json.dumps(DEFAULT_DB, indent=2), encoding="utf-8")
+            api.log("[Dependency Tracker] Created default known_dependencies.json for future edits.")
+        except Exception as exc:
+            api.log(
+                f"[Dependency Tracker] Unable to write default dependency list ({exc}).",
+                "warn",
+            )
     except Exception as exc:
         DATABASE = _normalise(DEFAULT_DB)
         api.log(
             f"[Dependency Tracker] Failed to parse dependency list ({exc}). Using built-in defaults ({len(DATABASE['mods'])} mods).",
             "warn",
         )
+        try:
+            DB_PATH.write_text(json.dumps(DEFAULT_DB, indent=2), encoding="utf-8")
+        except Exception:
+            pass
     _update_info_labels()
 
 

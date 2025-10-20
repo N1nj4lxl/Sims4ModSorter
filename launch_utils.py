@@ -22,6 +22,8 @@ class UpdateResult:
     is_newer: bool
     download_url: Optional[str]
     message: Optional[str]
+    release_page_url: Optional[str] = None
+    asset_name: Optional[str] = None
 
 
 def log_launch_event(component: str, event: str, details: Optional[Dict[str, object]] = None) -> None:
@@ -163,6 +165,8 @@ def check_for_update(component: str, current_version: str, timeout: float = 5.0)
     remote_version: Optional[str] = None
     resolved_download = download_url
     failure_message: Optional[str] = None
+    release_page_url: Optional[str] = None
+    asset_name: Optional[str] = None
 
     if not release_api_url and not version_url:
         return UpdateResult(None, False, resolved_download, "Update source not configured.")
@@ -178,12 +182,38 @@ def check_for_update(component: str, current_version: str, timeout: float = 5.0)
             failure_message = f"Update check failed: {exc}"
         else:
             if isinstance(data, dict):
-                candidate = data.get("tag_name") or data.get("name")
-                if isinstance(candidate, str) and candidate.strip():
-                    remote_version = _normalise_version(candidate)
+                candidates: list[str] = []
+                name_value = data.get("name")
+                if isinstance(name_value, str) and name_value.strip():
+                    candidates.append(name_value.strip())
+                tag_value = data.get("tag_name")
+                if isinstance(tag_value, str) and tag_value.strip():
+                    candidates.append(tag_value.strip())
+                for candidate in candidates:
+                    normalized = _normalise_version(candidate)
+                    if normalized:
+                        remote_version = normalized
+                        break
                 html_url = data.get("html_url")
                 if isinstance(html_url, str) and html_url.strip():
-                    resolved_download = html_url.strip()
+                    release_page_url = html_url.strip()
+                    if not resolved_download:
+                        resolved_download = release_page_url
+                assets = data.get("assets")
+                if isinstance(assets, list):
+                    for asset in assets:
+                        if not isinstance(asset, dict):
+                            continue
+                        browser_download = asset.get("browser_download_url")
+                        if isinstance(browser_download, str) and browser_download.strip():
+                            resolved_download = browser_download.strip()
+                            asset_name_value = asset.get("name")
+                            if isinstance(asset_name_value, str) and asset_name_value.strip():
+                                asset_name = asset_name_value.strip()
+                            break
+                tarball_url = data.get("tarball_url")
+                if not resolved_download and isinstance(tarball_url, str) and tarball_url.strip():
+                    resolved_download = tarball_url.strip()
             else:
                 failure_message = "Update check failed: unexpected release payload"
 
@@ -203,15 +233,29 @@ def check_for_update(component: str, current_version: str, timeout: float = 5.0)
 
     if not remote_version:
         if failure_message:
-            return UpdateResult(None, False, resolved_download, failure_message)
-        return UpdateResult(None, False, resolved_download, "Update check returned an empty version string.")
+            return UpdateResult(None, False, resolved_download, failure_message, release_page_url, asset_name)
+        return UpdateResult(
+            None,
+            False,
+            resolved_download,
+            "Update check returned an empty version string.",
+            release_page_url,
+            asset_name,
+        )
 
     try:
         remote_tuple = _parse_version(remote_version)
         current_tuple = _parse_version(current_version)
     except Exception:
-        return UpdateResult(remote_version, False, resolved_download, "Unable to compare version strings.")
+        return UpdateResult(
+            remote_version,
+            False,
+            resolved_download,
+            "Unable to compare version strings.",
+            release_page_url,
+            asset_name,
+        )
 
     is_newer = remote_tuple > current_tuple
-    return UpdateResult(remote_version, is_newer, resolved_download, None)
+    return UpdateResult(remote_version, is_newer, resolved_download, None, release_page_url, asset_name)
 
