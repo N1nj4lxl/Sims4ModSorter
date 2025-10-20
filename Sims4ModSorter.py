@@ -31,6 +31,7 @@ import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
 from launch_utils import UpdateResult, check_for_update
+from plugin_api import scan_metrics
 
 
 def center_window(window: tk.Tk) -> None:
@@ -3250,7 +3251,7 @@ def main() -> None:
     app.mainloop()
 
 
-if __name__ == "__main__":
+if __name__ == "__main__" and os.environ.get("MODSORTER_USE_LEGACY_UI"):
     main()
 # Sims4 Mod Sorter — single file
 # Python 3.10+
@@ -5576,8 +5577,15 @@ class Sims4ModSorterApp(tk.Tk):
             "Root files" if f in (".", "") else f for f in selected_folders_preview
         )
         type_desc = "all file types" if allowed_exts_preview is None else ", ".join(sorted(allowed_exts_preview)) or "(none)"
-        self.log(
-            f"Starting scan in {folder_desc} ({'including' if include_adult else 'excluding'} adult content, {type_desc})."
+        scan_context_text = (
+            f"Starting scan in {folder_desc} "
+            f"({'including' if include_adult else 'excluding'} adult content, {type_desc})."
+        )
+        self.log(scan_context_text)
+        scan_metrics.begin_session()
+        scan_metrics.log("Starting scan…")
+        scan_metrics.log(
+            f"Scope: {folder_desc} — {type_desc}; adult content {'included' if include_adult else 'excluded'}."
         )
 
         def progress_cb(done, total, path, state):
@@ -5586,7 +5594,9 @@ class Sims4ModSorterApp(tk.Tk):
             if done % 25 == 0 or state == "error":
                 self.status_var.set(f"Scanning {done}/{total}: {os.path.basename(path)}")
             if state == "error":
-                self.log(f"Scan error: {os.path.basename(path)}", level="error")
+                message = f"Scan error: {os.path.basename(path)}"
+                self.log(message, level="error")
+                scan_metrics.log(message, level="error")
 
         def worker():
             ignore_exts = {e.strip() for e in self.ignore_exts_var.get().split(',')}
@@ -5594,6 +5604,7 @@ class Sims4ModSorterApp(tk.Tk):
             allowed_exts = None if allowed_exts_preview is None else set(allowed_exts_preview)
             selected_folders = None if selected_folders_preview is None else list(selected_folders_preview)
             include_adult_scan = include_adult
+            scan_started_perf = time.perf_counter()
             context = {
                 "mods_root": mods,
                 "recurse": self.recurse_var.get(),
@@ -5605,6 +5616,7 @@ class Sims4ModSorterApp(tk.Tk):
                 "include_adult": include_adult_scan,
             }
             if self.plugin_manager:
+                scan_metrics.log("Running pre-scan plugins…")
                 self.plugin_manager.run_pre_scan(context)
                 if isinstance(context.get("ignore_exts"), (list, set, tuple)):
                     ignore_exts = {str(ext).strip() for ext in context["ignore_exts"] if str(ext).strip()}
@@ -5642,12 +5654,28 @@ class Sims4ModSorterApp(tk.Tk):
                 except Exception:
                     pass
             if allowed_exts is not None and not allowed_exts:
-                self.log("Scan cancelled: no file types allowed after plugin adjustments.", level="warning")
-                self.status_var.set("Scan cancelled")
+                warning = "Scan cancelled: no file types allowed after plugin adjustments."
+                self.log(warning, level="warning")
+                scan_metrics.log(warning, level="warn")
+                self.after(0, lambda: self.status_var.set("Scan cancelled"))
+                scan_metrics.complete(
+                    total_files=0,
+                    total_time=time.perf_counter() - scan_started_perf,
+                    plugin_count=scan_metrics.active_plugin_count(),
+                    failed=True,
+                )
                 return
             if selected_folders is not None and not selected_folders:
-                self.log("Scan cancelled: no folders selected after plugin adjustments.", level="warning")
-                self.status_var.set("Scan cancelled")
+                warning = "Scan cancelled: no folders selected after plugin adjustments."
+                self.log(warning, level="warning")
+                scan_metrics.log(warning, level="warn")
+                self.after(0, lambda: self.status_var.set("Scan cancelled"))
+                scan_metrics.complete(
+                    total_files=0,
+                    total_time=time.perf_counter() - scan_started_perf,
+                    plugin_count=scan_metrics.active_plugin_count(),
+                    failed=True,
+                )
                 return
             try:
                 result = scan_folder(
@@ -5661,9 +5689,11 @@ class Sims4ModSorterApp(tk.Tk):
                     include_adult=include_adult_scan,
                     allowed_exts=allowed_exts,
                 )
+                scan_metrics.log(f"Filesystem scan complete. Analysed {result.total_files} file(s).")
                 items = list(result.items)
                 stats = bundle_scripts_and_packages(items, self.folder_map)
                 if self.plugin_manager:
+                    scan_metrics.log("Running post-scan plugins…")
                     context.update({
                         "bundle_stats": stats,
                         "items": items,
@@ -5685,13 +5715,46 @@ class Sims4ModSorterApp(tk.Tk):
                 plan_summary = f"Plan: {len(self.items)} files"
                 if disabled_count:
                     plan_summary += f" ({disabled_count} disabled)"
-                self.status_var.set(plan_summary)
+                elapsed = time.perf_counter() - scan_started_perf
+                plugin_count = scan_metrics.active_plugin_count()
+                if plugin_count == 0 and self.plugin_manager:
+                    try:
+                        plugin_count = sum(
+                            1
+                            for status in self.plugin_manager.get_statuses()
+                            if getattr(status, "status", "").lower() == "loaded"
+                        )
+                    except Exception:
+                        plugin_count = 0
+                plugin_count = max(1, plugin_count)
+                summary_line = (
+                    f"Scan complete — {result.total_files} files in {elapsed:.2f} s "
+                    f"({plugin_count} plugin{'s' if plugin_count != 1 else ''} active)"
+                )
+                self.after(0, lambda: self.status_var.set(summary_line))
                 self.log(
                     f"Scan complete. Planned {len(self.items)} files (disabled: {disabled_count}). Linked packages: {stats['linked']} across {stats['scripts']} script(s)."
                 )
                 for warning in result.errors:
                     self.log(f"Scan warning: {warning}", level="warning")
+                    scan_metrics.log(f"Warning: {warning}", level="warn")
+                scan_metrics.log(summary_line)
+                scan_metrics.complete(
+                    total_files=result.total_files,
+                    total_time=elapsed,
+                    plugin_count=plugin_count,
+                )
                 self._report_mod_runtime_messages()
+            except Exception as exc:
+                elapsed = time.perf_counter() - scan_started_perf
+                scan_metrics.log(f"Scan failed: {exc}", level="error")
+                scan_metrics.complete(
+                    total_files=0,
+                    total_time=elapsed,
+                    plugin_count=scan_metrics.active_plugin_count(),
+                    failed=True,
+                )
+                raise
             finally:
                 if hasattr(self, "btn_scan"):
                     self.after(0, lambda: self.btn_scan.configure(state="normal"))
