@@ -189,6 +189,17 @@ class PluginStatus:
     message: str = ""
 
 
+@dataclass(slots=True)
+class PluginToolbarButton:
+    button_id: str
+    text: str
+    command: Callable[["Sims4ModSorterApp", "PluginAPI"], None]
+    side: str = "left"
+    insert_before: Optional[str] = None
+    padx: int = 4
+    tooltip: Optional[str] = None
+
+
 def _extract_plugin_version(manifest: Dict[str, object], module_path: Path) -> str:
     version = manifest.get("version")
     if isinstance(version, str) and version.strip():
@@ -279,6 +290,34 @@ class PluginAPI:
         if app is not None:
             app.schedule_refresh()
 
+    def register_toolbar_button(
+        self,
+        button_id: str,
+        *,
+        text: str,
+        command: Callable[["Sims4ModSorterApp", "PluginAPI"], None],
+        side: str = "left",
+        insert_before: Optional[str] = None,
+        padx: int = 4,
+        tooltip: Optional[str] = None,
+    ) -> None:
+        if not button_id or not callable(command):
+            self._manager.message_bus.post(
+                "boot",
+                "warn",
+                f"Toolbar button registration skipped for '{button_id or '?'}'",
+            )
+            return
+        self._manager.register_toolbar_button(
+            button_id,
+            text,
+            command,
+            side=side,
+            insert_before=insert_before,
+            padx=padx,
+            tooltip=tooltip,
+        )
+
 
 class PluginManager:
     def __init__(self, plugins_dir: Path, message_bus: Optional[PluginMessageBus] = None) -> None:
@@ -292,6 +331,8 @@ class PluginManager:
         self.settings_sections: List[Tuple[str, Callable[["Sims4ModSorterApp", ttk.Frame, PluginAPI], None]]] = []
         self.app: Optional["Sims4ModSorterApp"] = None
         self.statuses: List[PluginStatus] = []
+        self.toolbar_buttons: Dict[str, PluginToolbarButton] = {}
+        self.toolbar_order: List[str] = []
 
     def attach_app(self, app: "Sims4ModSorterApp") -> None:
         self.app = app
@@ -394,6 +435,66 @@ class PluginManager:
 
     def get_statuses(self) -> List[PluginStatus]:
         return list(self.statuses)
+
+    def register_toolbar_button(
+        self,
+        button_id: str,
+        text: str,
+        command: Callable[["Sims4ModSorterApp", PluginAPI], None],
+        *,
+        side: str = "left",
+        insert_before: Optional[str] = None,
+        padx: int = 4,
+        tooltip: Optional[str] = None,
+    ) -> None:
+        normalized = button_id.strip() if button_id else ""
+        if not normalized:
+            self.message_bus.post("boot", "warn", "Toolbar button registration skipped: missing identifier")
+            return
+        if normalized in self.toolbar_buttons:
+            self.message_bus.post(
+                "boot",
+                "warn",
+                f"Toolbar button '{normalized}' already registered; ignoring duplicate",
+            )
+            return
+        if not callable(command):
+            self.message_bus.post(
+                "boot",
+                "warn",
+                f"Toolbar button '{normalized}' skipped: command is not callable",
+            )
+            return
+        text_value = str(text) if text else normalized
+        side_value = str(side).lower()
+        if side_value not in {"left", "right"}:
+            side_value = "left"
+        try:
+            padx_value = int(padx)
+        except Exception:
+            padx_value = 4
+        if padx_value < 0:
+            padx_value = 0
+        insert_value = str(insert_before).strip() if insert_before else None
+        tooltip_value = str(tooltip).strip() if tooltip else None
+        entry = PluginToolbarButton(
+            button_id=normalized,
+            text=text_value,
+            command=command,
+            side=side_value,
+            insert_before=insert_value or None,
+            padx=padx_value,
+            tooltip=tooltip_value,
+        )
+        self.toolbar_buttons[normalized] = entry
+        self.toolbar_order.append(normalized)
+
+    def get_toolbar_buttons(self) -> List[PluginToolbarButton]:
+        return [
+            self.toolbar_buttons[button_id]
+            for button_id in self.toolbar_order
+            if button_id in self.toolbar_buttons
+        ]
 
 
 def load_user_plugins() -> PluginManager:
@@ -565,9 +666,11 @@ class Sims4ModSorterApp(tk.Tk):
         self.scan_errors: List[str] = []
         self.plugin_manager = load_user_plugins()
         self._plugin_columns: List[PluginColumn] = []
+        self._plugin_toolbar_buttons: List[PluginToolbarButton] = []
         if self.plugin_manager:
             self.plugin_manager.attach_app(self)
             self._plugin_columns = self.plugin_manager.get_columns()
+            self._plugin_toolbar_buttons = self.plugin_manager.get_toolbar_buttons()
 
         self.status_var = tk.StringVar(value="Ready")
         self.summary_var = tk.StringVar(value="No plan yet")
@@ -580,6 +683,7 @@ class Sims4ModSorterApp(tk.Tk):
         self._tooltip_label: Optional[tk.Label] = None
         self._tooltip_after: Optional[str] = None
         self._tooltip_target: Tuple[str, str] = ("", "")
+        self._toolbar_widgets: Dict[str, tk.Widget] = {}
         self._mod_status_window: Optional[tk.Toplevel] = None
         self._status_trees: Dict[str, ttk.Treeview] = {}
         self._status_summary_var = tk.StringVar(value="")
@@ -658,6 +762,10 @@ class Sims4ModSorterApp(tk.Tk):
     def _build_ui(self) -> None:
         if self.plugin_manager:
             self._plugin_columns = self.plugin_manager.get_columns()
+            self._plugin_toolbar_buttons = self.plugin_manager.get_toolbar_buttons()
+        else:
+            self._plugin_toolbar_buttons = []
+        self._toolbar_widgets.clear()
         try:
             self._tree_font = tkfont.nametofont("TkDefaultFont")
         except tk.TclError:
@@ -679,9 +787,13 @@ class Sims4ModSorterApp(tk.Tk):
         self.btn_scan.pack(side="left", padx=4)
         ttk.Button(top, text="Export Plan", command=self.on_export).pack(side="left", padx=4)
         ttk.Label(top, textvariable=self.status_var).pack(side="left", padx=12)
-        ttk.Button(top, text="⚙", width=3, command=self.show_settings).pack(side="right")
-        ttk.Button(top, text="Plugin Status", command=self.show_mod_status_popup).pack(side="right", padx=6)
-        ttk.Button(top, text="Undo Last", command=self.on_undo).pack(side="right", padx=6)
+        settings_btn = ttk.Button(top, text="⚙", width=3, command=self.show_settings)
+        self._pack_toolbar_button(settings_btn, button_id="settings", side="right", padx=0)
+        status_btn = ttk.Button(top, text="Plugin Status", command=self.show_mod_status_popup)
+        self._pack_toolbar_button(status_btn, button_id="plugin_status", side="right", padx=6)
+        undo_btn = ttk.Button(top, text="Undo Last", command=self.on_undo)
+        self._pack_toolbar_button(undo_btn, button_id="undo_last", side="right", padx=6)
+        self._build_plugin_toolbar_buttons(top)
 
         mid = ttk.Frame(root_container)
         mid.pack(fill="both", expand=True, padx=12, pady=(6, 8))
@@ -797,6 +909,60 @@ class Sims4ModSorterApp(tk.Tk):
         self.tree.bind("<Double-1>", self.on_double_click)
         self.tree.bind("<Motion>", self._on_tree_motion)
         self.tree.bind("<Leave>", lambda _e: self._hide_tooltip())
+
+    def _pack_toolbar_button(
+        self,
+        widget: tk.Widget,
+        *,
+        button_id: Optional[str] = None,
+        side: str = "left",
+        padx: int = 4,
+        insert_before: Optional[str] = None,
+    ) -> None:
+        target = None
+        if insert_before:
+            target = self._toolbar_widgets.get(insert_before)
+            if target is not None and not target.winfo_exists():
+                target = None
+        pack_kwargs = {"side": side, "padx": padx}
+        if target is not None:
+            pack_kwargs["before"] = target
+        widget.pack(**pack_kwargs)
+        if button_id:
+            self._toolbar_widgets[button_id] = widget
+
+    def _build_plugin_toolbar_buttons(self, parent: ttk.Frame) -> None:
+        if not self._plugin_toolbar_buttons:
+            return
+        manager = self.plugin_manager
+        if manager is None:
+            return
+        for entry in self._plugin_toolbar_buttons:
+            try:
+                text = entry.text or entry.button_id
+            except Exception:
+                text = entry.button_id
+            button = ttk.Button(
+                parent,
+                text=text,
+                command=lambda e=entry: self._invoke_plugin_toolbar_button(e),
+            )
+            self._pack_toolbar_button(
+                button,
+                button_id=entry.button_id,
+                side=entry.side,
+                padx=entry.padx,
+                insert_before=entry.insert_before,
+            )
+
+    def _invoke_plugin_toolbar_button(self, entry: PluginToolbarButton) -> None:
+        manager = self.plugin_manager
+        if manager is None:
+            return
+        try:
+            entry.command(self, manager.api)
+        except Exception as exc:
+            self.log(f"Plugin toolbar '{entry.button_id}' failed: {exc}", level="error")
 
     def _build_settings_overlay(self) -> None:
         palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
