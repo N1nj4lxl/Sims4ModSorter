@@ -517,6 +517,7 @@ class DependencyPlugin:
             self.last_results.clear()
             self.overlay.sync(self.last_results)
             return
+        scan_metrics.start("Dependency Tracker")
         start = time.perf_counter()
         scan_metrics.start("Dependency Tracker")
         scan_metrics.log(
@@ -524,6 +525,12 @@ class DependencyPlugin:
         )
         results = self.analyser.analyse(self.last_items)
         duration = time.perf_counter() - start
+        missing_total = sum(1 for result in results if result.missing)
+        scan_metrics.stop(
+            "Dependency Tracker",
+            files_processed=len(self.last_items),
+            warnings=missing_total,
+        )
         self.last_results = list(results)
         self.overlay.sync(self.last_results)
         warnings = self._log_summary(results, duration, len(self.last_items), track_metrics=True)
