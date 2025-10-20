@@ -5730,6 +5730,7 @@ class Sims4ModSorterApp(tk.Tk):
         scan_metrics.log(
             f"Scope: {folder_desc} — {type_desc}; adult content {'included' if include_adult else 'excluded'}."
         )
+        start_message = f"Scanning folder: {mods}"
         self.log(start_message)
         plugin_names = self.plugin_manager.get_plugin_display_names() if self.plugin_manager else []
         scan_metrics.begin_session(plugins=plugin_names)
@@ -6119,6 +6120,40 @@ class Sims4ModSorterApp(tk.Tk):
         else:
             self._disabled_status_var.set("No disabled mods")
         self._auto_size_columns()
+
+    def _auto_size_columns(self) -> None:
+        if not getattr(self, "tree", None):
+            return
+        font = getattr(self, "_tree_font", None)
+        if font is None:
+            try:
+                font = tkfont.nametofont("TkDefaultFont")
+            except tk.TclError:
+                font = tkfont.Font()
+            self._tree_font = font
+        heading_font = getattr(self, "_tree_heading_font", None)
+        if heading_font is None:
+            try:
+                heading_font = tkfont.nametofont("TkHeadingFont")
+            except tk.TclError:
+                heading_font = font
+            self._tree_heading_font = heading_font
+        padding = 24
+        column_order = getattr(self, "_column_order", [])
+        widths: Dict[str, int] = {}
+        for column in column_order:
+            heading = self.tree.heading(column).get("text", column)
+            widths[column] = heading_font.measure(str(heading)) + padding
+        for iid in self.tree.get_children(""):
+            values = self.tree.item(iid, "values")
+            for index, column in enumerate(column_order):
+                value = values[index] if index < len(values) else ""
+                width = font.measure(str(value)) + padding
+                if width > widths[column]:
+                    widths[column] = width
+        for column, width in widths.items():
+            minimum = 36 if column in {"inc", "linked"} else 60
+            self.tree.column(column, width=max(minimum, int(width)), stretch=False)
 
     def on_disable_selected(self):
         sel = list(self.tree.selection())
