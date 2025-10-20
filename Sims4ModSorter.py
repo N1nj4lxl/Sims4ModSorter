@@ -4937,6 +4937,14 @@ class Sims4ModSorterApp(tk.Tk):
         self.after(1000, self._check_updates_on_launch)
         self.after(0, lambda: center_window(self))
 
+    def _report_mod_boot_messages(self) -> None:
+        """Flush any queued plugin boot-time messages to the log."""
+        flush_plugin_messages(self, "boot")
+
+    def _report_mod_runtime_messages(self) -> None:
+        """Flush any queued plugin runtime messages to the log."""
+        flush_plugin_messages(self, "runtime")
+
     def _build_style(self):
         style = ttk.Style()
         try: style.theme_use("clam")
