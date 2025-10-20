@@ -5725,15 +5725,23 @@ class Sims4ModSorterApp(tk.Tk):
             f"({'including' if include_adult else 'excluding'} adult content, {type_desc})."
         )
         self.log(scan_context_text)
-        scan_metrics.begin_session()
+        plugin_warning: Optional[str] = None
+        plugin_names: List[str] = []
+        if self.plugin_manager:
+            try:
+                plugin_names = list(self.plugin_manager.get_plugin_display_names())
+            except Exception as exc:
+                plugin_warning = f"Unable to load plugin list: {exc}"
+                self.log(plugin_warning, level="warning")
+        scan_metrics.begin_session(plugins=plugin_names)
         scan_metrics.log("Starting scan…")
         scan_metrics.log(
             f"Scope: {folder_desc} — {type_desc}; adult content {'included' if include_adult else 'excluded'}."
         )
+        if plugin_warning:
+            scan_metrics.log(plugin_warning, level="warning")
         start_message = f"Scanning folder: {mods}"
         self.log(start_message)
-        plugin_names = self.plugin_manager.get_plugin_display_names() if self.plugin_manager else []
-        scan_metrics.begin_session(plugins=plugin_names)
         scan_metrics.log(start_message)
 
         def progress_cb(done, total, path, state):
