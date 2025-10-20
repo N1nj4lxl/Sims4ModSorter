@@ -23,6 +23,7 @@ import webbrowser
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MethodType
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import tkinter as tk
@@ -3717,6 +3718,7 @@ class PluginManager:
         self._settings_by_plugin: Dict[str, List[Tuple[str, Callable]]] = {}
         self.app: Optional["Sims4ModSorterApp"] = None
         self.statuses: List[PluginStatus] = []
+        self._toolbar_shimmed: set[str] = set()
 
     def log_boot(self, message: str, level: str = "info"):
         self.boot_messages.append((level, message))
@@ -3833,6 +3835,8 @@ class PluginManager:
         try:
             api = PluginAPI(self, plugin_id)
             self._plugin_apis[plugin_id] = api
+            setattr(api, "_plugin_id", plugin_id)
+            self._ensure_toolbar_api(api, plugin_id, name)
             register(api)
         except Exception as exc:
             message = str(exc)
@@ -4095,6 +4099,57 @@ class PluginManager:
         sections = self._settings_by_plugin.pop(plugin_id, [])
         if sections:
             self.settings_sections = [entry for entry in self.settings_sections if entry not in sections]
+
+    def _ensure_toolbar_api(self, api: PluginAPI, plugin_id: str, plugin_name: str) -> None:
+        if hasattr(api, "register_toolbar_button"):
+            return
+        manager = self
+
+        def _register_toolbar_button(
+            self_api,
+            button_id: str,
+            *,
+            text: Optional[str] = None,
+            command: Optional[Callable[["Sims4ModSorterApp", "PluginAPI"], None]] = None,
+            side: Optional[str] = None,
+            position: Optional[int] = None,
+            insert_before: Optional[str] = None,
+            insert_after: Optional[str] = None,
+            width: Optional[int] = None,
+            padx: Optional[int] = None,
+            replace: bool = False,
+        ) -> None:
+            handler = getattr(manager, "register_toolbar_button", None)
+            if not callable(handler):
+                key = plugin_name or plugin_id
+                if key not in manager._toolbar_shimmed:
+                    manager._toolbar_shimmed.add(key)
+                    manager.log_boot(
+                        f"Toolbar support unavailable; '{key}' button '{button_id}' was ignored.",
+                        level="warn",
+                    )
+                return
+            handler(
+                plugin_id,
+                button_id,
+                text=text,
+                command=command,
+                side=side,
+                position=position,
+                insert_before=insert_before,
+                insert_after=insert_after,
+                width=width,
+                padx=padx,
+                replace=replace,
+            )
+
+        api.register_toolbar_button = MethodType(_register_toolbar_button, api)
+        if plugin_name not in self._toolbar_shimmed:
+            self._toolbar_shimmed.add(plugin_name)
+            self.log_boot(
+                f"Applied toolbar compatibility shim for plugin '{plugin_name}'.",
+                level="info",
+            )
 
 
 def load_user_plugins() -> PluginManager:
