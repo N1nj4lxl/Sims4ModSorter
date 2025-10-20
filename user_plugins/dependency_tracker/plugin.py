@@ -519,6 +519,10 @@ class DependencyPlugin:
             return
         scan_metrics.start("Dependency Tracker")
         start = time.perf_counter()
+        scan_metrics.start("Dependency Tracker")
+        scan_metrics.log(
+            "Dependency Tracker scanning files…", plugin="Dependency Tracker"
+        )
         results = self.analyser.analyse(self.last_items)
         duration = time.perf_counter() - start
         missing_total = sum(1 for result in results if result.missing)
@@ -529,7 +533,15 @@ class DependencyPlugin:
         )
         self.last_results = list(results)
         self.overlay.sync(self.last_results)
-        self._log_summary(results, duration, len(self.last_items))
+        warnings = self._log_summary(results, duration, len(self.last_items), track_metrics=True)
+        if warnings:
+            detail = ", ".join(sorted({result.detail for result in results if result.missing}))
+            if detail:
+                scan_metrics.log(
+                    f"Missing dependencies detected for {warnings} file(s): {detail}",
+                    level="warn",
+                    plugin="Dependency Tracker",
+                )
 
     # ------------------------------------------------------------------
     def _reanalyze_async(self, reason: str) -> None:
@@ -552,13 +564,21 @@ class DependencyPlugin:
             self.api.request_refresh()
             if reason:
                 self.api.log(f"[Dependency Tracker] {reason}")
-            self._log_summary(results, duration, len(items))
+            self._log_summary(results, duration, len(items), track_metrics=False)
 
         threading.Thread(target=worker, daemon=True).start()
 
     # ------------------------------------------------------------------
-    def _log_summary(self, results: Sequence[DependencyResult], duration: float, total_items: int) -> None:
+    def _log_summary(
+        self,
+        results: Sequence[DependencyResult],
+        duration: float,
+        total_items: int,
+        *,
+        track_metrics: bool,
+    ) -> int:
         self.api.log(f"[Dependency Tracker] Checking {total_items} mod file(s) for dependencies...")
+        missing_count = 0
         if results:
             for result in results:
                 item = result.item
@@ -566,9 +586,22 @@ class DependencyPlugin:
                 detail = result.detail
                 name = getattr(item, "name", "unknown")
                 self.api.log(f"[Dependency Tracker] - {name} \u2192 {detail} {icon}")
+                if result.missing:
+                    missing_count += 1
         else:
             self.api.log("[Dependency Tracker] No tracked dependencies detected.")
         self.api.log(f"[Dependency Tracker] Finished dependency analysis in {duration:.2f}s")
+        if track_metrics:
+            scan_metrics.stop(
+                "Dependency Tracker",
+                files_processed=total_items,
+                warnings=missing_count,
+                status="Warning" if missing_count else "Done",
+            )
+            scan_metrics.log(
+                f"Dependency analysis complete in {duration:.2f}s", plugin="Dependency Tracker"
+            )
+        return missing_count
 
 
 PLUGIN: Optional[DependencyPlugin] = None

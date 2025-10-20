@@ -1,408 +1,424 @@
+"""Shared plugin API helpers for Sims4 Mod Sorter plugins."""
 from __future__ import annotations
 
+import copy
 import json
 import threading
 import time
-from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Deque, Dict, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
+
+BASE_DIR = Path(__file__).resolve().parent
+HISTORY_DIR = BASE_DIR / "Logs" / "scan_history"
+_HISTORY_LIMIT = 10
+
+
+def _ensure_history_dir() -> None:
+    try:
+        HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+
+def _iso(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _format_offset(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    minutes = int(seconds // 60)
+    remainder = int(seconds % 60)
+    return f"{minutes:02d}:{remainder:02d}"
 
 
 @dataclass
-class _TimelineEvent:
-    elapsed: float
-    message: str
-    level: str = "info"
-
-
-@dataclass
-class _PluginMetric:
-    key: str
-    display_name: str
+class _PluginStats:
+    name: str
     total_time: float = 0.0
-    files: Optional[int] = None
-    warnings: Optional[int] = None
-    status: str = "Idle"
-    active_count: int = 0
-    last_start: Optional[float] = None
-
-    def start(self, now: float) -> None:
-        self.active_count += 1
-        if self.active_count == 1:
-            self.last_start = now
-            self.status = "Running"
-
-    def stop(
-        self,
-        now: float,
-        *,
-        status: Optional[str] = None,
-        files_processed: Optional[int] = None,
-        warnings: Optional[int] = None,
-    ) -> None:
-        if self.active_count > 0:
-            self.active_count -= 1
-            if self.active_count == 0 and self.last_start is not None:
-                self.total_time += max(0.0, now - self.last_start)
-                self.last_start = None
-        if files_processed is not None:
-            self.files = files_processed
-        if warnings is not None:
-            self.warnings = warnings
-        if status:
-            self.status = status
-        elif warnings is not None:
-            self.status = "Warning" if warnings else "Done"
-        elif self.active_count == 0 and self.status == "Running":
-            self.status = "Done"
-
-    def current_elapsed(self, now: float) -> float:
-        if self.active_count > 0 and self.last_start is not None:
-            return now - self.last_start
-        return 0.0
-
-
-@dataclass
-class _SessionData:
-    session_id: int
-    started_at: float
-    started_wall: float
-    label: str
-    plugin_order: List[str] = field(default_factory=list)
-    plugin_metrics: Dict[str, _PluginMetric] = field(default_factory=dict)
-    events: List[_TimelineEvent] = field(default_factory=list)
-    total_files: int = 0
+    files: int = 0
     warnings: int = 0
-    extras: Dict[str, int] = field(default_factory=dict)
-    completed: bool = False
+    status: str = "Idle"
+    runs: int = 0
+
+
+@dataclass
+class _LogEntry:
+    timestamp: float
+    message: str
+    level: str
+    plugin: Optional[str]
+    offset: float
+
+
+@dataclass
+class _Session:
+    session_id: int
+    started_wall: float
+    started_perf: float
+    plugins: Dict[str, _PluginStats] = field(default_factory=dict)
+    active: Dict[str, float] = field(default_factory=dict)
+    logs: List[_LogEntry] = field(default_factory=list)
+    completed_wall: Optional[float] = None
+    total_files: int = 0
     total_time: float = 0.0
+    plugin_count: int = 0
+    failed: bool = False
 
-    def ensure_metric(self, key: str, display: Optional[str] = None) -> _PluginMetric:
-        metric = self.plugin_metrics.get(key)
-        if metric is None:
-            display_name = display or key
-            metric = _PluginMetric(key=key, display_name=display_name)
-            self.plugin_metrics[key] = metric
-            self.plugin_order.append(key)
-        elif display and metric.display_name != display:
-            metric.display_name = display
-        return metric
+    @property
+    def label(self) -> str:
+        return f"Session {self.session_id}"
 
-    def snapshot(self) -> Dict[str, Any]:
-        now = time.perf_counter()
-        if self.completed:
-            duration = self.total_time
-        else:
-            duration = max(0.0, now - self.started_at)
-        plugins: List[Dict[str, Any]] = []
-        for key in self.plugin_order:
-            metric = self.plugin_metrics[key]
-            elapsed = metric.total_time
-            if metric.active_count > 0:
-                elapsed += metric.current_elapsed(now)
-            entry = {
-                "name": metric.display_name,
-                "time": round(elapsed, 3),
-                "files": metric.files if metric.files is not None else 0,
-                "warnings": metric.warnings if metric.warnings is not None else 0,
-                "status": "Running" if metric.active_count > 0 else metric.status,
-            }
-            plugins.append(entry)
-        events = [
+    def snapshot(self) -> Dict[str, object]:
+        plugins = [
             {
-                "offset": _format_elapsed(event.elapsed),
-                "message": event.message,
-                "level": event.level,
+                "name": stats.name,
+                "time": round(stats.total_time, 3),
+                "files": stats.files,
+                "warnings": stats.warnings,
+                "status": stats.status,
+                "runs": stats.runs,
             }
-            for event in self.events
+            for stats in self.plugins.values()
+        ]
+        plugins.sort(key=lambda item: (-item["time"], item["name"]))
+        logs = [
+            {
+                "offset": _format_offset(entry.offset),
+                "message": entry.message,
+                "level": entry.level,
+                "plugin": entry.plugin,
+                "timestamp": _iso(entry.timestamp),
+            }
+            for entry in self.logs[-500:]
         ]
         return {
             "session_id": self.session_id,
             "label": self.label,
-            "started_at": self.started_wall,
-            "duration": duration,
+            "started": _iso(self.started_wall),
+            "completed": _iso(self.completed_wall) if self.completed_wall else None,
             "plugins": plugins,
-            "events": events,
+            "logs": logs,
+            "total_time": round(self.total_time, 3),
             "total_files": self.total_files,
-            "warnings": self.warnings,
-            "extras": dict(self.extras),
-            "completed": self.completed,
+            "plugin_count": self.plugin_count or len(plugins),
+            "running": self.completed_wall is None,
+            "failed": self.failed,
         }
 
-    def to_history_entry(self) -> Dict[str, Any]:
-        snapshot = self.snapshot()
+    def to_json(self) -> Dict[str, object]:
         return {
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.started_wall)),
+            "session_id": self.session_id,
+            "started": _iso(self.started_wall),
+            "completed": _iso(self.completed_wall) if self.completed_wall else None,
+            "total_time": self.total_time,
+            "total_files": self.total_files,
+            "plugin_count": self.plugin_count,
+            "failed": self.failed,
             "plugins": [
                 {
-                    "name": entry["name"],
-                    "time": round(entry["time"], 3),
-                    "files": entry["files"],
-                    "warnings": entry["warnings"],
+                    "name": stats.name,
+                    "total_time": stats.total_time,
+                    "files": stats.files,
+                    "warnings": stats.warnings,
+                    "status": stats.status,
+                    "runs": stats.runs,
                 }
-                for entry in snapshot["plugins"]
+                for stats in self.plugins.values()
             ],
-            "total_time": round(snapshot["duration"], 3),
-            "total_files": snapshot["total_files"],
-            "events": snapshot["events"],
+            "logs": [
+                {
+                    "timestamp": _iso(entry.timestamp),
+                    "offset": entry.offset,
+                    "message": entry.message,
+                    "level": entry.level,
+                    "plugin": entry.plugin,
+                }
+                for entry in self.logs
+            ],
         }
 
 
-def _format_elapsed(elapsed: float) -> str:
-    seconds = int(max(0.0, elapsed))
-    hours, remainder = divmod(seconds, 3600)
-    minutes, secs = divmod(remainder, 60)
-    if hours:
-        return f"[{hours:02d}:{minutes:02d}:{secs:02d}]"
-    return f"[{minutes:02d}:{secs:02d}]"
+class ScanMetrics:
+    """Collects plugin scan timing information and exposes session data."""
 
-
-class ScanMetricsAggregator:
     def __init__(self) -> None:
         self._lock = threading.RLock()
+        self._current: Optional[_Session] = None
         self._session_counter = 0
-        self._current: Optional[_SessionData] = None
-        self._listeners: Dict[int, Callable[[Dict[str, Any]], None]] = {}
+        self._listeners: Dict[int, Callable[[Dict[str, object]], None]] = {}
         self._listener_index = 0
-        self._history: Deque[Dict[str, Any]] = deque(maxlen=10)
-        self._last_summary: Optional[str] = None
-        self._logs_dir = Path(__file__).resolve().parent / "Logs" / "scan_history"
-        self._logs_dir.mkdir(parents=True, exist_ok=True)
-        self._load_history()
+        self._history_cache: List[Dict[str, object]] = []
+        self._load_history_index()
 
     # ------------------------------------------------------------------
-    # Session lifecycle
+    # Public API for plugins and the core app
     # ------------------------------------------------------------------
-    def begin_session(self, *, plugins: Optional[Iterable[str]] = None) -> None:
+    def begin_session(self) -> int:
         with self._lock:
-            if self._current is not None and not self._current.completed:
-                self._finalise_session(self._current, cancelled=True)
+            self._finalize_active(failed=True)
             self._session_counter += 1
-            session_id = self._session_counter
-            session = _SessionData(
-                session_id=session_id,
-                started_at=time.perf_counter(),
-                started_wall=time.time(),
-                label=f"Session {session_id}",
+            now = time.time()
+            session = _Session(
+                session_id=self._session_counter,
+                started_wall=now,
+                started_perf=time.perf_counter(),
             )
-            if plugins:
-                for name in plugins:
-                    text = str(name).strip()
-                    if text:
-                        session.ensure_metric(text, text)
             self._current = session
-            self._last_summary = None
-            session.events.append(_TimelineEvent(0.0, "Starting scan..."))
-            self._notify_listeners_locked()
+            self._notify({"event": "session_started", "session": session.snapshot()})
+            return session.session_id
 
-    def complete_session(
-        self,
-        *,
-        total_files: int,
-        warnings: Optional[int] = None,
-        extras: Optional[Dict[str, int]] = None,
-        cancelled: bool = False,
-        error: bool = False,
-    ) -> None:
-        with self._lock:
-            session = self._current
-            if session is None:
-                return
-            now = time.perf_counter()
-            session.total_time = max(0.0, now - session.started_at)
-            session.total_files = max(0, int(total_files))
-            if warnings is not None:
-                session.warnings = max(0, int(warnings))
-            if extras:
-                session.extras.update({key: int(value) for key, value in extras.items()})
-            active_plugins = self._count_active_plugins(session)
-            if cancelled:
-                summary = (
-                    f"Scan cancelled — {session.total_files} files "
-                    f"({active_plugins} plugin{'s' if active_plugins != 1 else ''} active)"
-                )
-                session.events.append(_TimelineEvent(session.total_time, "Scan cancelled."))
-            elif error:
-                summary = (
-                    f"Scan failed — {session.total_files} files "
-                    f"({active_plugins} plugin{'s' if active_plugins != 1 else ''} active)"
-                )
-                session.events.append(_TimelineEvent(session.total_time, "Scan failed."))
-            else:
-                summary = (
-                    f"Scan complete — {session.total_files} files in {session.total_time:.2f} s "
-                    f"({active_plugins} plugin{'s' if active_plugins != 1 else ''} active)"
-                )
-                session.events.append(_TimelineEvent(session.total_time, summary))
-            session.completed = True
-            self._last_summary = summary
-            self._finalise_session(session)
-            self._current = None
-            self._notify_listeners_locked()
-
-    # ------------------------------------------------------------------
-    def start(self, key: str, *, display: Optional[str] = None) -> None:
-        identifier = str(key).strip()
-        if not identifier:
+    def start(self, plugin_name: str, *, status: Optional[str] = None) -> None:
+        if not plugin_name:
             return
-        now = time.perf_counter()
         with self._lock:
             session = self._current
             if session is None:
                 return
-            metric = session.ensure_metric(identifier, display)
-            metric.start(now)
-            session.events.append(
-                _TimelineEvent(max(0.0, now - session.started_at), f"{metric.display_name} started.")
-            )
-            self._notify_listeners_locked()
+            stats = session.plugins.setdefault(plugin_name, _PluginStats(name=plugin_name))
+            if plugin_name in session.active:
+                return
+            stats.runs += 1
+            if status:
+                stats.status = status
+            session.active[plugin_name] = time.perf_counter()
+            self._notify({"event": "session_update", "session": session.snapshot()})
 
     def stop(
         self,
-        key: str,
+        plugin_name: str,
         *,
-        display: Optional[str] = None,
-        files_processed: Optional[int] = None,
-        warnings: Optional[int] = None,
+        files_processed: int = 0,
+        warnings: int = 0,
         status: Optional[str] = None,
     ) -> None:
-        identifier = str(key).strip()
-        if not identifier:
+        if not plugin_name:
             return
-        now = time.perf_counter()
         with self._lock:
             session = self._current
             if session is None:
                 return
-            metric = session.ensure_metric(identifier, display)
-            metric.stop(
-                now,
-                status=status,
-                files_processed=files_processed,
-                warnings=warnings,
-            )
-            event_parts = [f"{metric.display_name} finished"]
-            if metric.files is not None:
-                event_parts.append(f"files={metric.files}")
-            if metric.warnings:
-                event_parts.append(f"warnings={metric.warnings}")
-            message = "; ".join(event_parts)
-            session.events.append(
-                _TimelineEvent(max(0.0, now - session.started_at), message)
-            )
-            self._notify_listeners_locked()
+            start = session.active.pop(plugin_name, None)
+            stats = session.plugins.setdefault(plugin_name, _PluginStats(name=plugin_name))
+            if start is not None:
+                stats.total_time += max(0.0, time.perf_counter() - start)
+            stats.files += max(0, files_processed)
+            stats.warnings += max(0, warnings)
+            if status:
+                stats.status = status
+            elif warnings:
+                stats.status = "Warning"
+            elif stats.total_time:
+                stats.status = "Done"
+            self._notify({"event": "session_update", "session": session.snapshot()})
 
-    def log(self, message: str, level: str = "info") -> None:
-        text = str(message).strip()
-        if not text:
+    def log(self, message: str, *, level: str = "info", plugin: Optional[str] = None) -> None:
+        if not message:
             return
-        level_norm = level.lower() if isinstance(level, str) else "info"
+        level_norm = level.lower()
+        if level_norm not in {"info", "warn", "warning", "error"}:
+            level_norm = "info"
+        if level_norm == "warning":
+            level_norm = "warn"
         with self._lock:
             session = self._current
             if session is None:
                 return
-            now = time.perf_counter()
-            session.events.append(
-                _TimelineEvent(max(0.0, now - session.started_at), text, level_norm)
+            entry = _LogEntry(
+                timestamp=time.time(),
+                message=message,
+                level=level_norm,
+                plugin=plugin,
+                offset=time.perf_counter() - session.started_perf,
             )
-            self._notify_listeners_locked()
+            session.logs.append(entry)
+            self._notify({"event": "session_update", "session": session.snapshot()})
 
-    # ------------------------------------------------------------------
-    def latest_summary(self) -> Optional[str]:
+    def complete(
+        self,
+        *,
+        total_files: int,
+        total_time: float,
+        plugin_count: Optional[int] = None,
+        failed: bool = False,
+    ) -> None:
         with self._lock:
-            return self._last_summary
+            session = self._current
+            if session is None:
+                return
+            session.completed_wall = time.time()
+            session.total_files = max(0, int(total_files))
+            session.total_time = max(0.0, float(total_time))
+            session.plugin_count = max(0, int(plugin_count or len(session.plugins)))
+            session.failed = bool(failed)
+            session.active.clear()
+            snapshot = session.snapshot()
+            self._archive_session(session)
+            self._notify({"event": "session_complete", "session": snapshot})
+            self._notify({"event": "history", "history": self.get_history()})
+            self._current = None
 
-    def register_listener(self, callback: Callable[[Dict[str, Any]], None]) -> Callable[[], None]:
+    def cancel(self) -> None:
+        with self._lock:
+            self._finalize_active(failed=True)
+            self._current = None
+
+    def active_plugin_count(self) -> int:
+        with self._lock:
+            session = self._current
+            if session is None:
+                return 0
+            return len([name for name, stats in session.plugins.items() if stats.total_time or stats.runs])
+
+    def current_snapshot(self) -> Optional[Dict[str, object]]:
+        with self._lock:
+            if self._current is None:
+                return None
+            return self._current.snapshot()
+
+    def get_history(self) -> List[Dict[str, object]]:
+        with self._lock:
+            if not self._history_cache:
+                self._history_cache = self._load_history()
+            return copy.deepcopy(self._history_cache)
+
+    def register_listener(self, callback: Callable[[Dict[str, object]], None]) -> int:
         if not callable(callback):
-            return lambda: None
+            raise TypeError("callback must be callable")
         with self._lock:
-            listener_id = self._listener_index
             self._listener_index += 1
-            self._listeners[listener_id] = callback
-            snapshot = self._current.snapshot() if self._current else None
-            history = list(self._history)
-        if snapshot is not None:
-            try:
-                callback({"session": snapshot, "history": history})
-            except Exception:
-                pass
-        else:
-            try:
-                callback({"session": None, "history": history})
-            except Exception:
-                pass
+            token = self._listener_index
+            self._listeners[token] = callback
+            history = self.get_history()
+            if history:
+                try:
+                    callback({"event": "history", "history": copy.deepcopy(history)})
+                except Exception:
+                    pass
+            snapshot = self.current_snapshot()
+            if snapshot:
+                try:
+                    callback({"event": "session_update", "session": snapshot})
+                except Exception:
+                    pass
+            return token
 
-        def _remove() -> None:
-            with self._lock:
-                self._listeners.pop(listener_id, None)
-
-        return _remove
-
-    def get_history(self) -> List[Dict[str, Any]]:
+    def unregister_listener(self, token: int) -> None:
         with self._lock:
-            return list(self._history)
+            self._listeners.pop(token, None)
 
     # ------------------------------------------------------------------
-    def _finalise_session(self, session: _SessionData, cancelled: bool = False) -> None:
-        entry = session.to_history_entry()
-        self._history.appendleft(entry)
-        self._write_history_entry(session)
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _notify(self, payload: Dict[str, object]) -> None:
+        listeners = list(self._listeners.items())
+        for _token, callback in listeners:
+            try:
+                callback(copy.deepcopy(payload))
+            except Exception:
+                continue
+
+    def _archive_session(self, session: _Session) -> None:
+        _ensure_history_dir()
+        payload = session.to_json()
+        filename = HISTORY_DIR / f"scan-{session.session_id:04d}.json"
+        try:
+            filename.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception:
+            return
+        self._history_cache = self._load_history()
         self._prune_history_files()
 
-    def _count_active_plugins(self, session: _SessionData) -> int:
-        count = 0
-        now = time.perf_counter()
-        for key in session.plugin_order:
-            metric = session.plugin_metrics.get(key)
-            if not metric:
-                continue
-            elapsed = metric.total_time
-            if metric.active_count > 0:
-                elapsed += metric.current_elapsed(now)
-            if elapsed > 0.0 or (metric.files or metric.warnings):
-                count += 1
-        return count
-
-    def _notify_listeners_locked(self) -> None:
-        snapshot = self._current.snapshot() if self._current else None
-        history = list(self._history)
-        listeners = list(self._listeners.values())
-        payload = {"session": snapshot, "history": history}
-        for listener in listeners:
+    def _load_history_index(self) -> None:
+        if not HISTORY_DIR.exists():
+            return
+        for path in HISTORY_DIR.glob("scan-*.json"):
             try:
-                listener(payload)
+                data = json.loads(path.read_text(encoding="utf-8"))
             except Exception:
                 continue
+            session_id = int(data.get("session_id", 0))
+            if session_id > self._session_counter:
+                self._session_counter = session_id
 
-    def _load_history(self) -> None:
-        files = sorted(self._logs_dir.glob("*.json"), reverse=True)
-        for path in files[:10]:
+    def _load_history(self) -> List[Dict[str, object]]:
+        entries: List[Dict[str, object]] = []
+        if not HISTORY_DIR.exists():
+            return entries
+        files = sorted(HISTORY_DIR.glob("scan-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for path in files[:_HISTORY_LIMIT]:
             try:
-                with path.open("r", encoding="utf-8") as handle:
-                    data = json.load(handle)
-                if isinstance(data, dict):
-                    self._history.append(data)
+                data = json.loads(path.read_text(encoding="utf-8"))
             except Exception:
                 continue
+            entries.append(self._deserialize_history_entry(data))
+        return entries
 
-    def _write_history_entry(self, session: _SessionData) -> None:
-        filename = time.strftime("scan_%Y%m%dT%H%M%S", time.gmtime(session.started_wall))
-        path = self._logs_dir / f"{filename}_{session.session_id:03d}.json"
-        try:
-            with path.open("w", encoding="utf-8") as handle:
-                json.dump(session.to_history_entry(), handle, indent=2)
-        except Exception:
-            pass
+    def _deserialize_history_entry(self, data: Dict[str, object]) -> Dict[str, object]:
+        plugins_raw = data.get("plugins", [])
+        plugins: List[Dict[str, object]] = []
+        for entry in plugins_raw or []:
+            if not isinstance(entry, dict):
+                continue
+            plugins.append(
+                {
+                    "name": str(entry.get("name", "Plugin")),
+                    "time": round(float(entry.get("total_time", 0.0)), 3),
+                    "files": int(entry.get("files", 0) or 0),
+                    "warnings": int(entry.get("warnings", 0) or 0),
+                    "status": str(entry.get("status", "Done")),
+                    "runs": int(entry.get("runs", 0) or 0),
+                }
+            )
+        logs_raw = data.get("logs", [])
+        logs: List[Dict[str, object]] = []
+        for entry in logs_raw or []:
+            if not isinstance(entry, dict):
+                continue
+            offset_val = entry.get("offset", 0.0)
+            try:
+                offset = float(offset_val)
+            except Exception:
+                offset = 0.0
+            logs.append(
+                {
+                    "offset": _format_offset(offset),
+                    "message": str(entry.get("message", "")),
+                    "level": str(entry.get("level", "info")),
+                    "plugin": entry.get("plugin"),
+                    "timestamp": entry.get("timestamp") or _iso(time.time()),
+                }
+            )
+        return {
+            "session_id": int(data.get("session_id", 0) or 0),
+            "label": f"Session {int(data.get('session_id', 0) or 0)}",
+            "started": data.get("started"),
+            "completed": data.get("completed"),
+            "plugins": plugins,
+            "logs": logs,
+            "total_time": round(float(data.get("total_time", 0.0)), 3),
+            "total_files": int(data.get("total_files", 0) or 0),
+            "plugin_count": int(data.get("plugin_count", len(plugins)) or len(plugins)),
+            "running": False,
+            "failed": bool(data.get("failed", False)),
+        }
+
+    def _finalize_active(self, *, failed: bool) -> None:
+        if self._current is None:
+            return
+        self._current.failed = self._current.failed or failed
+        self._current.active.clear()
 
     def _prune_history_files(self) -> None:
-        files = sorted(self._logs_dir.glob("*.json"), reverse=True)
-        for path in files[10:]:
+        files = sorted(HISTORY_DIR.glob("scan-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for path in files[_HISTORY_LIMIT:]:
             try:
                 path.unlink()
             except Exception:
                 continue
 
 
-scan_metrics = ScanMetricsAggregator()
+scan_metrics = ScanMetrics()
 
+__all__ = ["scan_metrics"]

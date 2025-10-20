@@ -1,17 +1,36 @@
+"""Scan Timeline Visualizer plugin for Sims4 Mod Sorter."""
 from __future__ import annotations
 
+import csv
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
+
 import tkinter as tk
-from tkinter import ttk
-from typing import Any, Dict, List, Optional, Tuple
+from tkinter import filedialog, messagebox, ttk
 
 from plugin_api import scan_metrics
 
-BG_COLOR = "#1c1c1c"
-TEXT_COLOR = "#e0e0e0"
-ALT_ROW = "#232323"
-HEADER_BG = "#2a2a2a"
-ACCENT = "#3a7bd5"
-LOG_BG = "#151515"
+_BACKGROUND = "#1c1c1c"
+_FOREGROUND = "#e0e0e0"
+_TABLE_ALT = "#232323"
+_HEADER_FG = "#f5f5f5"
+_STATUS_ICONS = {
+    "done": "✅ Done",
+    "warning": "⚠️ Warning",
+    "warn": "⚠️ Warning",
+    "error": "❌ Error",
+    "failed": "❌ Error",
+    "running": "⏳ Running",
+}
+
+
+@dataclass
+class _SessionEntry:
+    label: str
+    key: Tuple[str, int]
+    snapshot: Dict[str, object]
 
 
 class ScanTimelineVisualizerPlugin:
@@ -21,264 +40,368 @@ class ScanTimelineVisualizerPlugin:
         self.tree: Optional[ttk.Treeview] = None
         self.log_text: Optional[tk.Text] = None
         self.summary_var = tk.StringVar(value="No scans yet.")
-        self.session_var = tk.StringVar(value="")
-        self._session_map: Dict[str, Tuple[Optional[Dict[str, Any]], str]] = {}
-        self._latest_snapshot: Optional[Dict[str, Any]] = None
-        self._history_cache: List[Dict[str, Any]] = scan_metrics.get_history()
-        self._pending_refresh = False
-        self._listener = scan_metrics.register_listener(self._on_metrics_update)
+        self.session_var = tk.StringVar(value="Current Scan")
+        self._session_entries: List[_SessionEntry] = []
+        self._session_lookup: Dict[Tuple[str, int], Dict[str, object]] = {}
+        self._current_snapshot: Optional[Dict[str, object]] = None
+        self._history: List[Dict[str, object]] = []
+        self._listener_token: Optional[int] = None
+        getter = getattr(self.api, "is_feature_enabled", None)
+        self._live_updates = bool(getter("live_updates", default=True)) if callable(getter) else True
+        self._selected_key: Optional[Tuple[str, int]] = None
 
     # ------------------------------------------------------------------
     def register(self) -> None:
-        self.api.register_view_action("Scan Insights", self._open_panel)
+        self.api.register_toolbar_button(
+            "scan-timeline-visualizer",
+            text="Scan Insights",
+            command=lambda app, _api: self._open_window(app),
+            side="right",
+            insert_before="plugin_status",
+            padx=6,
+        )
+        try:
+            self._listener_token = scan_metrics.register_listener(self._on_metrics_event)
+        except Exception as exc:
+            self.api.log(f"[Scan Timeline] Failed to subscribe to metrics: {exc}", level="error")
+        self.api.log("[Scan Timeline] Visualizer initialised.")
 
     # ------------------------------------------------------------------
-    def _on_metrics_update(self, payload: Dict[str, Any]) -> None:
-        session = payload.get("session")
-        history = payload.get("history") or []
-        self._latest_snapshot = session
-        self._history_cache = list(history)
-        self._schedule_refresh()
-
-    def _schedule_refresh(self) -> None:
-        if self._pending_refresh:
+    def _open_window(self, app: tk.Tk) -> None:
+        window = self._ensure_window(app)
+        if not window:
             return
-        app = getattr(self.api, "app", None)
-        if not app:
-            return
-        self._pending_refresh = True
+        window.deiconify()
+        window.lift()
+        self._refresh_sessions()
 
-        def run() -> None:
-            self._pending_refresh = False
-            if self.window and self.window.winfo_exists():
-                self._populate_panel()
-
-        app.after(0, run)
-
-    # ------------------------------------------------------------------
-    def _open_panel(self, app, _api) -> None:
+    def _ensure_window(self, app: tk.Tk) -> Optional[tk.Toplevel]:
         if self.window and self.window.winfo_exists():
-            self.window.deiconify()
-            self.window.lift()
-            self._populate_panel()
-            return
+            return self.window
         window = tk.Toplevel(app)
         window.title("Scan Insights")
-        window.geometry("840x520")
-        window.configure(bg=BG_COLOR)
+        window.geometry("820x540")
+        window.configure(bg=_BACKGROUND)
         window.resizable(False, False)
+        window.transient(app)
         window.protocol("WM_DELETE_WINDOW", window.withdraw)
         self.window = window
 
         style = ttk.Style(window)
-        style.configure("Insights.TFrame", background=BG_COLOR)
-        style.configure("Insights.TLabel", background=BG_COLOR, foreground=TEXT_COLOR)
-        style.configure("Insights.TCombobox", fieldbackground=BG_COLOR, foreground=TEXT_COLOR)
-        style.configure("Insights.Treeview", background=BG_COLOR, fieldbackground=BG_COLOR, foreground=TEXT_COLOR, borderwidth=0)
-        style.configure("Insights.Treeview.Heading", background=HEADER_BG, foreground=TEXT_COLOR)
-        style.map("Insights.Treeview", background=[("selected", ACCENT)])
-        style.map("Insights.TCombobox", fieldbackground=[("readonly", BG_COLOR)])
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        style.configure("Scan.TFrame", background=_BACKGROUND)
+        style.configure("Scan.TLabel", background=_BACKGROUND, foreground=_FOREGROUND)
+        style.configure(
+            "Scan.Treeview",
+            background=_BACKGROUND,
+            foreground=_FOREGROUND,
+            fieldbackground=_BACKGROUND,
+            rowheight=24,
+            bordercolor=_BACKGROUND,
+            borderwidth=0,
+        )
+        style.configure("Scan.Treeview.Heading", background=_BACKGROUND, foreground=_HEADER_FG)
+        style.map("Scan.Treeview", background=[("selected", "#2f2f2f")])
+        style.configure("Scan.TButton", background="#2a2a2a", foreground=_FOREGROUND, padding=6)
+        style.map("Scan.TButton", background=[("active", "#3a3a3a")])
+        style.configure("Scan.TCombobox", fieldbackground=_BACKGROUND, foreground=_FOREGROUND)
 
-        container = ttk.Frame(window, padding=16, style="Insights.TFrame")
+        container = ttk.Frame(window, style="Scan.TFrame", padding=16)
         container.pack(fill="both", expand=True)
 
-        header = ttk.Frame(container, style="Insights.TFrame")
+        header = ttk.Frame(container, style="Scan.TFrame")
         header.pack(fill="x")
-        title = ttk.Label(header, text="Scan Insights", style="Insights.TLabel", font=("TkDefaultFont", 14, "bold"))
-        title.pack(side="left")
-        session_box = ttk.Frame(header, style="Insights.TFrame")
-        session_box.pack(side="right")
-        ttk.Label(session_box, text="Session:", style="Insights.TLabel").pack(side="left", padx=(0, 6))
-        combo = ttk.Combobox(
-            session_box,
+        ttk.Label(
+            header,
+            text="Scan Insights",
+            style="Scan.TLabel",
+            font=("TkDefaultFont", 14, "bold"),
+        ).pack(side="left")
+
+        controls = ttk.Frame(container, style="Scan.TFrame")
+        controls.pack(fill="x", pady=(12, 8))
+        ttk.Label(controls, text="Session", style="Scan.TLabel").pack(side="left")
+        self.session_cb = ttk.Combobox(
+            controls,
             textvariable=self.session_var,
             state="readonly",
             width=28,
-            style="Insights.TCombobox",
         )
-        combo.bind("<<ComboboxSelected>>", lambda _e: self._populate_panel())
-        combo.pack(side="left")
-        self.session_combo = combo
+        self.session_cb.pack(side="left", padx=(8, 12))
+        self.session_cb.bind("<<ComboboxSelected>>", lambda _e: self._on_session_changed())
+        ttk.Button(
+            controls,
+            text="Export JSON",
+            style="Scan.TButton",
+            command=lambda: self._export_current("json"),
+        ).pack(side="right")
+        ttk.Button(
+            controls,
+            text="Export CSV",
+            style="Scan.TButton",
+            command=lambda: self._export_current("csv"),
+        ).pack(side="right", padx=(0, 8))
 
-        tree_frame = ttk.Frame(container, style="Insights.TFrame")
-        tree_frame.pack(fill="both", expand=True, pady=(12, 12))
+        table_frame = ttk.Frame(container, style="Scan.TFrame")
+        table_frame.pack(fill="x")
         columns = ("plugin", "time", "files", "warnings", "status")
-        tree = ttk.Treeview(
-            tree_frame,
+        self.tree = ttk.Treeview(
+            table_frame,
             columns=columns,
             show="headings",
-            height=8,
-            style="Insights.Treeview",
+            style="Scan.Treeview",
+            height=6,
         )
-        tree.heading("plugin", text="Plugin")
-        tree.heading("time", text="Time (s)")
-        tree.heading("files", text="Files")
-        tree.heading("warnings", text="Warnings")
-        tree.heading("status", text="Status")
-        tree.column("plugin", width=240, anchor="w")
-        tree.column("time", width=90, anchor="center")
-        tree.column("files", width=90, anchor="center")
-        tree.column("warnings", width=110, anchor="center")
-        tree.column("status", width=130, anchor="center")
-        tree.tag_configure("odd", background=ALT_ROW)
-        tree.pack(fill="both", expand=True, side="left")
-        scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=scroll.set)
-        scroll.pack(side="right", fill="y")
-        self.tree = tree
+        headings = {
+            "plugin": "Plugin",
+            "time": "Time (s)",
+            "files": "Files",
+            "warnings": "Warnings",
+            "status": "Status",
+        }
+        anchors = {"plugin": "w", "time": "e", "files": "center", "warnings": "center", "status": "w"}
+        widths = {"plugin": 220, "time": 90, "files": 80, "warnings": 90, "status": 160}
+        for column in columns:
+            self.tree.heading(column, text=headings[column])
+            self.tree.column(column, anchor=anchors[column], width=widths[column])
+        self.tree.tag_configure("odd", background=_BACKGROUND)
+        self.tree.tag_configure("even", background=_TABLE_ALT)
+        self.tree.pack(fill="x")
 
-        summary = ttk.Label(container, textvariable=self.summary_var, style="Insights.TLabel")
-        summary.pack(anchor="w")
+        summary = ttk.Label(container, textvariable=self.summary_var, style="Scan.TLabel")
+        summary.pack(anchor="w", pady=(8, 4))
 
-        log_frame = ttk.Frame(container, style="Insights.TFrame")
-        log_frame.pack(fill="both", expand=True, pady=(12, 0))
-        ttk.Label(log_frame, text="Timeline", style="Insights.TLabel").pack(anchor="w")
-        log_text = tk.Text(
+        log_frame = ttk.Frame(container, style="Scan.TFrame")
+        log_frame.pack(fill="both", expand=True)
+        ttk.Label(log_frame, text="Timeline", style="Scan.TLabel").pack(anchor="w")
+        self.log_text = tk.Text(
             log_frame,
-            height=8,
-            wrap="word",
+            height=12,
+            bg=_BACKGROUND,
+            fg=_FOREGROUND,
+            insertbackground=_FOREGROUND,
             state="disabled",
-            bg=LOG_BG,
-            fg=TEXT_COLOR,
-            highlightthickness=0,
+            wrap="word",
             relief="flat",
         )
-        log_text.pack(fill="both", expand=True)
-        self.log_text = log_text
+        self.log_text.pack(fill="both", expand=True, pady=(6, 0))
 
-        self._populate_panel()
+        return window
 
     # ------------------------------------------------------------------
-    def _populate_panel(self) -> None:
-        if not (self.window and self.window.winfo_exists()):
+    def _on_metrics_event(self, payload: Dict[str, object]) -> None:
+        event = str(payload.get("event") or "")
+        if event == "history":
+            history = payload.get("history") or []
+            self._schedule(lambda: self._update_history(history))
             return
-        snapshot = self._latest_snapshot
-        history = list(self._history_cache)
-        options: List[Tuple[str, Optional[Dict[str, Any]], str]] = []
-        if snapshot:
-            label = snapshot.get("label", "Current Scan")
-            options.append(("__current__", snapshot, f"Current Scan — {label}"))
-        for entry in history:
-            ts = entry.get("timestamp", "")
-            label = entry.get("label") or ts
-            display = label or ts or "Previous Scan"
-            options.append((ts or display, entry, display))
-        if not options:
-            options.append(("", None, "No history"))
-        self._session_map = {display: (data, key) for key, data, display in options}
-        values = [display for _, _, display in options]
-        current_value = self.session_var.get()
-        if current_value not in values:
-            self.session_var.set(values[0])
-        combo = getattr(self, "session_combo", None)
-        if combo is not None:
-            combo.configure(values=values)
+        session = payload.get("session")
+        if not isinstance(session, dict):
+            return
+        if event == "session_update" and not self._live_updates:
+            if not session.get("completed"):
+                return
+        self._schedule(lambda: self._update_current_session(session))
 
-        selection = self.session_var.get()
-        data, key = self._session_map.get(selection, (None, ""))
-        if data is None:
-            self._render_empty()
-        elif key == "__current__":
-            self._render_snapshot(data)
+    def _schedule(self, func) -> None:
+        app = getattr(self.api, "app", None)
+        if not app:
+            return
+        try:
+            app.after(0, func)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    def _update_history(self, history: Sequence[Dict[str, object]]) -> None:
+        self._history = list(history)
+        self._refresh_sessions()
+
+    def _update_current_session(self, snapshot: Dict[str, object]) -> None:
+        self._current_snapshot = snapshot
+        if snapshot.get("running"):
+            key = ("current", int(snapshot.get("session_id", 0)))
         else:
-            self._render_history_entry(data)
+            key = ("history", int(snapshot.get("session_id", 0)))
+        self._session_lookup[key] = snapshot
+        if self._selected_key == key:
+            self._render_snapshot(snapshot)
+        self._refresh_sessions()
 
-    def _render_empty(self) -> None:
-        if self.tree:
-            for iid in self.tree.get_children():
-                self.tree.delete(iid)
-        self.summary_var.set("No scans yet.")
-        if self.log_text:
-            self.log_text.configure(state="normal")
-            self.log_text.delete("1.0", "end")
-            self.log_text.insert("end", "No timeline data available.")
-            self.log_text.configure(state="disabled")
-
-    def _render_snapshot(self, snapshot: Dict[str, Any]) -> None:
-        plugins = snapshot.get("plugins", [])
-        duration = snapshot.get("duration", 0.0)
-        total_files = snapshot.get("total_files", 0)
-        extras = snapshot.get("extras", {}) or {}
-        disabled = extras.get("disabled", 0)
-        summary = f"Total Time: {duration:.2f} s    Total Files: {total_files}"
-        if disabled:
-            summary += f" (disabled: {disabled})"
-        self.summary_var.set(summary)
-        self._render_table(plugins)
-        self._render_log(snapshot.get("events", []))
-
-    def _render_history_entry(self, entry: Dict[str, Any]) -> None:
-        plugins = entry.get("plugins", [])
-        total_time = entry.get("total_time", 0.0)
-        total_files = entry.get("total_files", 0)
-        summary = f"Total Time: {total_time:.2f} s    Total Files: {total_files}"
-        self.summary_var.set(summary)
-        formatted_plugins = [
-            {
-                "name": item.get("name", "Unknown"),
-                "time": item.get("time", 0.0),
-                "files": item.get("files", 0),
-                "warnings": item.get("warnings", 0),
-                "status": "Warning" if item.get("warnings") else "Done",
-            }
-            for item in plugins
-        ]
-        self._render_table(formatted_plugins)
-        self._render_log(entry.get("events", []))
-
-    def _render_table(self, plugins: List[Dict[str, Any]]) -> None:
-        if not self.tree:
-            return
-        tree = self.tree
-        tree.delete(*tree.get_children())
-        for index, item in enumerate(plugins):
-            status = item.get("status", "Done")
-            warnings = item.get("warnings", 0) or 0
-            icon = self._status_icon(status, warnings)
-            tree.insert(
-                "",
-                "end",
-                values=(
-                    item.get("name", "Unknown"),
-                    f"{float(item.get('time', 0.0)):.2f}",
-                    int(item.get("files", 0)),
-                    warnings,
-                    icon,
-                ),
-                tags=("odd" if index % 2 else "even",),
+    def _refresh_sessions(self) -> None:
+        entries: List[_SessionEntry] = []
+        lookup: Dict[Tuple[str, int], Dict[str, object]] = {}
+        if self._current_snapshot and self._current_snapshot.get("running"):
+            key = ("current", int(self._current_snapshot.get("session_id", 0)))
+            entries.append(
+                _SessionEntry("Current Scan", key, self._current_snapshot)
             )
+            lookup[key] = self._current_snapshot
+        for idx, snapshot in enumerate(self._history):
+            key = ("history", int(snapshot.get("session_id", 0)))
+            label = "Last Scan" if idx == 0 else f"Scan #{snapshot.get('session_id', idx + 1)}"
+            entries.append(_SessionEntry(label, key, snapshot))
+            lookup[key] = snapshot
+        if not entries:
+            placeholder = {
+                "session_id": 0,
+                "plugins": [],
+                "logs": [],
+                "total_time": 0.0,
+                "total_files": 0,
+                "plugin_count": 0,
+                "running": False,
+            }
+            entries.append(_SessionEntry("No scans", ("empty", 0), placeholder))
+            lookup[("empty", 0)] = placeholder
+        labels = [entry.label for entry in entries]
+        self._session_entries = entries
+        self._session_lookup = lookup
+        if hasattr(self, "session_cb"):
+            self.session_cb["values"] = labels
+        selected = None
+        if self._selected_key:
+            for entry in entries:
+                if entry.key == self._selected_key:
+                    selected = entry
+                    break
+        if not selected:
+            selected = entries[0]
+        self._selected_key = selected.key
+        self.session_var.set(selected.label)
+        self._render_snapshot(selected.snapshot)
+        if hasattr(self, "session_cb"):
+            try:
+                idx = labels.index(selected.label)
+                self.session_cb.current(idx)
+            except ValueError:
+                pass
 
-    def _render_log(self, events: List[Dict[str, Any]]) -> None:
-        if not self.log_text:
+    # ------------------------------------------------------------------
+    def _on_session_changed(self) -> None:
+        if not self._session_entries:
             return
-        self.log_text.configure(state="normal")
-        self.log_text.delete("1.0", "end")
-        if not events:
-            self.log_text.insert("end", "No timeline events recorded.")
-        else:
-            for event in events:
-                offset = event.get("offset", "[00:00]")
-                message = event.get("message", "")
-                level = event.get("level", "info")
-                prefix = ""
-                if level in {"warn", "warning"}:
-                    prefix = "[WARN] "
-                elif level == "error":
-                    prefix = "[ERROR] "
-                self.log_text.insert("end", f"{offset} {prefix}{message}\n")
-        self.log_text.see("end")
-        self.log_text.configure(state="disabled")
+        label = self.session_var.get()
+        entry = next((e for e in self._session_entries if e.label == label), None)
+        if not entry:
+            entry = self._session_entries[0]
+        self._selected_key = entry.key
+        snapshot = self._session_lookup.get(entry.key)
+        if snapshot:
+            self._render_snapshot(snapshot)
 
-    @staticmethod
-    def _status_icon(status: str, warnings: int) -> str:
-        normalized = (status or "").lower()
-        if normalized == "warning" or warnings:
-            return "⚠️ Warning"
-        if normalized == "error":
-            return "❌ Error"
-        if normalized == "running":
-            return "⏳ Running"
-        return "✅ Done"
+    def _render_snapshot(self, snapshot: Dict[str, object]) -> None:
+        tree = self.tree
+        if tree:
+            tree.delete(*tree.get_children())
+            plugins = snapshot.get("plugins") or []
+            for idx, plugin in enumerate(plugins):
+                status_text = str(plugin.get("status", "Done")).lower()
+                label = _STATUS_ICONS.get(status_text, plugin.get("status", ""))
+                if plugin.get("warnings") and status_text not in {"warning", "warn"}:
+                    label = _STATUS_ICONS.get("warning")
+                tag = "even" if idx % 2 else "odd"
+                tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        plugin.get("name", "Plugin"),
+                        f"{float(plugin.get('time', 0.0)):.2f}",
+                        int(plugin.get("files", 0) or 0),
+                        int(plugin.get("warnings", 0) or 0),
+                        label,
+                    ),
+                    tags=(tag,),
+                )
+        total_time = float(snapshot.get("total_time", 0.0) or 0.0)
+        total_files = int(snapshot.get("total_files", 0) or 0)
+        plugin_count = int(snapshot.get("plugin_count", 0) or 0)
+        running = bool(snapshot.get("running"))
+        summary_parts = [
+            f"Total Time: {total_time:.2f} s",
+            f"Total Files: {total_files}",
+            f"Plugins: {plugin_count}",
+        ]
+        if running:
+            summary_parts.append("(running)")
+        self.summary_var.set(" | ".join(summary_parts))
+        logs = snapshot.get("logs") or []
+        lines: List[str] = []
+        for entry in logs:
+            offset = entry.get("offset", "00:00")
+            message = str(entry.get("message", ""))
+            level = str(entry.get("level", "info")).lower()
+            plugin = entry.get("plugin")
+            prefix = ""
+            if level == "warn":
+                prefix = "⚠️ "
+            elif level == "error":
+                prefix = "❌ "
+            elif level == "info":
+                prefix = ""
+            if plugin:
+                message = f"{plugin}: {message}"
+            lines.append(f"[{offset}] {prefix}{message}")
+        log_widget = self.log_text
+        if log_widget:
+            log_widget.configure(state="normal")
+            log_widget.delete("1.0", "end")
+            log_widget.insert("end", "\n".join(lines) if lines else "No events recorded yet.")
+            log_widget.configure(state="disabled")
+
+    # ------------------------------------------------------------------
+    def _export_current(self, fmt: str) -> None:
+        if not self._selected_key:
+            messagebox.showinfo("Scan Insights", "No session selected.", parent=self.window)
+            return
+        snapshot = self._session_lookup.get(self._selected_key)
+        if not snapshot:
+            messagebox.showinfo("Scan Insights", "No session data available.", parent=self.window)
+            return
+        if fmt == "json":
+            path = filedialog.asksaveasfilename(
+                title="Export Scan Session",
+                defaultextension=".json",
+                filetypes=[("JSON", "*.json"), ("All Files", "*.*")],
+            )
+            if not path:
+                return
+            try:
+                Path(path).write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+            except Exception as exc:
+                messagebox.showerror("Export Failed", str(exc), parent=self.window)
+                return
+        elif fmt == "csv":
+            path = filedialog.asksaveasfilename(
+                title="Export Scan Session",
+                defaultextension=".csv",
+                filetypes=[("CSV", "*.csv"), ("All Files", "*.*")],
+            )
+            if not path:
+                return
+            try:
+                with open(path, "w", encoding="utf-8", newline="") as handle:
+                    writer = csv.writer(handle)
+                    writer.writerow(["Plugin", "Time (s)", "Files", "Warnings", "Status"])
+                    for plugin in snapshot.get("plugins", []):
+                        writer.writerow(
+                            [
+                                plugin.get("name", "Plugin"),
+                                f"{float(plugin.get('time', 0.0)):.3f}",
+                                int(plugin.get("files", 0) or 0),
+                                int(plugin.get("warnings", 0) or 0),
+                                plugin.get("status", ""),
+                            ]
+                        )
+            except Exception as exc:
+                messagebox.showerror("Export Failed", str(exc), parent=self.window)
+                return
+        else:
+            return
+        messagebox.showinfo("Scan Insights", f"Exported session to {path}", parent=self.window)
 
 
 PLUGIN: Optional[ScanTimelineVisualizerPlugin] = None

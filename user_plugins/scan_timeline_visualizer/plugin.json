@@ -1,8 +1,16 @@
 {
   "name": "Scan Timeline Visualizer",
+  "id": "scan_timeline_visualizer",
   "entry": "plugin.py",
-  "enabled": true,
   "callable": "register",
+  "enabled": true,
   "version": "1.0.0",
-  "type": "diagnostic"
+  "features": [
+    {
+      "id": "live_updates",
+      "name": "Live Updates",
+      "default": true,
+      "description": "Update the Scan Insights panel while scans are running."
+    }
+  ]
 }
