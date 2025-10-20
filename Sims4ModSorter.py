@@ -939,6 +939,9 @@ def scan_folder(
     ignore_exts: Optional[Iterable[str]] = None,
     ignore_names: Optional[Iterable[str]] = None,
     progress_cb: Optional[ProgressCallback] = None,
+    selected_folders: Optional[Sequence[str]] = None,
+    include_adult: bool = True,
+    allowed_exts: Optional[Iterable[str]] = None,
 ) -> ScanResult:
     root = Path(root)
     if not root.is_dir():
@@ -950,6 +953,24 @@ def scan_folder(
         if isinstance(ext, str) and ext.strip()
     }
     ignore_names_tokens = [token.lower() for token in (ignore_names or []) if isinstance(token, str) and token.strip()]
+    if allowed_exts is None:
+        allowed_exts_set: Optional[set[str]] = None
+    else:
+        allowed_exts_set = {
+            (ext.lower() if ext.startswith(".") else f".{ext.lower()}")
+            for ext in allowed_exts
+            if isinstance(ext, str) and ext.strip()
+        }
+    selected_paths: Optional[List[Path]] = None
+    if selected_folders is not None:
+        seen_paths: set[Path] = set()
+        selected_paths = []
+        for folder in selected_folders:
+            text = str(folder).strip()
+            token = Path(".") if not text or text in {".", os.curdir} else Path(text)
+            if token not in seen_paths:
+                seen_paths.add(token)
+                selected_paths.append(token)
     items: List[FileItem] = []
     errors: List[str] = []
     candidates = list(_iter_files(root, recurse))
@@ -958,6 +979,10 @@ def scan_folder(
         name = path.name
         ext = path.suffix.lower()
         lowered = name.lower()
+        if allowed_exts_set is not None and ext not in allowed_exts_set:
+            if progress_cb:
+                progress_cb(index, total, path, "filtered")
+            continue
         if ignore_exts_set and ext in ignore_exts_set:
             if progress_cb:
                 progress_cb(index, total, path, "ignored")
@@ -973,11 +998,34 @@ def scan_folder(
             if progress_cb:
                 progress_cb(index, total, path, "error")
             continue
+        relpath_obj = path.relative_to(root)
+        if selected_paths is not None:
+            include_file = False
+            for target in selected_paths:
+                if target == Path("."):
+                    if relpath_obj.parent == Path("."):
+                        include_file = True
+                        break
+                else:
+                    try:
+                        relpath_obj.relative_to(target)
+                        include_file = True
+                        break
+                    except ValueError:
+                        continue
+            if not include_file:
+                if progress_cb:
+                    progress_cb(index, total, path, "filtered")
+                continue
         initial = _guess_from_name(name, ext)
         refined = refine_with_metadata(path, initial)
         category, confidence, notes, tags = refined
+        if not include_adult and category.startswith("Adult"):
+            if progress_cb:
+                progress_cb(index, total, path, "filtered")
+            continue
         target_folder = folder_map.get(category, folder_map.get("Unknown", "Unsorted"))
-        relpath = str(path.relative_to(root)) if path != root else name
+        relpath = str(relpath_obj) if path != root else name
         items.append(
             FileItem(
                 path=path,
@@ -1478,6 +1526,34 @@ class Sims4ModSorterApp(tk.Tk):
             row=4, column=0, sticky="w", pady=(10, 2)
         )
         ttk.Entry(scan_section, textvariable=self.ignore_names_var).grid(row=5, column=0, sticky="ew")
+        ttk.Label(scan_section, text="File types to include").grid(row=6, column=0, sticky="w", pady=(12, 2))
+        type_frame = ttk.Frame(scan_section)
+        type_frame.grid(row=7, column=0, sticky="w")
+        ttk.Checkbutton(
+            type_frame,
+            text="Packages (.package)",
+            variable=self.scan_package_var,
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(
+            type_frame,
+            text="Scripts (.ts4script)",
+            variable=self.scan_script_var,
+        ).grid(row=0, column=1, sticky="w", padx=(12, 0))
+        ttk.Checkbutton(
+            type_frame,
+            text="Archives (.zip/.rar/.7z)",
+            variable=self.scan_archive_var,
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(
+            type_frame,
+            text="Other supported files",
+            variable=self.scan_misc_var,
+        ).grid(row=1, column=1, sticky="w", padx=(12, 0), pady=(4, 0))
+        ttk.Checkbutton(
+            scan_section,
+            text="Include adult content",
+            variable=self.include_adult_var,
+        ).grid(row=8, column=0, sticky="w", pady=(12, 0))
         row += 1
 
         actions = ttk.Frame(container)
@@ -1531,6 +1607,23 @@ class Sims4ModSorterApp(tk.Tk):
         for name, canvas in canvases.items():
             border = accent if name == selected else neutral
             canvas.configure(highlightbackground=border, highlightcolor=border)
+
+    def _resolve_allowed_extensions(self) -> Optional[set[str]]:
+        allowed: set[str] = set()
+        if self.scan_package_var.get():
+            allowed.update(PACKAGE_EXTS)
+        if self.scan_script_var.get():
+            allowed.update(SCRIPT_EXTS)
+        if self.scan_archive_var.get():
+            allowed.update(ARCHIVE_EXTS)
+        if self.scan_misc_var.get():
+            other = SUPPORTED_EXTS - PACKAGE_EXTS - SCRIPT_EXTS - ARCHIVE_EXTS
+            allowed.update(other)
+        if not allowed:
+            return set()
+        if allowed >= SUPPORTED_EXTS:
+            return None
+        return {ext.lower() for ext in allowed}
     # ------------------------------------------------------------------
     # Queue helpers and logging
     # ------------------------------------------------------------------
@@ -2195,6 +2288,12 @@ class Sims4ModSorterApp(tk.Tk):
             self.status_var.set("Folder not found")
             self.log("Error: folder not found")
             return
+        allowed_exts_preview = self._resolve_allowed_extensions()
+        if allowed_exts_preview is not None and not allowed_exts_preview:
+            messagebox.showwarning("Scan", "Enable at least one file type before scanning.", parent=self)
+            return
+        include_adult_flag = self.include_adult_var.get()
+        selected_folders_preview: Optional[List[str]] = None
         self.btn_scan.configure(state="disabled")
         self.progress.configure(mode="determinate", value=0, maximum=100)
         self.status_var.set("Scanning…")
@@ -2214,6 +2313,9 @@ class Sims4ModSorterApp(tk.Tk):
             "ignore_exts": list(ignore_exts),
             "ignore_names": list(ignore_names),
             "folder_map": self.folder_map,
+            "allowed_exts": allowed_exts_preview,
+            "selected_folders": selected_folders_preview,
+            "include_adult": include_adult_flag,
         }
         if self.plugin_manager:
             self.plugin_manager.run_pre_scan(context)
@@ -2221,6 +2323,58 @@ class Sims4ModSorterApp(tk.Tk):
             ignore_names = [str(name).strip() for name in context.get("ignore_names", ignore_names) if str(name).strip()]
             mods_path = Path(context.get("mods_root", mods_path))
         recurse = bool(context.get("recurse", self.recurse_var.get()))
+
+        def _normalise_allowed_exts(value: object) -> Optional[set[str]]:
+            if value is None:
+                return None
+            if isinstance(value, (list, set, tuple)):
+                normalized = {
+                    (str(ext).lower() if str(ext).startswith(".") else f".{str(ext).lower()}")
+                    for ext in value
+                    if str(ext).strip()
+                }
+                return normalized
+            text = str(value).strip()
+            if not text:
+                return set()
+            return {
+                text.lower() if text.startswith(".") else f".{text.lower()}"
+            }
+
+        def _normalise_selected_folders(value: object) -> Optional[List[str]]:
+            if value is None:
+                return None
+            if isinstance(value, (list, tuple, set)):
+                result = [str(folder).strip() for folder in value if str(folder).strip()]
+                return result or []
+            text = str(value).strip()
+            return [text] if text else []
+
+        allowed_exts_value = _normalise_allowed_exts(context.get("allowed_exts", allowed_exts_preview))
+        selected_folders_value = _normalise_selected_folders(context.get("selected_folders", selected_folders_preview))
+        include_adult_flag = bool(context.get("include_adult", include_adult_flag))
+        if allowed_exts_value is not None and not allowed_exts_value:
+            self.log("Scan cancelled: no file types allowed after plugin adjustments.", level="warning")
+            self.status_var.set("Scan cancelled")
+            self.btn_scan.configure(state="normal")
+            return
+        if selected_folders_value is not None and not selected_folders_value:
+            self.log("Scan cancelled: no folders selected after plugin adjustments.", level="warning")
+            self.status_var.set("Scan cancelled")
+            self.btn_scan.configure(state="normal")
+            return
+
+        folder_desc = "All folders" if not selected_folders_value else ", ".join(
+            "Root files" if folder in (".", "") else folder for folder in selected_folders_value
+        )
+        type_desc = (
+            "all file types"
+            if allowed_exts_value is None
+            else ", ".join(sorted(allowed_exts_value)) or "(none)"
+        )
+        self.log(
+            f"Starting scan in {folder_desc} ({'including' if include_adult_flag else 'excluding'} adult content, {type_desc})."
+        )
 
         def progress_cb(done: int, total: int, current: Path, state: str) -> None:
             percent = int(done * 100 / total) if total else 0
@@ -2235,6 +2389,9 @@ class Sims4ModSorterApp(tk.Tk):
                 ignore_exts=ignore_exts,
                 ignore_names=ignore_names,
                 progress_cb=progress_cb,
+                selected_folders=selected_folders_value,
+                include_adult=include_adult_flag,
+                allowed_exts=allowed_exts_value,
             )
             stats = bundle_scripts_and_packages(result.items, self.folder_map)
             if self.plugin_manager:
@@ -2245,6 +2402,9 @@ class Sims4ModSorterApp(tk.Tk):
                     "ignore_names": ignore_names,
                     "items": result.items,
                     "bundle_stats": stats,
+                    "allowed_exts": allowed_exts_value,
+                    "selected_folders": selected_folders_value,
+                    "include_adult": include_adult_flag,
                 }
                 self.plugin_manager.run_post_scan(result.items, post_context)
             result.items.sort(
