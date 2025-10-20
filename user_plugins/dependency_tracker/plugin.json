@@ -3,7 +3,7 @@
   "entry": "plugin.py",
   "enabled": true,
   "callable": "register",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "features": [
     {
       "id": "tracking",

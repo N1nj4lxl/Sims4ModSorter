@@ -11,7 +11,7 @@ import traceback
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -466,7 +466,13 @@ class PluginManagerApp(tk.Tk):
 
         self._build_style()
         self._build_ui()
+        self.settings_overlay = PluginSettingsOverlay(
+            self,
+            on_apply=self._apply_settings_overlay,
+            on_cancel=self._cancel_settings_overlay,
+        )
         self.refresh()
+        self.after(0, self._center_on_screen)
 
     # UI construction ---------------------------------------------------
     def _build_style(self) -> None:
@@ -491,17 +497,30 @@ class PluginManagerApp(tk.Tk):
         style.map("Treeview", background=[("selected", "#454552")])
         style.configure("Treeview.Heading", background="#1f1f24", foreground="#f2f2f7")
         style.configure("Status.TLabel", background="#1f1f24", foreground="#9d9da6")
+        style.configure("Overlay.TFrame", background="#2d2d34", borderwidth=0)
+        style.configure(
+            "OverlayTitle.TLabel",
+            background="#2d2d34",
+            foreground="#f2f2f7",
+            font=("Segoe UI", 12, "bold"),
+        )
+        style.configure(
+            "OverlayMessage.TLabel",
+            background="#2d2d34",
+            foreground="#c5c5cf",
+            wraplength=420,
+        )
 
     def _build_ui(self) -> None:
-        root = ttk.Frame(self, padding=16)
-        root.pack(fill="both", expand=True)
+        self.body = ttk.Frame(self, padding=16)
+        self.body.pack(fill="both", expand=True)
 
-        header = ttk.Frame(root)
+        header = ttk.Frame(self.body)
         header.pack(fill="x")
         ttk.Label(header, text="Installed Plugins", font=("Segoe UI", 14, "bold")).pack(side="left")
         ttk.Button(header, text="Open Folder", command=self.on_open_folder).pack(side="right")
 
-        toolbar = ttk.Frame(root)
+        toolbar = ttk.Frame(self.body)
         toolbar.pack(fill="x", pady=(12, 8))
         ttk.Button(toolbar, text="Import File", command=self.on_import_file).pack(side="left")
         ttk.Button(toolbar, text="Import Folder", command=self.on_import_folder).pack(side="left", padx=(8, 0))
@@ -519,7 +538,7 @@ class PluginManagerApp(tk.Tk):
         ttk.Button(toolbar, text="Remove", command=self.on_remove).pack(side="left", padx=(8, 0))
 
         columns = ("name", "folder", "version", "status", "message")
-        self.tree = ttk.Treeview(root, columns=columns, show="headings")
+        self.tree = ttk.Treeview(self.body, columns=columns, show="headings")
         self.tree.heading("name", text="Name")
         self.tree.heading("folder", text="Folder")
         self.tree.heading("version", text="Version")
@@ -533,9 +552,24 @@ class PluginManagerApp(tk.Tk):
         self.tree.pack(fill="both", expand=True)
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self._update_buttons())
 
-        status_bar = ttk.Frame(root, padding=(0, 12, 0, 0))
+        status_bar = ttk.Frame(self.body, padding=(0, 12, 0, 0))
         status_bar.pack(fill="x")
         ttk.Label(status_bar, textvariable=self.status_var, style="Status.TLabel").pack(side="left")
+
+    def _center_on_screen(self) -> None:
+        try:
+            self.update_idletasks()
+            width = self.winfo_width()
+            height = self.winfo_height()
+            if width <= 1 or height <= 1:
+                width, height = 760, 520
+            screen_w = self.winfo_screenwidth()
+            screen_h = self.winfo_screenheight()
+            x = max(int((screen_w - width) / 2), 0)
+            y = max(int((screen_h - height) / 2), 0)
+            self.geometry(f"{width}x{height}+{x}+{y}")
+        except Exception:
+            pass
 
     # Actions ------------------------------------------------------------
     def refresh(self) -> None:
@@ -613,19 +647,13 @@ class PluginManagerApp(tk.Tk):
             return
         entry = next((e for e in self.entries if e.folder == identifier), None)
         if not entry or not entry.features:
-            messagebox.showinfo("Plugin Settings", "Selected plugin does not expose configurable features.", parent=self)
+            messagebox.showinfo(
+                "Plugin Settings",
+                "Selected plugin does not expose configurable features.",
+                parent=self,
+            )
             return
-        dialog = PluginSettingsDialog(self, entry)
-        self.wait_window(dialog)
-        if dialog.result is None:
-            return
-        try:
-            updated = self.library.set_features(identifier, dialog.result)
-        except Exception as exc:
-            messagebox.showerror("Update failed", str(exc), parent=self)
-            return
-        self.refresh()
-        self.status_var.set(f"Updated settings for {updated.name}")
+        self.settings_overlay.present(entry)
 
     def on_remove(self) -> None:
         identifier = self._selected_folder()
@@ -641,6 +669,22 @@ class PluginManagerApp(tk.Tk):
                 return
             self.refresh()
             self.status_var.set(f"Removed {name}")
+
+    def _apply_settings_overlay(self, entry: PluginEntry, states: Dict[str, bool]) -> bool:
+        try:
+            updated = self.library.set_features(entry.folder, states)
+        except Exception as exc:
+            messagebox.showerror("Update failed", str(exc), parent=self)
+            return False
+        self.refresh()
+        self.status_var.set(f"Updated settings for {updated.name}")
+        return True
+
+    def _cancel_settings_overlay(self, entry: Optional[PluginEntry]) -> None:
+        if entry:
+            self.status_var.set(f"Settings closed for {entry.name}")
+        else:
+            self.status_var.set("Settings closed")
 
     def on_copy_error(self) -> None:
         identifier = self._selected_folder()
@@ -702,6 +746,13 @@ class PluginManagerApp(tk.Tk):
         return selection[0]
 
     def _update_buttons(self) -> None:
+        if hasattr(self, "settings_overlay") and self.settings_overlay.visible:
+            self.btn_enable.state(["disabled"])
+            self.btn_disable.state(["disabled"])
+            self.btn_settings.state(["disabled"])
+            self.btn_copy_error.state(["disabled"])
+            self.btn_diagnose.state(["disabled"])
+            return
         folder = self._selected_folder()
         if not folder:
             self.btn_enable.state(["disabled"])
@@ -779,49 +830,117 @@ class ImportDialog(tk.Toplevel):
         self.destroy()
 
 
-class PluginSettingsDialog(tk.Toplevel):
-    def __init__(self, parent: PluginManagerApp, entry: PluginEntry) -> None:
-        super().__init__(parent)
-        self.title(f"Settings · {entry.name}")
-        self.configure(bg="#1f1f24")
-        self.resizable(False, False)
-        self.transient(parent)
-        self.grab_set()
-        self.result: Optional[Dict[str, bool]] = None
+class PluginSettingsOverlay(tk.Frame):
+    def __init__(
+        self,
+        parent: PluginManagerApp,
+        *,
+        on_apply: Callable[[PluginEntry, Dict[str, bool]], bool],
+        on_cancel: Callable[[Optional[PluginEntry]], None],
+    ) -> None:
+        super().__init__(parent, bg="#000000", highlightthickness=0)
+        self.parent = parent
+        self._on_apply = on_apply
+        self._on_cancel = on_cancel
+        self.visible = False
+        self._entry: Optional[PluginEntry] = None
         self._feature_vars: Dict[str, tk.BooleanVar] = {}
 
-        frame = ttk.Frame(self, padding=16)
-        frame.pack(fill="both", expand=True)
+        self.place_forget()
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        self._card = ttk.Frame(self, padding=24, style="Overlay.TFrame")
+        self._card.place(relx=0.5, rely=0.5, anchor="center")
+
+        self._title_var = tk.StringVar(value="")
+        header = ttk.Frame(self._card)
+        header.pack(fill="x")
+        ttk.Label(header, textvariable=self._title_var, style="OverlayTitle.TLabel").pack(side="left")
+        ttk.Button(header, text="✕", command=self._handle_cancel).pack(side="right")
+
+        self._content = ttk.Frame(self._card)
+        self._content.pack(fill="both", expand=True, pady=(12, 0))
+
+        self._button_row = ttk.Frame(self._card)
+        self._button_row.pack(fill="x", pady=(18, 0))
+        self._cancel_btn = ttk.Button(self._button_row, text="Cancel", command=self._handle_cancel)
+        self._cancel_btn.pack(side="right")
+        self._save_btn = ttk.Button(self._button_row, text="Save", command=self._handle_save)
+        self._save_btn.pack(side="right", padx=(0, 8))
+
+        self.bind("<Button-1>", self._on_backdrop_click)
+        self._card.bind("<Button-1>", lambda _e: "break")
+
+    def present(self, entry: PluginEntry) -> None:
+        self._entry = entry
+        self._title_var.set(f"Settings · {entry.name}")
+        for child in self._content.winfo_children():
+            child.destroy()
+        self._feature_vars.clear()
 
         if not entry.features:
-            ttk.Label(frame, text="This plugin does not expose configurable features.").pack()
+            ttk.Label(
+                self._content,
+                text="This plugin does not expose configurable features.",
+                style="OverlayMessage.TLabel",
+            ).pack(anchor="w")
+            self._save_btn.configure(text="Close")
         else:
-            for index, feature in enumerate(entry.features):
-                var = tk.BooleanVar(value=feature.enabled)
+            self._save_btn.configure(text="Save")
+            for feature in entry.features:
+                var = tk.BooleanVar(master=self, value=feature.enabled)
                 self._feature_vars[feature.feature_id] = var
-                ttk.Checkbutton(frame, text=feature.name, variable=var).grid(row=index * 2, column=0, sticky="w")
+                ttk.Checkbutton(self._content, text=feature.name, variable=var).pack(anchor="w", pady=(0, 4))
                 description = feature.description.strip()
                 if description:
-                    ttk.Label(frame, text=description, wraplength=420, style="Status.TLabel").grid(
-                        row=index * 2 + 1, column=0, sticky="w", pady=(0, 8)
-                    )
-                else:
-                    ttk.Frame(frame).grid(row=index * 2 + 1, column=0, pady=(0, 8))
+                    ttk.Label(
+                        self._content,
+                        text=description,
+                        style="OverlayMessage.TLabel",
+                    ).pack(anchor="w", pady=(0, 10))
 
-        buttons = ttk.Frame(frame)
-        buttons.grid(row=len(entry.features) * 2 + 1, column=0, sticky="e", pady=(12, 0))
-        ttk.Button(buttons, text="Cancel", command=self.destroy).pack(side="right")
-        ttk.Button(buttons, text="Save", command=self._on_accept).pack(side="right", padx=(0, 8))
+        self.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.lift()
+        self.visible = True
+        self.focus_set()
+        self.bind_all("<Escape>", self._handle_escape)
+        self.parent._update_buttons()
 
-        self.bind("<Return>", lambda _e: self._on_accept())
-        self.bind("<Escape>", lambda _e: self.destroy())
+    def hide(self) -> None:
+        if not self.visible:
+            return
+        self.visible = False
+        self._entry = None
+        self._feature_vars.clear()
+        self.place_forget()
+        self.unbind_all("<Escape>")
+        self.parent._update_buttons()
 
-    def _on_accept(self) -> None:
+    # Event handlers ----------------------------------------------------
+    def _handle_save(self) -> None:
+        if not self._entry:
+            self.hide()
+            return
         if not self._feature_vars:
-            self.result = {}
-        else:
-            self.result = {key: bool(var.get()) for key, var in self._feature_vars.items()}
-        self.destroy()
+            self._on_cancel(self._entry)
+            self.hide()
+            return
+        states = {key: bool(var.get()) for key, var in self._feature_vars.items()}
+        if self._on_apply(self._entry, states):
+            self.hide()
+
+    def _handle_cancel(self) -> None:
+        entry = self._entry
+        self.hide()
+        self._on_cancel(entry)
+
+    def _handle_escape(self, _event) -> str:
+        self._handle_cancel()
+        return "break"
+
+    def _on_backdrop_click(self, _event) -> None:
+        self._handle_cancel()
 
 
 def main() -> None:
