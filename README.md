@@ -22,6 +22,26 @@ Sort Sims 4 mods with Modly – a single-file desktop assistant that scans, clas
 
 The main window lets you browse to your *Mods* directory, start a scan, and review suggested destinations for every package or script. Use the right-hand inspector to change a file’s category, toggle whether it will be moved, or batch-assign categories based on a keyword. When you are happy with the plan, click **Complete Sorting** to move the selected items into their target folders. The move log is saved in `.sims4_modsorter_moves.json`, enabling the **Undo Last** button to roll back the previous batch.
 
+### Default target layout
+
+Mods are mapped to a concise folder tree that keeps everything to a single level of nesting. The default destinations are:
+
+| Category | Target folder |
+| --- | --- |
+| Adult Script, Gameplay, Animation, Pose, CAS, BuildBuy, Override, Other | `Adult/…` (e.g. `Adult/Scripts`, `Adult/Gameplay`)
+| Script Mod, Gameplay Tuning | `Gameplay/Scripts`, `Gameplay/Tuning`
+| CAS Hair, Clothing, Makeup, Skin, Eyes, Accessories, Sliders | `CAS/…`
+| BuildBuy Object, Recolour | `BuildBuy/Objects`, `BuildBuy/Recolours`
+| Animation, Pose, Preset | `Visuals/Animations`, `Visuals/Poses`, `Visuals/Presets`
+| World | `World`
+| Override | `Overrides`
+| Utility Tool | `Utilities`
+| Archive | `Archives`
+| Other | `Misc`
+| Unknown | `Unsorted`
+
+You can still change any destination in the results grid before finalising a sort, but the rebuilt defaults keep related content together without creating deeply nested folder trees.
+
 ### Settings and themes
 
 Select the cog button in the toolbar to open the inline settings overlay. From there you can:
