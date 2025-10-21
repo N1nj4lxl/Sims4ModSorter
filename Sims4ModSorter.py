@@ -515,7 +515,13 @@ def flush_plugin_messages(app, channel: str) -> None:
         if not message:
             continue
         tag = prefix.get(level, "Plugin")
-        app.log(f"{tag}: {message}")
+        mapped_level = {
+            "error": "plugin_error",
+            "warn": "plugin_warning",
+            "warning": "plugin_warning",
+            "info": "plugin",
+        }.get(level, "plugin")
+        app.log(f"{tag}: {message}", level=mapped_level)
 
 
 # ---------------------------------------------------------------------------
@@ -786,7 +792,6 @@ class Sims4ModSorterApp(tk.Tk):
         self.btn_scan = ttk.Button(top, text="Scan", command=self.on_scan)
         self.btn_scan.pack(side="left", padx=4)
         ttk.Button(top, text="Export Plan", command=self.on_export).pack(side="left", padx=4)
-        ttk.Label(top, textvariable=self.status_var).pack(side="left", padx=12)
         settings_btn = ttk.Button(top, text="⚙", width=3, command=self.show_settings)
         self._pack_toolbar_button(settings_btn, button_id="settings", side="right", padx=0)
         status_btn = ttk.Button(top, text="Plugin Status", command=self.show_mod_status_popup)
@@ -887,9 +892,13 @@ class Sims4ModSorterApp(tk.Tk):
 
         bottom = ttk.Frame(root_container)
         bottom.pack(fill="x", padx=12, pady=8)
-        self.progress = ttk.Progressbar(bottom, orient="horizontal", mode="determinate")
-        self.progress.pack(fill="x", side="left", expand=True)
-        ttk.Button(bottom, text="Complete Sorting", command=self.on_complete).pack(side="right", padx=6)
+        progress_container = ttk.Frame(bottom)
+        progress_container.pack(side="left", fill="x", expand=True)
+        self.progress = ttk.Progressbar(progress_container, orient="horizontal", mode="determinate")
+        self.progress.pack(fill="x")
+        self.status_label = ttk.Label(progress_container, textvariable=self.status_var, anchor="w")
+        self.status_label.pack(fill="x", pady=(6, 0))
+        ttk.Button(bottom, text="Complete Sorting", command=self.on_complete).pack(side="right", padx=6, anchor="n")
 
         log_frame = ttk.Frame(root_container)
         log_frame.pack(fill="both", padx=12, pady=(0, 10))
@@ -904,6 +913,7 @@ class Sims4ModSorterApp(tk.Tk):
             fg=palette.get("fg", "#E6E6E6"),
         )
         self.log_text.pack(fill="both", expand=False)
+        self._configure_log_tags()
 
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
         self.tree.bind("<Double-1>", self.on_double_click)
@@ -1172,13 +1182,40 @@ class Sims4ModSorterApp(tk.Tk):
     def schedule_refresh(self) -> None:
         self._enqueue_ui(lambda: self._refresh_tree(preserve_selection=True))
 
+    def _configure_log_tags(self) -> None:
+        if not hasattr(self, "log_text"):
+            return
+        palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
+        base_fg = palette.get("fg", "#E6E6E6")
+        accent_fg = palette.get("accent", "#4C8BF5")
+        error_fg = "#FF6B6B"
+        warning_fg = "#FFB347"
+        self.log_text.tag_configure("info", foreground=base_fg)
+        self.log_text.tag_configure("plugin", foreground=accent_fg)
+        self.log_text.tag_configure("error", foreground=error_fg)
+        self.log_text.tag_configure("warning", foreground=warning_fg)
+
+    @staticmethod
+    def _resolve_log_tag(level: str) -> str:
+        value = (level or "info").lower()
+        if value in {"error", "critical"}:
+            return "error"
+        if value in {"warn", "warning"}:
+            return "warning"
+        if value.startswith("plugin"):
+            return "plugin"
+        return "info"
+
     def log(self, message: str, level: str = "info") -> None:
         timestamp = time.strftime("%H:%M:%S")
         prefix = ""
         if level and level.lower() != "info":
-            prefix = f"[{level.upper()}] "
+            display_level = level.replace("_", " ").upper()
+            prefix = f"[{display_level}] "
         self.log_text.configure(state="normal")
-        self.log_text.insert("end", f"[{timestamp}] {prefix}{message}\n")
+        entry = f"[{timestamp}] {prefix}{message}\n"
+        tag = self._resolve_log_tag(level)
+        self.log_text.insert("end", entry, (tag,))
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
@@ -1793,6 +1830,7 @@ class Sims4ModSorterApp(tk.Tk):
         self._build_style()
         palette = self._theme_cache
         self.log_text.configure(bg=palette.get("alt", "#1f2328"), fg=palette.get("fg", "#E6E6E6"))
+        self._configure_log_tags()
         if hasattr(self, "settings_sidebar"):
             self.settings_sidebar.configure(bg=palette.get("sel", "#2A2F3A"))
         scrim = getattr(self, "settings_scrim", None)
