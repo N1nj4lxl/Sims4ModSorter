@@ -1,0 +1,7 @@
+{
+  ".package": 0,
+  ".ts4script": 262144,
+  ".zip": 0,
+  "text_sidecar": 16384,
+  "zip_sample": {"max_files": 20, "prefer_small_under_kb": 64}
+}
