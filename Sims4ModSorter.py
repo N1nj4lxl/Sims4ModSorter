@@ -708,6 +708,7 @@ class Sims4ModSorterApp(tk.Tk):
         self._update_overlay_button_frame: Optional[ttk.Frame] = None
         self._update_overlay_details_btn: Optional[ttk.Button] = None
         self._update_overlay_visible: bool = False
+        self._auto_size_pending = False
 
         self.scan_folder_display = tk.StringVar(value="All folders")
         self.scan_folders: Optional[set[str]] = None
@@ -2215,10 +2216,25 @@ class Sims4ModSorterApp(tk.Tk):
             self.summary_var.set(f"Planned {len(self.items)} files | {fragment}")
         else:
             self.summary_var.set("No plan yet")
+        self._schedule_auto_size_columns()
+
+    def _schedule_auto_size_columns(self) -> None:
+        if self._auto_size_pending:
+            return
+        self._auto_size_pending = True
+        try:
+            self.after_idle(self._run_auto_size_columns)
+        except Exception:
+            self._auto_size_pending = False
+            self._auto_size_columns()
+
+    def _run_auto_size_columns(self) -> None:
+        self._auto_size_pending = False
         self._auto_size_columns()
 
     def _auto_size_columns(self) -> None:
-        if not getattr(self, "tree", None):
+        tree = getattr(self, "tree", None)
+        if not tree or not tree.winfo_exists():
             return
         font = getattr(self, "_tree_font", None)
         if font is None:
@@ -2234,21 +2250,35 @@ class Sims4ModSorterApp(tk.Tk):
             except tk.TclError:
                 heading_font = font
             self._tree_heading_font = heading_font
+        try:
+            display_columns = list(tree["displaycolumns"])
+        except Exception:
+            display_columns = []
+        if not display_columns or display_columns == ["#all"]:
+            target_columns = list(self._column_order)
+        else:
+            target_columns = [column for column in self._column_order if column in display_columns]
+        if not target_columns:
+            return
         padding = 24
         widths: Dict[str, int] = {}
-        for column in self._column_order:
-            heading = self.tree.heading(column).get("text", column)
+        column_indices = {column: index for index, column in enumerate(self._column_order)}
+        for column in target_columns:
+            heading = tree.heading(column).get("text", column)
             widths[column] = heading_font.measure(str(heading)) + padding
-        for iid in self.tree.get_children(""):
-            values = self.tree.item(iid, "values")
-            for index, column in enumerate(self._column_order):
-                value = values[index] if index < len(values) else ""
-                width = font.measure(str(value)) + padding
+        for iid in tree.get_children(""):
+            values = tree.item(iid, "values")
+            for column in target_columns:
+                index = column_indices.get(column)
+                if index is None or index >= len(values):
+                    continue
+                width = font.measure(str(values[index])) + padding
                 if width > widths[column]:
                     widths[column] = width
-        for column, width in widths.items():
+        for column in target_columns:
+            width = widths.get(column, 0)
             minimum = 36 if column in {"inc", "linked"} else 60
-            self.tree.column(column, width=max(minimum, int(width)), stretch=False)
+            tree.column(column, width=max(minimum, int(width)), stretch=False)
 
     # ------------------------------------------------------------------
     # Tooltip helpers
