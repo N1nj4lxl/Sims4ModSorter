@@ -1,7 +1,17 @@
 {
   "authors": {
     "deaderpool": {"bias": "Script Mod:MCCC", "boost": 0.25},
-    "turbodriver": {"bias": "Adult:WickedWhims", "boost": 0.3}
+    "turbodriver": {"bias": "Adult:WickedWhims", "boost": 0.3},
+    "onizu": {"bias": "Adult", "boost": 0.3},
+    "amozidan22": {"bias": "Adult", "boost": 0.3},
+    "oll": {"bias": "Adult", "boost": 0.3},
+    "nisak": {"bias": "Adult", "boost": 0.3},
+    "cherrypie": {"bias": "Adult", "boost": 0.3},
+    "chingyu": {"bias": "Adult", "boost": 0.3},
+    "khlas": {"bias": "Adult", "boost": 0.3},
+    "lychee": {"bias": "Adult", "boost": 0.3},
+    "alchemist": {"bias": "Adult", "boost": 0.3},
+    "falsehope": {"bias": "Adult", "boost": 0.3}
   },
   "packs": {
     "mc_command_center": {"bias": "Script Mod:MCCC"},
