@@ -12,6 +12,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
+
+def _env_flag(name: str) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return False
+    value = value.strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+_SCAN_DEBUG = _env_flag("SIMS4_SCANNER_DEBUG")
+_debug_lock = threading.Lock()
+
+
+def _debug_log(message: str) -> None:
+    if not _SCAN_DEBUG:
+        return
+    with _debug_lock:
+        print(f"[scanner] {message}")
+
 import zlib
 
 
@@ -398,6 +417,7 @@ class HeaderSignal:
     notes: List[str] = field(default_factory=list)
     family: Optional[str] = None
     supported: set[str] = field(default_factory=set)
+    handler: str = "unknown"
 
     def supports(self, category: str) -> bool:
         if not category:
@@ -425,6 +445,7 @@ class ScanFinding:
     needs_enrich: bool
     disabled: bool
     extras: Dict[str, str] = field(default_factory=dict)
+    handler: str = ""
 
     def to_payload(self) -> Dict[str, object]:
         return {
@@ -439,6 +460,7 @@ class ScanFinding:
             "needs_enrich": self.needs_enrich,
             "disabled": self.disabled,
             "extras": self.extras,
+            "handler": self.handler,
         }
 
     @classmethod
@@ -455,6 +477,7 @@ class ScanFinding:
             needs_enrich=bool(payload.get("needs_enrich", False)),
             disabled=bool(payload.get("disabled", False)),
             extras={str(k): str(v) for k, v in dict(payload.get("extras", {})).items()},
+            handler=str(payload.get("handler", "")),
         )
 
 
@@ -704,7 +727,7 @@ class NameHeuristics:
         name = path.name
         tokens = _tokenise(name)
         folder_tokens = _tokenise_path_parts(path.parent)
-        ext, _ = normalize_extension(path.suffix)
+        ext, _ = _effective_extension(path)
 
         category = "Archive" if ext in ARCHIVE_EXTS else "Script Mod" if ext in SCRIPT_EXTS else "Package"
         confidence = 0.4 if category == "Package" else 0.5
@@ -803,14 +826,16 @@ class NameHeuristics:
 class HeaderProbe:
     @staticmethod
     def run(path: Path, ctx: ScanContext) -> HeaderSignal:
-        ext, _ = normalize_extension(path.suffix)
+        ext, _ = _effective_extension(path)
         if ext == ".package":
-            return DbpfProbe.inspect(path)
-        if ext in {".ts4script", ".t4script"}:
-            return Ts4ScriptProbe.inspect(path)
-        if ext == ".zip":
-            return ZipProbe.inspect(path, ctx)
-        return HeaderSignal(category=None, confidence=0.0, decisive=False)
+            signal = DbpfProbe.inspect(path)
+        elif ext in {".ts4script", ".t4script"}:
+            signal = Ts4ScriptProbe.inspect(path)
+        elif ext == ".zip":
+            signal = ZipProbe.inspect(path, ctx)
+        else:
+            signal = HeaderSignal(category=None, confidence=0.0, decisive=False, handler="none")
+        return signal
 
 
 class DbpfProbe:
@@ -818,7 +843,13 @@ class DbpfProbe:
     def inspect(path: Path) -> HeaderSignal:
         types = dbpf_scan_types(path)
         if not types:
-            return HeaderSignal(category=None, confidence=0.0, decisive=False, notes=["No DBPF index"])
+            return HeaderSignal(
+                category=None,
+                confidence=0.0,
+                decisive=False,
+                notes=["No DBPF index"],
+                handler="dbpf",
+            )
         tags = {TYPE_IDS.get(key, hex(key)) for key in types}
         notes = [
             "DBPF types: "
@@ -832,6 +863,7 @@ class DbpfProbe:
                     decisive=True,
                     tags=tags,
                     notes=notes,
+                    handler="dbpf",
                 )
         supported = set()
         if any(TYPE_IDS.get(key, "").startswith("CASP") for key in types):
@@ -847,6 +879,7 @@ class DbpfProbe:
             tags=tags,
             notes=notes,
             supported=supported,
+            handler="dbpf",
         )
 
 
@@ -857,7 +890,14 @@ class ZipProbe:
             with zipfile.ZipFile(path, "r") as archive:
                 infos = archive.infolist()
         except Exception as exc:
-            return HeaderSignal(category=None, confidence=0.0, decisive=False, notes=[f"Zip read error: {exc}"])
+            _debug_log(f"Zip probe exception for {path.name}: {exc}")
+            return HeaderSignal(
+                category=None,
+                confidence=0.0,
+                decisive=False,
+                notes=[f"Zip read error: {exc}"],
+                handler="zip",
+            )
 
         ext_counts = Counter()
         names = []
@@ -930,6 +970,7 @@ class ZipProbe:
             tags=tags,
             notes=notes,
             supported=supported,
+            handler="zip",
         )
 
 
@@ -954,7 +995,14 @@ class Ts4ScriptProbe:
                         module = name.split(".pyc")[0].split("/")[-1]
                         modules.add(module.lower())
         except Exception as exc:
-            return HeaderSignal(category="Script Mod", confidence=0.5, decisive=False, notes=[f"ts4script error: {exc}"])
+            _debug_log(f"TS4Script probe exception for {path.name}: {exc}")
+            return HeaderSignal(
+                category="Script Mod",
+                confidence=0.5,
+                decisive=False,
+                notes=[f"ts4script error: {exc}"],
+                handler="ts4script",
+            )
 
         family: Optional[str] = None
         for module in modules:
@@ -969,6 +1017,7 @@ class Ts4ScriptProbe:
                         tags={"module:" + module},
                         notes=["Modules: " + ", ".join(sorted(modules))],
                         family=fam,
+                        handler="ts4script",
                     )
                 family = bias
         return HeaderSignal(
@@ -978,13 +1027,14 @@ class Ts4ScriptProbe:
             tags={"module:" + mod for mod in modules},
             notes=["Modules: " + ", ".join(sorted(modules))] if modules else ["No python modules"],
             family=family,
+            handler="ts4script",
         )
 
 
 class ContentPeek:
     @staticmethod
     def sample(path: Path, budgets: Dict[str, object], automaton: KeywordAutomaton) -> Optional[PeekSignal]:
-        ext, _ = normalize_extension(path.suffix)
+        ext, _ = _effective_extension(path)
         budget = budgets.get(ext, 0)
         if not budget:
             return None
@@ -1110,6 +1160,7 @@ class Classifier:
             needs_enrich=needs_enrich,
             disabled=disabled,
             extras={"adult_hits": ", ".join(sorted(adult_hits))} if adult_hits else {},
+            handler=head_sig.handler,
         )
         return finding
 
@@ -1328,20 +1379,25 @@ def scan_folder(
 
     ctx = _build_context()
     files: List[Path] = []
+    debug_discovery: Optional[Counter[str]] = Counter() if _SCAN_DEBUG else None
     results: List[ScanFinding]
     errors: List[str]
     try:
         scheduler = Scheduler(ctx)
         for path in scheduler.iter_files(root, recurse):
             name = path.name
-            ext_raw = path.suffix
-            ext, is_disabled_ext = normalize_extension(ext_raw)
+            suffixes_lower = [suffix.lower() for suffix in path.suffixes]
+            actual_ext, is_disabled_ext = _effective_extension(path)
+            canonical_ext = actual_ext or (suffixes_lower[-1] if suffixes_lower else "")
             lowered_actual = name.lower()
-            if allowed_exts_set is not None and ext not in allowed_exts_set:
+            if allowed_exts_set is not None and canonical_ext not in allowed_exts_set:
                 if progress_cb:
                     progress_cb(len(files) + 1, 0, path, "filtered")
                 continue
-            if ignore_exts_set and (ext in ignore_exts_set or ext_raw.lower() in ignore_exts_set):
+            if ignore_exts_set and (
+                canonical_ext in ignore_exts_set
+                or any(suffix in ignore_exts_set for suffix in suffixes_lower)
+            ):
                 if progress_cb:
                     progress_cb(len(files) + 1, 0, path, "ignored")
                 continue
@@ -1369,8 +1425,21 @@ def scan_folder(
                         progress_cb(len(files) + 1, 0, path, "filtered")
                     continue
             files.append(path)
+            if debug_discovery is not None:
+                key = canonical_ext or "<noext>"
+                debug_discovery[key] += 1
 
         results, errors = scheduler.scan(files, progress_cb)
+        if debug_discovery is not None:
+            summary = ", ".join(
+                f"{ext}: {count}" for ext, count in sorted(debug_discovery.items(), key=lambda kv: kv[0])
+            )
+            _debug_log(f"Discovery counts -> {summary}")
+            handler_counts = Counter((finding.handler or "unknown") for finding in results)
+            handler_summary = ", ".join(
+                f"{handler}: {count}" for handler, count in sorted(handler_counts.items(), key=lambda kv: kv[0])
+            )
+            _debug_log(f"Handler selection -> {handler_summary}")
     finally:
         ctx.pool.shutdown(wait=True)
         ctx.cache.close()
@@ -1405,6 +1474,18 @@ def scan_folder(
             disabled_items.append(item)
         else:
             items.append(item)
+
+    if _SCAN_DEBUG and items:
+        category_counts = Counter(item.guess_type for item in items)
+        route_counts = Counter(item.target_folder for item in items)
+        category_summary = ", ".join(
+            f"{category}: {count}" for category, count in sorted(category_counts.items(), key=lambda kv: kv[0])
+        )
+        route_summary = ", ".join(
+            f"{route}: {count}" for route, count in sorted(route_counts.items(), key=lambda kv: kv[0])
+        )
+        _debug_log(f"Classification categories -> {category_summary}")
+        _debug_log(f"Routing destinations -> {route_summary}")
 
     items.sort(
         key=lambda item: (
@@ -1505,7 +1586,8 @@ def dbpf_scan_types(path: Path) -> Dict[int, int]:
                 if rtype is None:
                     continue
                 result[rtype] = result.get(rtype, 0) + 1
-    except Exception:
+    except Exception as exc:
+        _debug_log(f"DBPF probe exception for {path.name}: {exc}")
         return {}
     return result
 
