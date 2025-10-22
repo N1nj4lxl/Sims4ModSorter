@@ -1,0 +1,21 @@
+{
+  "authors": {
+    "deaderpool": {"bias": "Script Mod:MCCC", "boost": 0.25},
+    "turbodriver": {"bias": "Adult:WickedWhims", "boost": 0.3}
+  },
+  "packs": {
+    "mc_command_center": {"bias": "Script Mod:MCCC"},
+    "deviousdesires": {"bias": "Adult:DeviousDesires"}
+  },
+  "folders": {
+    "_recolors": {"bias": "CAS:Recolor", "boost": 0.15}
+  },
+  "routing": {
+    "CAS": "Sorted/CAS",
+    "BuildBuy": "Sorted/BuildBuy",
+    "Script Mod": "Sorted/ScriptMods",
+    "Adult": "Sorted/Adult",
+    "Mixed": "Sorted/Mixed",
+    "Resources": "Sorted/Resources"
+  }
+}
