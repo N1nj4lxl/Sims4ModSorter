@@ -22,6 +22,8 @@ import urllib.error
 import urllib.request
 import webbrowser
 import zipfile
+from datetime import datetime
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from types import MethodType
@@ -616,32 +618,166 @@ def save_moves_log(mods_root: Path, moves: List[Dict[str, str]]) -> None:
             history = []
     except Exception:
         history = []
-    history.append({"ts": time.time(), "moves": moves})
+    timestamp = time.time()
+    moved_count = len(moves)
+    sample_moves: List[Dict[str, str]] = []
+    for move in moves[:5]:
+        if not isinstance(move, dict):
+            continue
+        src = move.get("from", "")
+        dst = move.get("to", "")
+        sample_moves.append({"from": src, "to": dst})
+    source_folders: Set[str] = set()
+    target_folders: Set[str] = set()
+    for move in moves:
+        if not isinstance(move, dict):
+            continue
+        src_value = move.get("from")
+        dst_value = move.get("to")
+        if src_value:
+            try:
+                source_folders.add(str(Path(src_value).parent))
+            except Exception:
+                source_folders.add(str(src_value))
+        if dst_value:
+            try:
+                target_folders.add(str(Path(dst_value).parent))
+            except Exception:
+                target_folders.add(str(dst_value))
+    entry_id = str(uuid.uuid4())
+    display_time = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+    history.append(
+        {
+            "id": entry_id,
+            "ts": timestamp,
+            "timestamp": timestamp,
+            "label": display_time,
+            "summary": f"Moved {moved_count} file(s)",
+            "counts": {
+                "moved": moved_count,
+                "sources": len(source_folders),
+                "targets": len(target_folders),
+            },
+            "sample_moves": sample_moves,
+            "moves": moves,
+        }
+    )
     try:
         log_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
     except Exception:
         pass
 
 
-def undo_last_moves(mods_root: Path) -> Tuple[int, int, List[str]]:
+def load_move_history(mods_root: Path) -> List[Dict[str, object]]:
     log_path = mods_root / LOG_NAME
     if not log_path.exists():
-        return 0, 0, ["No log found"]
+        return []
+    try:
+        history = json.loads(log_path.read_text(encoding="utf-8"))
+        if not isinstance(history, list):
+            return []
+    except Exception:
+        return []
+    entries: List[Dict[str, object]] = []
+    for index, raw in enumerate(history):
+        if not isinstance(raw, dict):
+            continue
+        moves = raw.get("moves", [])
+        if not isinstance(moves, list):
+            moves = []
+        timestamp_value = raw.get("timestamp") or raw.get("ts") or 0.0
+        try:
+            timestamp = float(timestamp_value)
+        except (TypeError, ValueError):
+            timestamp = 0.0
+        try:
+            display_time = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S") if timestamp else "Unknown"
+        except Exception:
+            display_time = "Unknown"
+        counts = raw.get("counts") if isinstance(raw.get("counts"), dict) else {}
+        moved_count = counts.get("moved") if isinstance(counts.get("moved"), int) else len(moves)
+        sample_moves = raw.get("sample_moves") if isinstance(raw.get("sample_moves"), list) else []
+        if not sample_moves:
+            for move in moves[:5]:
+                if not isinstance(move, dict):
+                    continue
+                sample_moves.append({"from": move.get("from", ""), "to": move.get("to", "")})
+        entry_id = raw.get("id") or raw.get("uid") or f"entry-{index}-{int(timestamp)}"
+        if not isinstance(entry_id, str):
+            entry_id = str(entry_id)
+        sample_display: List[str] = []
+        for move in sample_moves:
+            if not isinstance(move, dict):
+                continue
+            dest = move.get("to") or ""
+            src = move.get("from") or ""
+            display = dest or src
+            if display:
+                try:
+                    display = Path(display).name or display
+                except Exception:
+                    pass
+                sample_display.append(display)
+        entry = {
+            "id": entry_id,
+            "history_index": index,
+            "timestamp": timestamp,
+            "display_time": raw.get("label") if isinstance(raw.get("label"), str) else display_time,
+            "summary": raw.get("summary") if isinstance(raw.get("summary"), str) else f"Moved {moved_count} file(s)",
+            "moved_count": moved_count,
+            "counts": counts if counts else {"moved": moved_count},
+            "sample_moves": sample_moves,
+            "sample_display": sample_display,
+            "moves": moves,
+        }
+        entries.append(entry)
+    entries.sort(key=lambda entry: entry.get("timestamp", 0.0), reverse=True)
+    return entries
+
+
+def undo_moves(mods_root: Path, entry_identifier: Optional[Union[str, int]] = None) -> Tuple[int, int, List[str], Optional[str]]:
+    log_path = mods_root / LOG_NAME
+    if not log_path.exists():
+        return 0, 0, ["No log found"], None
     try:
         history = json.loads(log_path.read_text(encoding="utf-8"))
         if not isinstance(history, list) or not history:
-            return 0, 0, ["No moves recorded"]
+            return 0, 0, ["No moves recorded"], None
     except Exception:
-        return 0, 0, ["Log unreadable"]
-    last = history.pop()
-    moves = last.get("moves", []) if isinstance(last, dict) else []
+        return 0, 0, ["Log unreadable"], None
+    target_index: Optional[int] = None
+    if isinstance(entry_identifier, int):
+        if -len(history) <= entry_identifier < len(history):
+            target_index = entry_identifier % len(history)
+    elif isinstance(entry_identifier, str):
+        for idx, item in enumerate(history):
+            if isinstance(item, dict) and str(item.get("id")) == entry_identifier:
+                target_index = idx
+                break
+    if target_index is None:
+        target_index = len(history) - 1
+    if not (0 <= target_index < len(history)):
+        return 0, 0, ["Requested history entry not found"], None
+    selected = history.pop(target_index)
+    moves = selected.get("moves", []) if isinstance(selected, dict) else []
+    label = None
+    if isinstance(selected, dict):
+        label = selected.get("label")
+        if not isinstance(label, str):
+            summary = selected.get("summary")
+            if isinstance(summary, str):
+                label = summary
     undone = 0
     failed = 0
     errors: List[str] = []
     for move in reversed(moves):
-        src = Path(move.get("to", ""))
-        dst = Path(move.get("from", ""))
-        if not src:
+        if not isinstance(move, dict):
+            continue
+        src_path = move.get("to", "")
+        dst_path = move.get("from", "")
+        src = Path(src_path) if src_path else None
+        dst = Path(dst_path) if dst_path else None
+        if not src or not dst:
             continue
         try:
             if not src.exists():
@@ -658,11 +794,17 @@ def undo_last_moves(mods_root: Path) -> Tuple[int, int, List[str]]:
         except Exception as exc:
             errors.append(f"Undo error for {src.name}: {exc}")
             failed += 1
+    if moves and undone == 0:
+        history.insert(target_index, selected)
     try:
         log_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
     except Exception:
         pass
-    return undone, failed, errors
+    return undone, failed, errors, label
+
+
+def undo_last_moves(mods_root: Path) -> Tuple[int, int, List[str], Optional[str]]:
+    return undo_moves(mods_root)
 
 
 # ---------------------------------------------------------------------------
@@ -743,6 +885,12 @@ class Sims4ModSorterApp(tk.Tk):
         self._update_mode_advanced_radio: Optional[ttk.Radiobutton] = None
         self._update_mode_description_label: Optional[ttk.Label] = None
         self._auto_size_pending = False
+
+        self._history_window: Optional[tk.Toplevel] = None
+        self._history_tree: Optional[ttk.Treeview] = None
+        self._history_entries: Dict[str, Dict[str, object]] = {}
+        self._history_preview_btn: Optional[ttk.Button] = None
+        self._history_undo_btn: Optional[ttk.Button] = None
 
         self.scan_folder_display = tk.StringVar(value="All folders")
         self.scan_folders: Optional[set[str]] = None
@@ -833,6 +981,8 @@ class Sims4ModSorterApp(tk.Tk):
         self._pack_toolbar_button(status_btn, button_id="plugin_status", side="right", padx=6)
         undo_btn = ttk.Button(top, text="Undo Last", command=self.on_undo)
         self._pack_toolbar_button(undo_btn, button_id="undo_last", side="right", padx=6)
+        history_btn = ttk.Button(top, text="History", command=self.show_move_history)
+        self._pack_toolbar_button(history_btn, button_id="move_history", side="right", padx=6)
         self._build_plugin_toolbar_buttons(top)
 
         mid = ttk.Frame(root_container)
@@ -2684,18 +2834,261 @@ for _ in range(10):
 
     def on_undo(self) -> None:
         mods_root = Path(self.mods_root.get())
+        self.status_var.set("Undoing moves…")
 
         def worker() -> None:
-            undone, failed, errors = undo_last_moves(mods_root)
-            self._enqueue_ui(lambda: self._handle_undo_result(undone, failed, errors))
+            undone, failed, errors, label = undo_last_moves(mods_root)
+            self._enqueue_ui(lambda: self._handle_undo_result(undone, failed, errors, label))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _handle_undo_result(self, undone: int, failed: int, errors: List[str]) -> None:
-        self.log(f"Undo: {undone} restored, {failed} failed")
+    def _handle_undo_result(
+        self, undone: int, failed: int, errors: List[str], label: Optional[str]
+    ) -> None:
+        context = label or "latest batch"
+        status_message = f"Undo ({context}): {undone} restored, {failed} failed"
+        self.status_var.set(status_message)
+        self.summary_var.set(status_message)
+        self.log(status_message)
         for error in errors[:50]:
             self.log(error)
+        if failed:
+            error_body = "\n".join(errors[:10]) if errors else "Unknown error"
+            messagebox.showerror(
+                "Undo Issues",
+                f"Unable to restore {failed} file(s).\n{error_body}",
+                parent=self,
+            )
         self.on_scan()
+
+    def show_move_history(self) -> None:
+        mods_root = Path(self.mods_root.get())
+        entries = load_move_history(mods_root)
+        if not entries and (
+            not self._history_window or not self._history_window.winfo_exists()
+        ):
+            messagebox.showinfo(
+                "Move History",
+                "No move batches have been recorded yet.",
+                parent=self,
+            )
+            return
+        if not self._history_window or not self._history_window.winfo_exists():
+            window = tk.Toplevel(self)
+            window.title("Move History")
+            window.transient(self)
+            window.grab_set()
+            container = ttk.Frame(window, padding=12)
+            container.pack(fill="both", expand=True)
+            tree = ttk.Treeview(
+                container,
+                columns=("timestamp", "moved", "samples"),
+                show="headings",
+                selectmode="browse",
+            )
+            tree.heading("timestamp", text="Timestamp")
+            tree.heading("moved", text="Files")
+            tree.heading("samples", text="Sample Destinations")
+            tree.column("timestamp", width=190, anchor="w")
+            tree.column("moved", width=60, anchor="center")
+            tree.column("samples", width=420, anchor="w")
+            tree.pack(fill="both", expand=True)
+            tree.bind("<<TreeviewSelect>>", lambda *_: self._update_history_button_states())
+            self._history_tree = tree
+            button_row = ttk.Frame(container)
+            button_row.pack(fill="x", pady=(10, 0))
+            preview_btn = ttk.Button(
+                button_row, text="Preview", command=self._preview_history_selection
+            )
+            undo_btn = ttk.Button(
+                button_row, text="Undo Selected", command=self._undo_history_selection
+            )
+            close_btn = ttk.Button(button_row, text="Close", command=self._close_history_window)
+            preview_btn.pack(side="left")
+            undo_btn.pack(side="left", padx=(8, 0))
+            close_btn.pack(side="right")
+            self._history_preview_btn = preview_btn
+            self._history_undo_btn = undo_btn
+            self._history_window = window
+            window.protocol("WM_DELETE_WINDOW", self._close_history_window)
+            window.bind("<Destroy>", self._on_history_destroy)
+            self._update_history_button_states()
+            center_window(window)
+        else:
+            try:
+                self._history_window.deiconify()
+                self._history_window.lift()
+                self._history_window.focus_set()
+            except Exception:
+                pass
+        self._refresh_move_history(entries)
+
+    def _refresh_move_history(self, entries: Optional[List[Dict[str, object]]] = None) -> None:
+        if not self._history_tree or not self._history_tree.winfo_exists():
+            return
+        if entries is None:
+            entries = load_move_history(Path(self.mods_root.get()))
+        tree = self._history_tree
+        tree.delete(*tree.get_children())
+        self._history_entries = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            row_id = entry.get("id")
+            if not isinstance(row_id, str):
+                row_id = str(row_id)
+            entry["row_id"] = row_id
+            self._history_entries[row_id] = entry
+            samples = entry.get("sample_display") or []
+            sample_text = ", ".join(samples[:5])
+            tree.insert(
+                "",
+                "end",
+                iid=row_id,
+                values=(
+                    entry.get("display_time", "Unknown"),
+                    entry.get("moved_count", 0),
+                    sample_text,
+                ),
+            )
+        if entries:
+            first_row = entries[0]
+            row_id = first_row.get("row_id")
+            if isinstance(row_id, str):
+                tree.selection_set(row_id)
+                tree.focus(row_id)
+        self._update_history_button_states()
+
+    def _update_history_button_states(self) -> None:
+        has_selection = bool(self._history_tree and self._history_tree.selection())
+        if self._history_preview_btn:
+            if has_selection:
+                self._history_preview_btn.state(["!disabled"])
+            else:
+                self._history_preview_btn.state(["disabled"])
+        if self._history_undo_btn:
+            if has_selection:
+                self._history_undo_btn.state(["!disabled"])
+            else:
+                self._history_undo_btn.state(["disabled"])
+
+    def _preview_history_selection(self) -> None:
+        if not self._history_tree:
+            return
+        selection = self._history_tree.selection()
+        if not selection:
+            messagebox.showinfo(
+                "Preview Move Batch",
+                "Select a move batch to preview.",
+                parent=self._history_window or self,
+            )
+            return
+        entry = self._history_entries.get(selection[0])
+        if not entry:
+            return
+        preview_parent = self._history_window or self
+        preview = tk.Toplevel(preview_parent)
+        preview.title(f"Batch Preview ({entry.get('display_time', 'Unknown')})")
+        preview.transient(preview_parent)
+        summary = entry.get("summary", "Move batch")
+        counts = entry.get("counts") if isinstance(entry.get("counts"), dict) else {}
+        extra_bits: List[str] = []
+        sources = counts.get("sources")
+        targets = counts.get("targets")
+        if isinstance(sources, int):
+            extra_bits.append(f"Sources: {sources}")
+        if isinstance(targets, int):
+            extra_bits.append(f"Targets: {targets}")
+        header_text = summary
+        if extra_bits:
+            header_text = f"{summary} ({', '.join(extra_bits)})"
+        ttk.Label(preview, text=header_text, padding=(12, 12, 12, 4)).pack(anchor="w")
+        text_frame = ttk.Frame(preview, padding=(12, 0, 12, 12))
+        text_frame.pack(fill="both", expand=True)
+        text_widget = tk.Text(text_frame, height=18, wrap="none")
+        text_widget.pack(side="left", fill="both", expand=True)
+        scroll = ttk.Scrollbar(text_frame, orient="vertical", command=text_widget.yview)
+        scroll.pack(side="right", fill="y")
+        text_widget.configure(yscrollcommand=scroll.set)
+        moves = entry.get("moves") if isinstance(entry.get("moves"), list) else []
+        max_preview = 200
+        for idx, move in enumerate(moves[:max_preview], start=1):
+            if not isinstance(move, dict):
+                continue
+            src = move.get("from", "")
+            dst = move.get("to", "")
+            text_widget.insert("end", f"{idx}. {src} -> {dst}\n")
+        if isinstance(moves, list) and len(moves) > max_preview:
+            text_widget.insert(
+                "end",
+                f"… {len(moves) - max_preview} additional move(s) not shown.\n",
+            )
+        text_widget.configure(state="disabled")
+        ttk.Button(preview, text="Close", command=preview.destroy).pack(pady=(0, 12))
+        center_window(preview)
+
+    def _undo_history_selection(self) -> None:
+        if not self._history_tree:
+            return
+        selection = self._history_tree.selection()
+        if not selection:
+            messagebox.showinfo(
+                "Undo Move Batch",
+                "Select a move batch to undo.",
+                parent=self._history_window or self,
+            )
+            return
+        entry = self._history_entries.get(selection[0])
+        if not entry:
+            messagebox.showerror(
+                "Undo Move Batch",
+                "The selected history entry could not be located.",
+                parent=self._history_window or self,
+            )
+            return
+        moved_count = entry.get("moved_count", 0)
+        label = entry.get("display_time", "this batch")
+        if not messagebox.askyesno(
+            "Undo Move Batch",
+            f"Restore {moved_count} file(s) from {label}?",
+            parent=self._history_window or self,
+        ):
+            return
+        mods_root = Path(self.mods_root.get())
+        identifier: Optional[Union[str, int]]
+        history_index = entry.get("history_index")
+        if isinstance(history_index, int):
+            identifier = history_index
+        else:
+            entry_id = entry.get("id")
+            identifier = entry_id if isinstance(entry_id, str) and entry_id else None
+        self.status_var.set("Undoing selected batch…")
+
+        def worker() -> None:
+            undone, failed, errors, undo_label = undo_moves(mods_root, identifier)
+            self._enqueue_ui(
+                lambda: self._handle_history_undo_result(undone, failed, errors, undo_label)
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _handle_history_undo_result(
+        self, undone: int, failed: int, errors: List[str], label: Optional[str]
+    ) -> None:
+        self._handle_undo_result(undone, failed, errors, label)
+        self._refresh_move_history()
+
+    def _close_history_window(self) -> None:
+        if self._history_window and self._history_window.winfo_exists():
+            self._history_window.destroy()
+
+    def _on_history_destroy(self, event: tk.Event) -> None:
+        if event.widget is self._history_window:
+            self._history_window = None
+            self._history_tree = None
+            self._history_entries = {}
+            self._history_preview_btn = None
+            self._history_undo_btn = None
 
     def on_export(self) -> None:
         if not self.items:
