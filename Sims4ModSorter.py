@@ -1492,7 +1492,7 @@ class Sims4ModSorterApp(tk.Tk):
         self._hide_update_overlay()
         self.log(f"Update downloaded to {target_path}")
         try:
-            replaced = self._install_update_package(target_path)
+            new_install_path, copied = self._install_update_package(target_path)
         except zipfile.BadZipFile as exc:
             self.log(f"Downloaded update is not a valid ZIP archive: {exc}", level="error")
             messagebox.showerror(
@@ -1510,24 +1510,29 @@ class Sims4ModSorterApp(tk.Tk):
             )
             return
 
-        files_message = (
-            f"Replaced {replaced} file{'s' if replaced != 1 else ''}." if replaced > 0 else "No files needed to be replaced."
+        summary = (
+            "The update package was downloaded and installed successfully.\n"
+            f"Copied {copied} file{'s' if copied != 1 else ''} into the new installation.\n"
+            "The new version will launch automatically and this window will close."
         )
-        messagebox.showinfo(
-            "Update Installed",
-            (
-                "The update package was downloaded and installed successfully.\n"
-                f"{files_message}\n"
-                "Please restart Sims4 Mod Sorter to finish applying the update.\n\n"
-                f"The downloaded package is saved at: {target_path}"
-            ),
-            parent=self,
-        )
+        messagebox.showinfo("Update Installed", summary, parent=self)
 
-    def _install_update_package(self, package_path: Path) -> int:
+        if self._launch_new_installation(new_install_path):
+            self._schedule_update_cleanup(Path(__file__).resolve().parent, new_install_path)
+            self.after(500, self._shutdown_after_update)
+        else:
+            messagebox.showwarning(
+                "Update Installed",
+                (
+                    "The update was installed but the new version could not be launched automatically.\n"
+                    "Please start the new installation manually."
+                ),
+                parent=self,
+            )
+
+    def _install_update_package(self, package_path: Path) -> Tuple[Path, int]:
         self.log(f"Installing update from {package_path}")
         app_root = Path(__file__).resolve().parent
-        replaced_files = 0
 
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -1535,15 +1540,36 @@ class Sims4ModSorterApp(tk.Tk):
                 archive.extractall(temp_path)
 
             extracted_root = self._resolve_update_root(temp_path)
-            replaced_files = self._copy_update_contents(extracted_root, app_root)
+            new_install_path, copied = self._prepare_new_installation(extracted_root, app_root)
 
-        return replaced_files
+        return new_install_path, copied
 
     def _resolve_update_root(self, extracted_root: Path) -> Path:
         candidates = [p for p in extracted_root.iterdir() if p.name != "__MACOSX"]
         if len(candidates) == 1 and candidates[0].is_dir():
             return candidates[0]
         return extracted_root
+
+    def _prepare_new_installation(self, source: Path, current_root: Path) -> Tuple[Path, int]:
+        parent = current_root.parent
+        base_name = source.name or current_root.name
+        destination = self._next_installation_path(parent, base_name, current_root)
+        destination.mkdir(parents=True, exist_ok=False)
+        copied = self._copy_update_contents(source, destination)
+        preserve = self._identify_preserve_entries(current_root)
+        self._copy_preserved_entries(current_root, destination, preserve)
+        return destination, copied
+
+    def _next_installation_path(self, parent: Path, base_name: str, current_root: Path) -> Path:
+        candidate = parent / base_name
+        if candidate.resolve() == current_root:
+            base_name = f"{base_name}_new"
+            candidate = parent / base_name
+        index = 1
+        while candidate.exists():
+            candidate = parent / f"{base_name}_{index}"
+            index += 1
+        return candidate
 
     def _copy_update_contents(self, source: Path, destination: Path) -> int:
         replaced = 0
@@ -1563,6 +1589,170 @@ class Sims4ModSorterApp(tk.Tk):
                 replaced += 1
 
         return replaced
+
+    def _launch_new_installation(self, new_install_path: Path) -> bool:
+        current_root = Path(__file__).resolve().parent
+        launcher_path = Path(sys.argv[0]).resolve()
+        candidates: List[Path] = []
+        try:
+            rel_launcher = launcher_path.relative_to(current_root)
+        except Exception:
+            rel_launcher = None
+        if rel_launcher:
+            candidate = new_install_path / rel_launcher
+            if candidate.exists():
+                candidates.append(candidate)
+
+        fallback_names = [launcher_path.name, "Sims4ModSorter.exe", "Sims4ModSorter.py"]
+        seen: set[Path] = set()
+        for candidate in candidates:
+            seen.add(candidate.resolve())
+        for name in fallback_names:
+            if not name:
+                continue
+            candidate = new_install_path / name
+            if candidate.exists():
+                resolved = candidate.resolve()
+                if resolved not in seen:
+                    candidates.append(candidate)
+                    seen.add(resolved)
+
+        for candidate in candidates:
+            try:
+                if candidate.is_dir():
+                    continue
+                suffix = candidate.suffix.lower()
+                if suffix in {".py", ".pyw"}:
+                    python = sys.executable
+                    if python and Path(python).exists():
+                        subprocess.Popen([python, str(candidate)], cwd=str(candidate.parent))
+                        return True
+                if os.access(candidate, os.X_OK):
+                    subprocess.Popen([str(candidate)], cwd=str(candidate.parent))
+                    return True
+                self._open_path(candidate)
+                return True
+            except Exception:
+                continue
+
+        try:
+            self._open_path(new_install_path)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _identify_preserve_entries(root: Path) -> List[Path]:
+        preserve: List[Path] = []
+        try:
+            for child in root.iterdir():
+                name_lower = child.name.lower()
+                if child.name == "user_plugins" or "log" in name_lower or "setting" in name_lower:
+                    preserve.append(child)
+        except Exception:
+            return preserve
+        return preserve
+
+    @staticmethod
+    def _copy_preserved_entries(old_root: Path, new_root: Path, entries: Iterable[Path]) -> None:
+        for entry in entries:
+            try:
+                relative = entry.relative_to(old_root)
+            except ValueError:
+                continue
+            destination = new_root / relative
+            try:
+                if entry.is_dir():
+                    shutil.copytree(entry, destination, dirs_exist_ok=True)
+                elif entry.exists():
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(entry, destination)
+            except Exception:
+                continue
+
+    def _schedule_update_cleanup(self, old_root: Path, new_root: Path) -> None:
+        if not self._start_cleanup_process(old_root, new_root):
+            cleanup_thread = threading.Thread(
+                target=self._cleanup_old_installation,
+                args=(old_root, new_root),
+                name="UpdateCleanup",
+            )
+            cleanup_thread.start()
+
+    def _start_cleanup_process(self, old_root: Path, new_root: Path) -> bool:
+        python = sys.executable
+        if not python or not Path(python).exists():
+            return False
+        cleanup_code = """
+import pathlib, shutil, sys, time
+old = pathlib.Path(sys.argv[1])
+new = pathlib.Path(sys.argv[2])
+time.sleep(2)
+
+def preserve(root: pathlib.Path) -> list[pathlib.Path]:
+    out: list[pathlib.Path] = []
+    try:
+        for child in root.iterdir():
+            name = child.name.lower()
+            if child.name == 'user_plugins' or 'log' in name or 'setting' in name:
+                out.append(child)
+    except Exception:
+        return out
+    return out
+
+def copy_entries(entries: list[pathlib.Path]) -> None:
+    for entry in entries:
+        try:
+            rel = entry.relative_to(old)
+        except Exception:
+            continue
+        dest = new / rel
+        try:
+            if entry.is_dir():
+                shutil.copytree(entry, dest, dirs_exist_ok=True)
+            elif entry.exists():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(entry, dest)
+        except Exception:
+            pass
+
+for _ in range(10):
+    try:
+        if old.exists():
+            copy_entries(preserve(old))
+            shutil.rmtree(old)
+        break
+    except Exception:
+        time.sleep(1)
+""".strip()
+        try:
+            subprocess.Popen(
+                [python, "-c", cleanup_code, str(old_root), str(new_root)],
+                cwd=str(new_root),
+            )
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _cleanup_old_installation(old_root: Path, new_root: Path) -> None:
+        try:
+            time.sleep(1.0)
+            preserve = Sims4ModSorterApp._identify_preserve_entries(old_root)
+            Sims4ModSorterApp._copy_preserved_entries(old_root, new_root, preserve)
+            shutil.rmtree(old_root, ignore_errors=True)
+        except Exception:
+            pass
+
+    def _shutdown_after_update(self) -> None:
+        try:
+            self.quit()
+        except Exception:
+            pass
+        try:
+            self.destroy()
+        except Exception:
+            pass
 
     def _handle_update_download_failure(self, target_path: Path, error: BaseException, manual: bool) -> None:
         if target_path.exists():
