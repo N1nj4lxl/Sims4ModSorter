@@ -31,7 +31,7 @@ from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence,
 
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from launch_utils import UpdateResult, check_for_update
 from plugin_api import scan_metrics
@@ -567,6 +567,9 @@ def _natural_key(value: str) -> Tuple[object, ...]:
 # ---------------------------------------------------------------------------
 
 LOG_NAME = ".sims4_modsorter_moves.json"
+LOADOUTS_FILENAME = ".sims4_modsorter_loadouts.json"
+DEFAULT_LOADOUT_NAME = "Default Loadout"
+LOADOUTS_VERSION = 1
 
 
 def ensure_folder(path: Path) -> None:
@@ -901,10 +904,18 @@ class Sims4ModSorterApp(tk.Tk):
         self.view_menu: Optional[tk.Menu] = None
         self._view_menu_actions: List[ResolvedViewAction] = []
 
+        self.loadouts: Dict[str, Dict[str, bool]] = {}
+        self._active_loadout_name: str = DEFAULT_LOADOUT_NAME
+        self.loadout_var = tk.StringVar(value=self._active_loadout_name)
+        self._loadout_selector: Optional[ttk.Combobox] = None
+        self._loadout_apply_btn: Optional[ttk.Button] = None
+
+        self._load_loadouts_from_disk()
+
         self._build_style()
         self._build_ui()
         self._build_settings_overlay()
-        self.mods_root.trace_add("write", lambda *_: self._schedule_folder_menu_refresh())
+        self.mods_root.trace_add("write", lambda *_: self._on_mods_root_change())
         self.after(16, self._pump_ui_queue)
         self._report_mod_boot_messages()
         self.after(1000, self._check_updates_on_launch)
@@ -918,6 +929,268 @@ class Sims4ModSorterApp(tk.Tk):
 
     def _report_mod_runtime_messages(self) -> None:
         flush_plugin_messages(self, "runtime")
+
+    # ------------------------------------------------------------------
+    # Loadout management
+    # ------------------------------------------------------------------
+    def _on_mods_root_change(self) -> None:
+        try:
+            self._schedule_folder_menu_refresh()  # type: ignore[attr-defined]
+        except AttributeError:
+            pass
+        self._load_loadouts_from_disk()
+
+    def _resolve_loadouts_path(self) -> Optional[Path]:
+        root_value = self.mods_root.get().strip()
+        if not root_value:
+            return None
+        try:
+            root_path = Path(root_value).expanduser()
+        except Exception:
+            return None
+        return root_path / LOADOUTS_FILENAME
+
+    def _load_loadouts_from_disk(self) -> None:
+        path = self._resolve_loadouts_path()
+        loadouts: Dict[str, Dict[str, bool]] = {}
+        active_name: Optional[str] = None
+        if path and path.exists():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict):
+                raw_loadouts = payload.get("loadouts")
+                if isinstance(raw_loadouts, dict):
+                    for name, mapping in raw_loadouts.items():
+                        if not isinstance(name, str) or not isinstance(mapping, dict):
+                            continue
+                        clean_map: Dict[str, bool] = {}
+                        for item_path, include_flag in mapping.items():
+                            if isinstance(item_path, str):
+                                clean_map[item_path] = bool(include_flag)
+                        loadouts[name] = clean_map
+                active_token = payload.get("active") or payload.get("active_loadout")
+                if isinstance(active_token, str):
+                    active_name = active_token
+        self.loadouts = loadouts
+        self._ensure_loadout_defaults(active_name=active_name)
+        self._refresh_loadout_controls()
+
+    def _ensure_loadout_defaults(self, active_name: Optional[str] = None) -> None:
+        if not self.loadouts:
+            self.loadouts = {DEFAULT_LOADOUT_NAME: {}}
+        if active_name and active_name in self.loadouts:
+            self._active_loadout_name = active_name
+        elif self._active_loadout_name not in self.loadouts:
+            self._active_loadout_name = sorted(self.loadouts.keys())[0]
+        if not self.loadout_var.get():
+            self.loadout_var.set(self._active_loadout_name)
+
+    def _refresh_loadout_controls(self) -> None:
+        names = sorted(self.loadouts.keys())
+        if names:
+            current = self.loadout_var.get()
+            if current not in names:
+                target = self._active_loadout_name if self._active_loadout_name in names else names[0]
+                self.loadout_var.set(target)
+        selector = getattr(self, "_loadout_selector", None)
+        if selector is not None and selector.winfo_exists():
+            selector.configure(values=names)
+            selected = self.loadout_var.get()
+            if selected:
+                try:
+                    selector.set(selected)
+                except tk.TclError:
+                    pass
+        apply_btn = getattr(self, "_loadout_apply_btn", None)
+        if apply_btn is not None and apply_btn.winfo_exists():
+            apply_btn.configure(state="normal" if names else "disabled")
+
+    def _save_loadouts_to_disk(self) -> None:
+        path = self._resolve_loadouts_path()
+        if not path:
+            return
+        payload = {
+            "version": LOADOUTS_VERSION,
+            "active": self._active_loadout_name,
+            "loadouts": self.loadouts,
+        }
+        try:
+            path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _record_loadout(self, name: Optional[str] = None, *, save: bool = True) -> None:
+        if not name:
+            name = self._active_loadout_name
+        if not name:
+            return
+        self.loadouts[name] = {str(item.path): bool(item.include) for item in self.items}
+        if save:
+            self._save_loadouts_to_disk()
+
+    def _apply_loadout_to_items(self, name: Optional[str] = None) -> bool:
+        if not name:
+            name = self._active_loadout_name
+        if not name:
+            return False
+        mapping = self.loadouts.get(name, {})
+        changed = False
+        for item in self.items:
+            include_flag = mapping.get(str(item.path))
+            if include_flag is None:
+                include_flag = True
+            include_value = bool(include_flag)
+            if item.include != include_value:
+                item.include = include_value
+                changed = True
+        self._record_loadout(name, save=False)
+        self._save_loadouts_to_disk()
+        return changed
+
+    def _build_loadout_export(self) -> Optional[Dict[str, object]]:
+        if not self.loadouts:
+            return None
+        payload: Dict[str, Dict[str, bool]] = {}
+        for name, mapping in self.loadouts.items():
+            if not isinstance(name, str):
+                continue
+            clean_map: Dict[str, bool] = {}
+            if isinstance(mapping, dict):
+                for item_path, include_flag in mapping.items():
+                    if isinstance(item_path, str):
+                        clean_map[item_path] = bool(include_flag)
+            payload[name] = clean_map
+        if not payload:
+            return None
+        return {
+            "version": LOADOUTS_VERSION,
+            "active": self._active_loadout_name,
+            "loadouts": payload,
+        }
+
+    def _merge_imported_loadouts(
+        self, loadouts: Dict[str, object], active_name: Optional[str]
+    ) -> int:
+        sanitized: Dict[str, Dict[str, bool]] = {}
+        for name, mapping in loadouts.items():
+            if not isinstance(name, str) or not isinstance(mapping, dict):
+                continue
+            clean_map: Dict[str, bool] = {}
+            for item_path, include_flag in mapping.items():
+                if isinstance(item_path, str):
+                    clean_map[item_path] = bool(include_flag)
+            sanitized[name] = clean_map
+        if not sanitized:
+            return 0
+        self.loadouts.update(sanitized)
+        if active_name and active_name in self.loadouts:
+            self._active_loadout_name = active_name
+        self.loadout_var.set(self._active_loadout_name)
+        self._refresh_loadout_controls()
+        self._save_loadouts_to_disk()
+        return len(sanitized)
+
+    def _on_loadout_selected(self, _event: Optional[tk.Event] = None) -> None:
+        value = (self.loadout_var.get() or "").strip()
+        if not value:
+            if self.loadouts:
+                self.loadout_var.set(self._active_loadout_name)
+            return
+        if value not in self.loadouts:
+            if self.loadouts:
+                self.loadout_var.set(self._active_loadout_name)
+            return
+        self.loadout_var.set(value)
+
+    # ------------------------------------------------------------------
+    # Loadout actions
+    # ------------------------------------------------------------------
+    def on_create_loadout(self) -> None:
+        self._record_loadout(save=True)
+        name = simpledialog.askstring("New Loadout", "Enter a name for the new loadout:", parent=self)
+        if name is None:
+            return
+        name = name.strip()
+        if not name:
+            return
+        if name in self.loadouts:
+            messagebox.showerror("New Loadout", f"A loadout named '{name}' already exists.", parent=self)
+            return
+        self.loadouts[name] = {str(item.path): bool(item.include) for item in self.items}
+        self._active_loadout_name = name
+        self.loadout_var.set(name)
+        self._refresh_loadout_controls()
+        self._save_loadouts_to_disk()
+        self.log(f"Created loadout '{name}'.")
+
+    def on_rename_loadout(self) -> None:
+        if not self.loadouts:
+            return
+        current = self.loadout_var.get() or self._active_loadout_name
+        if not current or current not in self.loadouts:
+            return
+        new_name = simpledialog.askstring(
+            "Rename Loadout",
+            "Enter a new name for the loadout:",
+            initialvalue=current,
+            parent=self,
+        )
+        if new_name is None:
+            return
+        new_name = new_name.strip()
+        if not new_name or new_name == current:
+            return
+        if new_name in self.loadouts:
+            messagebox.showerror("Rename Loadout", f"A loadout named '{new_name}' already exists.", parent=self)
+            return
+        self.loadouts[new_name] = self.loadouts.pop(current)
+        if self._active_loadout_name == current:
+            self._active_loadout_name = new_name
+        if self.loadout_var.get() == current:
+            self.loadout_var.set(new_name)
+        self._refresh_loadout_controls()
+        self._save_loadouts_to_disk()
+        self.log(f"Renamed loadout '{current}' to '{new_name}'.")
+
+    def on_delete_loadout(self) -> None:
+        if not self.loadouts:
+            return
+        target = self.loadout_var.get() or self._active_loadout_name
+        if not target or target not in self.loadouts:
+            return
+        if not messagebox.askyesno("Delete Loadout", f"Delete loadout '{target}'?", parent=self):
+            return
+        was_active = target == self._active_loadout_name
+        self.loadouts.pop(target, None)
+        if not self.loadouts:
+            self.loadouts = {DEFAULT_LOADOUT_NAME: {str(item.path): bool(item.include) for item in self.items}}
+            self._active_loadout_name = DEFAULT_LOADOUT_NAME
+        elif was_active:
+            self._active_loadout_name = sorted(self.loadouts.keys())[0]
+        if self.loadout_var.get() == target or self.loadout_var.get() not in self.loadouts:
+            self.loadout_var.set(self._active_loadout_name)
+        self._record_loadout(save=False)
+        self._refresh_loadout_controls()
+        self._save_loadouts_to_disk()
+        self.log(f"Deleted loadout '{target}'.")
+
+    def on_apply_loadout(self) -> None:
+        target = (self.loadout_var.get() or "").strip()
+        if not target:
+            messagebox.showinfo("Apply Loadout", "Select a loadout to apply first.", parent=self)
+            return
+        if target not in self.loadouts:
+            messagebox.showerror("Apply Loadout", f"Loadout '{target}' is no longer available.", parent=self)
+            self._refresh_loadout_controls()
+            return
+        self._record_loadout(save=True)
+        self._active_loadout_name = target
+        changed = self._apply_loadout_to_items(target)
+        if self.items and changed:
+            self._refresh_tree(preserve_selection=True)
+        self.log(f"Applied loadout '{target}' to the current plan.")
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
@@ -974,7 +1247,22 @@ class Sims4ModSorterApp(tk.Tk):
         ttk.Button(top, text="Browse", command=self.on_browse).pack(side="left", padx=4)
         self.btn_scan = ttk.Button(top, text="Scan", command=self.on_scan)
         self.btn_scan.pack(side="left", padx=4)
+        ttk.Button(top, text="Import Plan", command=self.on_import).pack(side="left", padx=4)
         ttk.Button(top, text="Export Plan", command=self.on_export).pack(side="left", padx=4)
+        loadout_frame = ttk.Frame(top)
+        loadout_frame.pack(side="left", padx=(12, 0))
+        ttk.Label(loadout_frame, text="Loadout:").pack(side="left")
+        self._loadout_selector = ttk.Combobox(
+            loadout_frame,
+            textvariable=self.loadout_var,
+            state="readonly",
+            width=24,
+            values=tuple(sorted(self.loadouts.keys())),
+        )
+        self._loadout_selector.pack(side="left", padx=(4, 0))
+        self._loadout_selector.bind("<<ComboboxSelected>>", self._on_loadout_selected)
+        self._loadout_apply_btn = ttk.Button(loadout_frame, text="Apply", command=self.on_apply_loadout)
+        self._loadout_apply_btn.pack(side="left", padx=4)
         settings_btn = ttk.Button(top, text="⚙", width=3, command=self.show_settings)
         self._pack_toolbar_button(settings_btn, button_id="settings", side="right", padx=0)
         status_btn = ttk.Button(top, text="Plugin Status", command=self.show_mod_status_popup)
@@ -1095,6 +1383,12 @@ class Sims4ModSorterApp(tk.Tk):
         ttk.Button(right, text="Recalculate Targets", command=self.on_recalc_targets).pack(fill="x", pady=4)
         ttk.Button(right, text="Select All", command=lambda: self.tree.selection_set(self.tree.get_children())).pack(fill="x", pady=2)
         ttk.Button(right, text="Select None", command=lambda: self.tree.selection_remove(self.tree.get_children())).pack(fill="x", pady=2)
+        ttk.Separator(right).pack(fill="x", pady=10)
+        ttk.Label(right, text="Loadouts").pack(anchor="w")
+        ttk.Button(right, text="New Loadout", command=self.on_create_loadout).pack(fill="x", pady=2)
+        ttk.Button(right, text="Rename Loadout", command=self.on_rename_loadout).pack(fill="x", pady=2)
+        ttk.Button(right, text="Delete Loadout", command=self.on_delete_loadout).pack(fill="x", pady=2)
+        ttk.Button(right, text="Apply Selected Loadout", command=self.on_apply_loadout).pack(fill="x", pady=(6, 0))
 
         bottom = ttk.Frame(root_container)
         bottom.pack(fill="x", padx=12, pady=8)
@@ -1125,6 +1419,7 @@ class Sims4ModSorterApp(tk.Tk):
         self.tree.bind("<Double-1>", self.on_double_click)
         self.tree.bind("<Motion>", self._on_tree_motion)
         self.tree.bind("<Leave>", lambda _e: self._hide_tooltip())
+        self._refresh_loadout_controls()
 
     def _pack_toolbar_button(
         self,
@@ -2708,6 +3003,7 @@ for _ in range(10):
         self.items = list(result.items)
         self.items_by_path = {str(item.path): item for item in self.items}
         self.scan_errors = result.errors
+        self._apply_loadout_to_items()
         self._refresh_tree()
         self.status_var.set(f"Plan: {len(self.items)} files")
         self.log(
@@ -2770,10 +3066,15 @@ for _ in range(10):
         selection = self.tree.selection()
         if not selection:
             return
+        changed = False
         for iid in selection:
             item = self.items_by_path.get(iid)
             if item:
                 item.include = not item.include
+                changed = True
+        if not changed:
+            return
+        self._record_loadout(save=True)
         self._refresh_tree(preserve_selection=True)
 
     def on_batch_assign(self) -> None:
@@ -3090,10 +3391,105 @@ for _ in range(10):
             self._history_preview_btn = None
             self._history_undo_btn = None
 
+    def on_import(self) -> None:
+        filename = filedialog.askopenfilename(
+            parent=self,
+            filetypes=[("JSON", "*.json"), ("All files", "*.*")],
+            title="Import plan from JSON",
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            messagebox.showerror("Import Plan", f"Unable to import plan: {exc}", parent=self)
+            self.log(f"Import failed: {exc}", level="error")
+            return
+
+        entries: List[Dict[str, object]] = []
+        loadout_payload: Optional[Dict[str, object]] = None
+        active_name: Optional[str] = None
+        if isinstance(payload, dict):
+            raw_plan = payload.get("plan")
+            if isinstance(raw_plan, list):
+                entries = [entry for entry in raw_plan if isinstance(entry, dict)]
+            raw_loadouts = payload.get("loadouts")
+            if isinstance(raw_loadouts, dict):
+                loadout_payload = raw_loadouts
+            active_token = payload.get("active_loadout") or payload.get("active")
+            if isinstance(active_token, str):
+                active_name = active_token
+        elif isinstance(payload, list):
+            entries = [entry for entry in payload if isinstance(entry, dict)]
+        else:
+            messagebox.showerror("Import Plan", "The selected file is not a valid plan export.", parent=self)
+            return
+
+        imported_loadouts = 0
+        loadout_applied = False
+        if loadout_payload:
+            imported_loadouts = self._merge_imported_loadouts(loadout_payload, active_name)
+            if imported_loadouts and self.items:
+                loadout_applied = self._apply_loadout_to_items(self._active_loadout_name)
+
+        applied_entries = 0
+        include_updates = 0
+        if entries and self.items:
+            for entry in entries:
+                path_value = entry.get("path")
+                if not isinstance(path_value, str):
+                    continue
+                item = self.items_by_path.get(path_value)
+                if not item:
+                    continue
+                type_value = entry.get("type")
+                if isinstance(type_value, str) and type_value:
+                    item.guess_type = type_value
+                folder_value = entry.get("folder")
+                if isinstance(folder_value, str) and folder_value:
+                    item.target_folder = folder_value
+                tags_value = entry.get("tags")
+                if isinstance(tags_value, str):
+                    item.meta_tags = tags_value
+                dep_status = entry.get("dependency_status")
+                if isinstance(dep_status, str):
+                    item.dependency_status = dep_status
+                dep_detail = entry.get("dependency_detail")
+                if isinstance(dep_detail, str):
+                    item.dependency_detail = dep_detail
+                include_value = entry.get("include")
+                if include_value is not None:
+                    include_flag = bool(include_value)
+                    if item.include != include_flag:
+                        item.include = include_flag
+                        include_updates += 1
+                applied_entries += 1
+            self._record_loadout(save=True)
+        elif entries and not self.items:
+            self.log(
+                f"Plan '{path.name}' includes {len(entries)} entry(s) but no scan is loaded; only loadouts were imported."
+            )
+
+        needs_refresh = bool(self.items and (applied_entries or include_updates or loadout_applied))
+        if needs_refresh:
+            self._refresh_tree(preserve_selection=True)
+
+        fragments: List[str] = []
+        if applied_entries:
+            fragments.append(f"updated {applied_entries} item(s)")
+        if include_updates:
+            fragments.append(f"applied {include_updates} include flag(s)")
+        if imported_loadouts:
+            fragments.append(f"imported {imported_loadouts} loadout(s)")
+        summary = ", ".join(fragments) if fragments else "no changes detected"
+        self.log(f"Imported plan from {filename}: {summary}.")
+
     def on_export(self) -> None:
         if not self.items:
             self.log("No plan to export.")
             return
+        self._record_loadout(save=True)
         filename = filedialog.asksaveasfilename(
             parent=self,
             defaultextension=".json",
@@ -3129,11 +3525,22 @@ for _ in range(10):
                 "dependency_status": item.dependency_status,
                 "dependency_detail": item.dependency_detail,
             }
+            entry["include"] = bool(item.include)
             if extras_payload:
                 entry["extras"] = extras_payload
             data.append(entry)
+        loadout_export = self._build_loadout_export()
+        if loadout_export:
+            payload: Union[List[Dict[str, object]], Dict[str, object]] = {
+                "plan": data,
+                "loadouts": loadout_export.get("loadouts", {}),
+                "active_loadout": loadout_export.get("active", self._active_loadout_name),
+                "loadout_version": loadout_export.get("version", LOADOUTS_VERSION),
+            }
+        else:
+            payload = data
         try:
-            Path(filename).write_text(json.dumps(data, indent=2), encoding="utf-8")
+            Path(filename).write_text(json.dumps(payload, indent=2), encoding="utf-8")
             self.log(f"Exported plan to {filename}")
         except Exception as exc:
             self.log(f"Export failed: {exc}")
