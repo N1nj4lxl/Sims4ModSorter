@@ -20,6 +20,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urljoin
 import webbrowser
 import zipfile
 from datetime import datetime
@@ -2007,14 +2008,40 @@ class Sims4ModSorterApp(tk.Tk):
 
     def _download_update_worker(self, url: str, target_path: Path, manual: bool) -> None:
         try:
-            request = urllib.request.Request(
-                url,
-                headers={"User-Agent": "Sims4ModSorter Update Check"},
+            opener = urllib.request.build_opener(
+                urllib.request.HTTPHandler(), urllib.request.HTTPSHandler()
             )
-            with urllib.request.urlopen(request) as response:
-                total = int(response.headers.get("Content-Length") or 0)
-                chunk_size = 1024 * 64
-                written = 0
+            headers = {
+                "User-Agent": "Sims4ModSorter Update Check",
+                "Accept": "application/octet-stream",
+            }
+            current_url = url
+            response = None
+            for _ in range(10):
+                request = urllib.request.Request(current_url, headers=headers)
+                try:
+                    response = opener.open(request, timeout=30)
+                except urllib.error.HTTPError as exc:
+                    if exc.code in {301, 302, 303, 307, 308}:
+                        location = exc.headers.get("Location")
+                        if not location:
+                            raise
+                        current_url = urljoin(current_url, location)
+                        continue
+                    raise
+                else:
+                    break
+            if response is None:
+                raise RuntimeError("Too many redirects while downloading update")
+
+            chunk_size = 1024 * 64
+            written = 0
+            total_header = response.headers.get("Content-Length")
+            try:
+                total = int(total_header) if total_header is not None else 0
+            except ValueError:
+                total = 0
+            with response:
                 with target_path.open("wb") as handle:
                     while True:
                         chunk = response.read(chunk_size)
@@ -2022,8 +2049,24 @@ class Sims4ModSorterApp(tk.Tk):
                             break
                         handle.write(chunk)
                         written += len(chunk)
-                        self._enqueue_ui(lambda w=written, t=total: self._update_download_progress(w, t))
+                        self._enqueue_ui(
+                            lambda w=written, t=total: self._update_download_progress(w, t)
+                        )
+
+            if total > 0 and written != total:
+                raise ValueError(
+                    f"Downloaded size mismatch: expected {total} bytes but received {written} bytes"
+                )
+            if written <= 0:
+                raise ValueError("Downloaded file was empty")
+            if not zipfile.is_zipfile(target_path):
+                raise zipfile.BadZipFile("Downloaded file is not a valid ZIP archive")
         except Exception as exc:
+            if target_path.exists():
+                try:
+                    target_path.unlink()
+                except Exception:
+                    pass
             self._enqueue_ui(lambda e=exc: self._handle_update_download_failure(target_path, e, manual))
         else:
             self._enqueue_ui(lambda: self._handle_update_download_success(target_path, manual))
