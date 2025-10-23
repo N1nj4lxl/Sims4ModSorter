@@ -52,6 +52,18 @@ Select the cog button in the toolbar to open the inline settings overlay. From t
 
 Any changes take effect immediately when you click **Apply** or **Done**.
 
+### Duplicate review tools
+
+Every scanned file now carries a short fingerprint in its `extras` payload so the sorter can detect duplicates without hashing
+the entire archive. When two or more entries share the same fingerprint:
+
+* The **Dup** column shows a ⚠️ marker on each secondary copy and the tooltip lists the relative path of the primary file so you
+  can review the original quickly.
+* Primaries receive a tooltip explaining how many duplicates point at them.
+* The **Duplicates only** quick filter above the table hides everything except flagged copies, making bulk clean-up easy. The
+  toggle disables itself when no duplicates are detected.
+* Exported plans now include the duplicate flag and fingerprint so that external tooling can reconcile records or build reports.
+
 ## Modding the sorter
 
 Sims4ModSorter now exposes a lightweight plugin system. Drop Python-based plugins into the `user_plugins/` directory next to `Sims4ModSorter.py` and they will be imported on launch. Plugins receive a `PluginAPI` instance and can:
@@ -62,6 +74,8 @@ Sims4ModSorter now exposes a lightweight plugin system. Drop Python-based plugin
 * Emit log messages that appear in the application console.
 
 Each plugin directory should contain a `plugin.json` manifest (created automatically by the helper script below) that describes the entry script, registration callable, and whether the plugin is enabled.
+
+The plugin API exposes `api.reserved_extra_keys()` and `api.is_reserved_extra()` so extensions can avoid overwriting the sorter’s internal metadata (such as the duplicate marker and fingerprint). When manipulating `item.extras`, leave unknown keys unchanged to preserve built-in functionality.
 
 ### Managing plugins with the Plugin Manager
 

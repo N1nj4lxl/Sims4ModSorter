@@ -39,6 +39,8 @@ __all__ = [
     "CATEGORY_INDEX",
     "CATEGORY_ORDER",
     "DEFAULT_FOLDER_MAP",
+    "DUPLICATE_EXTRA_KEY",
+    "FINGERPRINT_EXTRA_KEY",
     "FileItem",
     "ProgressCallback",
     "ScanResult",
@@ -57,6 +59,10 @@ __all__ = [
     "scan_folder",
     "SUPPORTED_EXTS",
 ]
+
+
+FINGERPRINT_EXTRA_KEY = "fingerprint"
+DUPLICATE_EXTRA_KEY = "duplicate"
 
 
 # ---------------------------------------------------------------------------
@@ -479,6 +485,14 @@ class ScanFinding:
             extras={str(k): str(v) for k, v in dict(payload.get("extras", {})).items()},
             handler=str(payload.get("handler", "")),
         )
+
+
+def _ensure_fingerprint_extra(finding: ScanFinding, fingerprint: str) -> None:
+    extras = finding.extras
+    if not isinstance(extras, dict):
+        extras = {}
+        finding.extras = extras
+    extras[FINGERPRINT_EXTRA_KEY] = str(fingerprint)
 
 
 # ---------------------------------------------------------------------------
@@ -1214,6 +1228,9 @@ class Scheduler:
                 continue
             cached = self._ctx.cache.lookup(path, st.st_size, st.st_mtime)
             if cached:
+                fingerprint = Deduper.make_short_fingerprint(path, st)
+                _ensure_fingerprint_extra(cached, fingerprint)
+                self._ctx.cache.upsert(cached, st, fingerprint)
                 results[index] = cached
                 if progress_cb:
                     progress_cb(index + 1, len(paths), path, "cached")
@@ -1239,6 +1256,8 @@ def scan_light(path: Path, st: os.stat_result, ctx: ScanContext) -> ScanFinding:
     fingerprint = Deduper.make_short_fingerprint(path, st)
     cached = ctx.seen.get(fingerprint)
     if cached:
+        _ensure_fingerprint_extra(cached, fingerprint)
+        ctx.cache.upsert(cached, st, fingerprint)
         return cached
 
     name_sig = NameHeuristics.guess(path, ctx.rules)
@@ -1252,6 +1271,7 @@ def scan_light(path: Path, st: os.stat_result, ctx: ScanContext) -> ScanFinding:
     ext, disabled = _effective_extension(path)
     finding = Classifier.merge(path, st, ext, disabled, name_sig, head_sig, peek_sig, ctx.thresholds)
     finding = Router.apply(finding, ctx.rules)
+    _ensure_fingerprint_extra(finding, fingerprint)
 
     ctx.cache.upsert(finding, st, fingerprint)
     return finding
@@ -1474,6 +1494,47 @@ def scan_folder(
             disabled_items.append(item)
         else:
             items.append(item)
+
+    duplicate_groups: Dict[str, List[FileItem]] = {}
+    for item in items:
+        extras = item.extras if isinstance(item.extras, dict) else {}
+        tooltips = item.tooltips if isinstance(item.tooltips, dict) else {}
+        if extras:
+            extras.pop(DUPLICATE_EXTRA_KEY, None)
+        if tooltips:
+            tooltips.pop(DUPLICATE_EXTRA_KEY, None)
+        fingerprint = extras.get(FINGERPRINT_EXTRA_KEY, "") if extras else ""
+        if fingerprint:
+            duplicate_groups.setdefault(fingerprint, []).append(item)
+
+    for group in duplicate_groups.values():
+        if len(group) <= 1:
+            continue
+        primary = min(
+            group,
+            key=lambda entry: (entry.relpath.lower(), entry.name.lower()),
+        )
+        primary_tooltips = primary.tooltips if isinstance(primary.tooltips, dict) else {}
+        if primary_tooltips is not primary.tooltips:
+            primary.tooltips = dict(primary_tooltips)
+            primary_tooltips = primary.tooltips
+        if primary_tooltips is not None:
+            primary_tooltips[DUPLICATE_EXTRA_KEY] = (
+                f"Primary copy for {len(group) - 1} duplicate file(s)."
+            )
+        for candidate in group:
+            if candidate is primary:
+                continue
+            extras = candidate.extras if isinstance(candidate.extras, dict) else {}
+            if extras is not candidate.extras:
+                candidate.extras = dict(extras)
+                extras = candidate.extras
+            extras[DUPLICATE_EXTRA_KEY] = "⚠"
+            tooltips = candidate.tooltips if isinstance(candidate.tooltips, dict) else {}
+            if tooltips is not candidate.tooltips:
+                candidate.tooltips = dict(tooltips)
+                tooltips = candidate.tooltips
+            tooltips[DUPLICATE_EXTRA_KEY] = f"Duplicate of {primary.relpath}"
 
     if _SCAN_DEBUG and items:
         category_counts = Counter(item.guess_type for item in items)

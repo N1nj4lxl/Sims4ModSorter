@@ -38,8 +38,10 @@ from scanner import (
     CATEGORY_INDEX,
     CATEGORY_ORDER,
     DEFAULT_FOLDER_MAP,
+    DUPLICATE_EXTRA_KEY,
     FileItem,
     ScanResult,
+    FINGERPRINT_EXTRA_KEY,
     PACKAGE_EXTS,
     SCRIPT_EXTS,
     SUPPORTED_EXTS,
@@ -252,6 +254,18 @@ class PluginAPI:
     def __init__(self, manager: "PluginManager") -> None:
         self._manager = manager
 
+    def reserved_extra_keys(self) -> Tuple[str, ...]:
+        return tuple(sorted(self._manager.reserved_extras))
+
+    def is_reserved_extra(self, key: object) -> bool:
+        if key is None:
+            return False
+        try:
+            text = str(key)
+        except Exception:
+            return False
+        return text in self._manager.reserved_extras
+
     def register_pre_scan_hook(self, func: Callable[[Dict[str, object], "PluginAPI"], None]) -> None:
         if callable(func):
             self._manager.pre_scan_hooks.append(func)
@@ -334,6 +348,8 @@ class PluginManager:
         self.statuses: List[PluginStatus] = []
         self.toolbar_buttons: Dict[str, PluginToolbarButton] = {}
         self.toolbar_order: List[str] = []
+        self.reserved_extras: Set[str] = {FINGERPRINT_EXTRA_KEY, DUPLICATE_EXTRA_KEY}
+        self.reserved_columns: Set[str] = {DUPLICATE_EXTRA_KEY}
 
     def attach_app(self, app: "Sims4ModSorterApp") -> None:
         self.app = app
@@ -425,6 +441,13 @@ class PluginManager:
     def register_column(self, column_id: str, heading: str, width: int, anchor: str) -> None:
         normalized = column_id.strip()
         if not normalized:
+            return
+        if normalized in self.reserved_columns:
+            self.message_bus.post(
+                "boot",
+                "warn",
+                f"Plugin column '{normalized}' conflicts with a core column and was ignored.",
+            )
             return
         if normalized in self.columns:
             return
@@ -681,6 +704,8 @@ class Sims4ModSorterApp(tk.Tk):
 
         self.status_var = tk.StringVar(value="Ready")
         self.summary_var = tk.StringVar(value="No plan yet")
+        self._duplicate_filter_var = tk.BooleanVar(value=False)
+        self._duplicate_filter_check: Optional[ttk.Checkbutton] = None
 
         self._ui_queue: "queue.Queue[Callable[[], None]]" = queue.Queue()
         self._theme_cache: Dict[str, str] = {}
@@ -815,12 +840,31 @@ class Sims4ModSorterApp(tk.Tk):
         header = ttk.Frame(mid)
         header.pack(fill="x", pady=(0, 6))
         ttk.Label(header, textvariable=self.summary_var).pack(side="left")
+        self._duplicate_filter_check = ttk.Checkbutton(
+            header,
+            text="Duplicates only",
+            variable=self._duplicate_filter_var,
+            command=self._on_duplicate_filter_toggle,
+        )
+        self._duplicate_filter_check.pack(side="right")
 
         left = ttk.Frame(mid)
         left.pack(side="left", fill="both", expand=True)
         tree_frame = ttk.Frame(left)
         tree_frame.pack(fill="both", expand=True)
-        base_columns = ["inc", "rel", "name", "size", "type", "target", "conf", "linked", "meta", "notes"]
+        base_columns = [
+            "inc",
+            "rel",
+            "name",
+            "size",
+            "type",
+            "target",
+            "conf",
+            "linked",
+            DUPLICATE_EXTRA_KEY,
+            "meta",
+            "notes",
+        ]
         base_headings = {
             "inc": "✔",
             "rel": "Folder",
@@ -830,6 +874,7 @@ class Sims4ModSorterApp(tk.Tk):
             "target": "Target Folder",
             "conf": "Conf",
             "linked": "Linked",
+            DUPLICATE_EXTRA_KEY: "Dup",
             "meta": "Tags",
             "notes": "Notes",
         }
@@ -842,6 +887,7 @@ class Sims4ModSorterApp(tk.Tk):
             "target": "w",
             "conf": "e",
             "linked": "center",
+            DUPLICATE_EXTRA_KEY: "center",
             "meta": "w",
             "notes": "w",
         }
@@ -2663,8 +2709,24 @@ for _ in range(10):
         )
         if not filename:
             return
-        data = [
-            {
+        data: List[Dict[str, object]] = []
+        for item in self.items:
+            extras_dict = item.extras if isinstance(item.extras, dict) else {}
+            extras_payload: Dict[str, str] = {}
+            if self._plugin_columns:
+                extras_payload.update(
+                    {
+                        column.column_id: extras_dict.get(column.column_id, "") if extras_dict else ""
+                        for column in self._plugin_columns
+                    }
+                )
+            duplicate_marker = extras_dict.get(DUPLICATE_EXTRA_KEY, "") if extras_dict else ""
+            if duplicate_marker:
+                extras_payload[DUPLICATE_EXTRA_KEY] = duplicate_marker
+            fingerprint = extras_dict.get(FINGERPRINT_EXTRA_KEY, "") if extras_dict else ""
+            if fingerprint:
+                extras_payload[FINGERPRINT_EXTRA_KEY] = fingerprint
+            entry: Dict[str, object] = {
                 "path": str(item.path),
                 "name": item.name,
                 "type": item.guess_type,
@@ -2673,18 +2735,10 @@ for _ in range(10):
                 "folder": item.target_folder,
                 "dependency_status": item.dependency_status,
                 "dependency_detail": item.dependency_detail,
-                "extras": {
-                    column.column_id: item.extras.get(column.column_id, "")
-                    for column in self._plugin_columns
-                    if isinstance(item.extras, dict)
-                },
             }
-            for item in self.items
-        ]
-        for entry in data:
-            extras = entry.get("extras")
-            if not extras:
-                entry.pop("extras", None)
+            if extras_payload:
+                entry["extras"] = extras_payload
+            data.append(entry)
         try:
             Path(filename).write_text(json.dumps(data, indent=2), encoding="utf-8")
             self.log(f"Exported plan to {filename}")
@@ -2694,13 +2748,53 @@ for _ in range(10):
     # ------------------------------------------------------------------
     # Table refresh
     # ------------------------------------------------------------------
+    def _on_duplicate_filter_toggle(self) -> None:
+        self._refresh_tree()
+
     def _refresh_tree(self, preserve_selection: bool = False) -> None:
         selected = set(self.tree.selection()) if preserve_selection else set()
         self.tree.delete(*self.tree.get_children())
         self._tooltip_payload.clear()
         self.items_by_path = {str(item.path): item for item in self.items}
-        counts: Dict[str, int] = {}
+        duplicate_count = sum(
+            1
+            for item in self.items
+            if isinstance(item.extras, dict) and item.extras.get(DUPLICATE_EXTRA_KEY)
+        )
+        duplicates_only = bool(self._duplicate_filter_var.get())
+        check = getattr(self, "_duplicate_filter_check", None)
+        if check is not None and check.winfo_exists():
+            label = "Duplicates only" if duplicate_count == 0 else f"Duplicates only ({duplicate_count})"
+            try:
+                check.configure(text=label)
+            except Exception:
+                pass
+            try:
+                if duplicate_count:
+                    check.state(["!disabled"])
+                else:
+                    check.state(["disabled"])
+                    if duplicates_only:
+                        self._duplicate_filter_var.set(False)
+                        duplicates_only = False
+            except Exception:
+                pass
+
+        overall_counts: Dict[str, int] = {}
         for item in self.items:
+            overall_counts[item.guess_type] = overall_counts.get(item.guess_type, 0) + 1
+
+        if duplicates_only:
+            display_items = [
+                item
+                for item in self.items
+                if isinstance(item.extras, dict) and item.extras.get(DUPLICATE_EXTRA_KEY)
+            ]
+        else:
+            display_items = list(self.items)
+
+        counts: Dict[str, int] = {}
+        for item in display_items:
             counts[item.guess_type] = counts.get(item.guess_type, 0) + 1
             row_map = {
                 "inc": "✓" if item.include else "",
@@ -2711,13 +2805,16 @@ for _ in range(10):
                 "target": item.target_folder,
                 "conf": f"{item.confidence:.2f}",
                 "linked": "🔗" if item.bundle else "",
+                DUPLICATE_EXTRA_KEY: "",
                 "meta": item.meta_tags,
                 "notes": item.notes,
             }
             extras = getattr(item, "extras", {})
-            if isinstance(extras, dict) and self._plugin_columns:
-                for plugin_column in self._plugin_columns:
-                    row_map[plugin_column.column_id] = extras.get(plugin_column.column_id, "")
+            if isinstance(extras, dict):
+                row_map[DUPLICATE_EXTRA_KEY] = extras.get(DUPLICATE_EXTRA_KEY, "")
+                if self._plugin_columns:
+                    for plugin_column in self._plugin_columns:
+                        row_map[plugin_column.column_id] = extras.get(plugin_column.column_id, "")
             values = tuple(row_map.get(column_id, "") for column_id in self._column_order)
             iid = str(item.path)
             self.tree.insert("", "end", iid=iid, values=values)
@@ -2727,12 +2824,28 @@ for _ in range(10):
             self._tooltip_payload[iid] = {
                 key: value for key, value in tooltips.items() if key in self._column_order and value
             }
-        if self.items:
-            topcats = sorted(counts.items(), key=lambda pair: -pair[1])[:4]
-            fragment = ", ".join(f"{name}: {count}" for name, count in topcats)
-            self.summary_var.set(f"Planned {len(self.items)} files | {fragment}")
+
+        total_files = len(self.items)
+        if duplicates_only:
+            if display_items:
+                topcats = sorted(counts.items(), key=lambda pair: -pair[1])[:4]
+                fragment = ", ".join(f"{name}: {count}" for name, count in topcats if count)
+                summary = f"Showing {len(display_items)} duplicate file(s)"
+                if total_files:
+                    summary += f" of {total_files} total"
+                if fragment:
+                    summary += f" | {fragment}"
+                self.summary_var.set(summary)
+            else:
+                suffix = f" across {total_files} scanned files" if total_files else ""
+                self.summary_var.set(f"No duplicates found{suffix}")
         else:
-            self.summary_var.set("No plan yet")
+            if total_files:
+                topcats = sorted(overall_counts.items(), key=lambda pair: -pair[1])[:4]
+                fragment = ", ".join(f"{name}: {count}" for name, count in topcats)
+                self.summary_var.set(f"Planned {total_files} files | {fragment}")
+            else:
+                self.summary_var.set("No plan yet")
         self._schedule_auto_size_columns()
 
     def _schedule_auto_size_columns(self) -> None:
@@ -2794,7 +2907,7 @@ for _ in range(10):
                     widths[column] = width
         for column in target_columns:
             width = widths.get(column, 0)
-            minimum = 36 if column in {"inc", "linked"} else 60
+            minimum = 36 if column in {"inc", "linked", DUPLICATE_EXTRA_KEY} else 60
             tree.column(column, width=max(minimum, int(width)), stretch=False)
 
     # ------------------------------------------------------------------
