@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+import webbrowser
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,24 +37,28 @@ DEFAULT_DB: Dict[str, List[Dict[str, object]]] = {
             "name": "UI Cheats Extension",
             "patterns": ["ui cheats", "ui_cheats", "uicheats", "ui-cheats"],
             "requires": ["mc_command_center", "ts4_script_loader"],
+            "download_url": "https://www.patreon.com/posts/ui-cheats-extension-26240068",
         },
         {
             "id": "wickedwhims",
             "name": "WickedWhims",
             "patterns": ["wickedwhims", "wicked whims", "turbodriver"],
             "requires": ["basemental_drugs"],
+            "homepage": "https://wickedwhimsmod.com/",
         },
         {
             "id": "better_school_grades",
             "name": "Better School Grades",
             "patterns": ["better school grades"],
             "requires": ["xml_injector"],
+            "homepage": "https://littlemssam.tumblr.com/post/625676532776542208/better-school-grades",
         },
         {
             "id": "slice_of_life",
             "name": "Slice of Life",
             "patterns": ["slice of life", "kawaiistacie slice"],
             "requires": ["xml_injector"],
+            "homepage": "https://www.kawaiistaciemods.com/slice-of-life",
         },
     ],
     "frameworks": [
@@ -61,21 +66,25 @@ DEFAULT_DB: Dict[str, List[Dict[str, object]]] = {
             "id": "mc_command_center",
             "name": "MC Command Center",
             "patterns": ["mc command center", "mccc", "deaderpool"],
+            "homepage": "https://deaderpool-mccc.com/#/releases",
         },
         {
             "id": "xml_injector",
             "name": "XML Injector",
             "patterns": ["xml injector"],
+            "homepage": "https://scumbumbomods.com/xml-injector/",
         },
         {
             "id": "basemental_drugs",
             "name": "Basemental Drugs",
             "patterns": ["basemental drugs", "basementaldrugs"],
+            "homepage": "https://basementalcc.com/drugs",
         },
         {
             "id": "ts4_script_loader",
             "name": "TS4 Script Loader",
             "patterns": ["ts4 script loader", "ts4scriptloader"],
+            "homepage": "https://modthesims.info/d/479997/ts4-script-loader.html",
         },
     ],
 }
@@ -87,11 +96,25 @@ class DependencyDefinition:
     name: str
     patterns: Tuple[str, ...]
     requires: Tuple[str, ...] = tuple()
+    homepage: Optional[str] = None
+    download_url: Optional[str] = None
 
     def matches(self, blob: str) -> bool:
         if not blob:
             return False
         return any(pattern in blob for pattern in self.patterns)
+
+    @property
+    def primary_url(self) -> Optional[str]:
+        return self.download_url or self.homepage
+
+
+@dataclass(frozen=True, slots=True)
+class RequirementDetail:
+    mod: str
+    dependency: str
+    missing: bool
+    url: Optional[str]
 
 
 @dataclass(slots=True)
@@ -100,6 +123,7 @@ class DependencyResult:
     mods: Tuple[str, ...]
     detail: str
     missing: bool
+    requirements: Tuple[RequirementDetail, ...]
 
 
 class DependencyRegistry:
@@ -152,6 +176,12 @@ class DependencyRegistry:
         frameworks: List[DependencyDefinition] = []
         lookup: Dict[str, DependencyDefinition] = {}
 
+        def _clean_url(value: object) -> Optional[str]:
+            if value is None:
+                return None
+            text = str(value).strip()
+            return text or None
+
         def normalise(entry: Dict[str, object], *, requires: Sequence[str]) -> Optional[DependencyDefinition]:
             identifier = str(entry.get("id") or entry.get("name") or "").strip()
             if not identifier:
@@ -159,7 +189,16 @@ class DependencyRegistry:
             name = str(entry.get("name") or identifier).strip()
             patterns = tuple(sorted({_lower_clean(str(pattern)) for pattern in entry.get("patterns", []) if str(pattern).strip()}))
             req = tuple(str(dep).strip() for dep in requires if str(dep).strip())
-            definition = DependencyDefinition(identifier=identifier, name=name, patterns=patterns, requires=req)
+            homepage = _clean_url(entry.get("homepage"))
+            download_url = _clean_url(entry.get("download_url"))
+            definition = DependencyDefinition(
+                identifier=identifier,
+                name=name,
+                patterns=patterns,
+                requires=req,
+                homepage=homepage,
+                download_url=download_url,
+            )
             return definition
 
         for entry in payload.get("frameworks", []) or []:
@@ -297,6 +336,7 @@ class DependencyAnalyser:
     def _apply_result(self, item: object, entry_ids: Sequence[str], found_ids: Sequence[str]) -> Optional[DependencyResult]:
         lookup = self.registry.lookup
         details: List[str] = []
+        requirement_rows: List[RequirementDetail] = []
         missing_any = False
         seen_mods: set[str] = set()
 
@@ -314,11 +354,24 @@ class DependencyAnalyser:
             for dependency_id in requires:
                 dep_entry = lookup.get(dependency_id)
                 dep_name = dep_entry.name if dep_entry else dependency_id
+                dep_url = dep_entry.primary_url if dep_entry else None
                 if dep_entry and dependency_id in found_ids:
-                    parts.append(f"{dep_name} (found)")
+                    if dep_url:
+                        parts.append(f"{dep_name} (found – {dep_url})")
+                    else:
+                        parts.append(f"{dep_name} (found)")
+                    requirement_rows.append(
+                        RequirementDetail(mod=entry.name, dependency=dep_name, missing=False, url=dep_url)
+                    )
                 else:
-                    parts.append(f"{dep_name} (missing)")
+                    if dep_url:
+                        parts.append(f"{dep_name} (missing – {dep_url})")
+                    else:
+                        parts.append(f"{dep_name} (missing)")
                     missing_any = True
+                    requirement_rows.append(
+                        RequirementDetail(mod=entry.name, dependency=dep_name, missing=True, url=dep_url)
+                    )
             if parts:
                 details.append(f"{entry.name}: {', '.join(parts)}")
 
@@ -340,6 +393,7 @@ class DependencyAnalyser:
             mods=tuple(sorted(seen_mods)),
             detail=detail_text,
             missing=missing_any,
+            requirements=tuple(requirement_rows),
         )
 
 
@@ -350,6 +404,9 @@ class DependencyOverlay:
         self.tree: Optional[ttk.Treeview] = None
         self.status_var: Optional[tk.StringVar] = None
         self._results: List[DependencyResult] = []
+        self._item_links: Dict[str, List[RequirementDetail]] = {}
+        self._link_container: Optional[ttk.Frame] = None
+        self._context_menu: Optional[tk.Menu] = None
 
     # ------------------------------------------------------------------
     def show(self) -> None:
@@ -401,6 +458,43 @@ class DependencyOverlay:
         tree.pack(fill="both", expand=True)
         self.tree = tree
 
+        tree.bind("<<TreeviewSelect>>", lambda _event: self._update_link_buttons())
+
+        links_frame = ttk.Frame(frame)
+        links_frame.pack(fill="x", expand=False, pady=(8, 0))
+        ttk.Label(links_frame, text="Missing dependency links:").pack(anchor="w")
+        container = ttk.Frame(links_frame)
+        container.pack(anchor="w", fill="x")
+        self._link_container = container
+
+        context_menu = tk.Menu(tree, tearoff=False)
+        self._context_menu = context_menu
+
+        def show_context_menu(event) -> None:
+            item_id = tree.identify_row(event.y)
+            if not item_id:
+                return
+            links = [req for req in self._item_links.get(item_id, []) if req.url]
+            if not links:
+                return
+            context_menu.delete(0, "end")
+            for requirement in links:
+                label = requirement.dependency
+                if requirement.mod:
+                    label = f"{requirement.dependency} (required by {requirement.mod})"
+                context_menu.add_command(
+                    label=label,
+                    command=lambda url=requirement.url: webbrowser.open(url),
+                )
+            if context_menu.index("end") is None:
+                return
+            try:
+                context_menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                context_menu.grab_release()
+
+        tree.bind("<Button-3>", show_context_menu, add="+")
+
         self.status_var = tk.StringVar(value="No dependencies detected.")
         ttk.Label(frame, textvariable=self.status_var).pack(anchor="w", pady=(8, 0))
 
@@ -416,6 +510,7 @@ class DependencyOverlay:
             return
         tree = self.tree
         tree.delete(*tree.get_children())
+        self._item_links.clear()
         total = len(self._results)
         missing = 0
         for result in self._results:
@@ -426,7 +521,10 @@ class DependencyOverlay:
             if result.missing:
                 missing += 1
             detail = result.detail
-            tree.insert("", "end", values=(file_name, mods, status, detail))
+            item_id = tree.insert("", "end", values=(file_name, mods, status, detail))
+            links = [req for req in result.requirements if req.missing and req.url]
+            if links:
+                self._item_links[item_id] = links
         if self.status_var is not None:
             try:
                 if total:
@@ -435,6 +533,33 @@ class DependencyOverlay:
                     self.status_var.set("No dependencies detected.")
             except tk.TclError:
                 pass
+        self._update_link_buttons()
+
+    def _update_link_buttons(self) -> None:
+        container = self._link_container
+        tree = self.tree
+        if container is None or tree is None or not tree.winfo_exists():
+            return
+        for child in container.winfo_children():
+            child.destroy()
+        selection = tree.selection()
+        if not selection:
+            ttk.Label(container, text="Select a row to view available downloads.").pack(anchor="w")
+            return
+        item_id = selection[0]
+        links = self._item_links.get(item_id, [])
+        if not links:
+            ttk.Label(container, text="No URLs available for the selected item.").pack(anchor="w")
+            return
+        for requirement in links:
+            label = requirement.dependency
+            if requirement.mod:
+                label = f"{requirement.dependency} (required by {requirement.mod})"
+            ttk.Button(
+                container,
+                text=label,
+                command=lambda url=requirement.url: webbrowser.open(url),
+            ).pack(anchor="w", pady=(0, 4))
 
 
 class DependencyPlugin:

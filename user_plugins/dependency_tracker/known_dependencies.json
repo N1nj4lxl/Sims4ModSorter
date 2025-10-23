@@ -4,47 +4,55 @@
       "id": "ui_cheats_extension",
       "name": "UI Cheats Extension",
       "patterns": ["ui cheats", "ui_cheats", "uicheats", "ui-cheats"],
-      "requires": ["mc_command_center", "ts4_script_loader"]
+      "requires": ["mc_command_center", "ts4_script_loader"],
+      "download_url": "https://www.patreon.com/posts/ui-cheats-extension-26240068"
     },
     {
       "id": "wickedwhims",
       "name": "WickedWhims",
       "patterns": ["wickedwhims", "wicked whims", "turbodriver"],
-      "requires": ["basemental_drugs"]
+      "requires": ["basemental_drugs"],
+      "homepage": "https://wickedwhimsmod.com/"
     },
     {
       "id": "better_school_grades",
       "name": "Better School Grades",
       "patterns": ["better school grades"],
-      "requires": ["xml_injector"]
+      "requires": ["xml_injector"],
+      "homepage": "https://littlemssam.tumblr.com/post/625676532776542208/better-school-grades"
     },
     {
       "id": "slice_of_life",
       "name": "Slice of Life",
       "patterns": ["slice of life", "kawaiistacie slice"],
-      "requires": ["xml_injector"]
+      "requires": ["xml_injector"],
+      "homepage": "https://www.kawaiistaciemods.com/slice-of-life"
     }
   ],
   "frameworks": [
     {
       "id": "mc_command_center",
       "name": "MC Command Center",
-      "patterns": ["mc command center", "mccc", "deaderpool"]
+      "patterns": ["mc command center", "mccc", "deaderpool"],
+      "homepage": "https://deaderpool-mccc.com/#/releases"
     },
     {
       "id": "xml_injector",
       "name": "XML Injector",
-      "patterns": ["xml injector"]
+      "patterns": ["xml injector"],
+      "homepage": "https://scumbumbomods.com/xml-injector/"
     },
     {
       "id": "basemental_drugs",
       "name": "Basemental Drugs",
-      "patterns": ["basemental drugs", "basementaldrugs"]
+      "patterns": ["basemental drugs", "basementaldrugs"],
+      "homepage": "https://basementalcc.com/drugs"
     },
     {
       "id": "ts4_script_loader",
       "name": "TS4 Script Loader",
-      "patterns": ["ts4 script loader", "ts4scriptloader"]
+      "patterns": ["ts4 script loader", "ts4scriptloader"],
+      "homepage": "https://modthesims.info/d/479997/ts4-script-loader.html"
     }
   ]
 }
