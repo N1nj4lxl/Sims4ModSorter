@@ -9,7 +9,7 @@ import urllib.request
 from urllib.parse import urlparse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Pattern
 
 BASE_DIR = Path(__file__).resolve().parent
 LAUNCH_LOG_PATH = BASE_DIR / "launch_diagnostics.jsonl"
@@ -97,6 +97,8 @@ class UpdateResult:
     message: Optional[str]
     release_page_url: Optional[str] = None
     asset_name: Optional[str] = None
+    asset_size: Optional[int] = None
+    asset_content_type: Optional[str] = None
 
 
 def log_launch_event(component: str, event: str, details: Optional[Dict[str, object]] = None) -> None:
@@ -255,12 +257,29 @@ def _build_request(url: str) -> urllib.request.Request:
 def check_for_update(component: str, current_version: str, timeout: float = 5.0) -> UpdateResult:
     """Fetch the latest version string and compare it with the current version."""
     config = _load_update_config()
+    component_cfg = _component_config(component, config)
     version_url, config_download_url, release_api_url, owner, repo = _build_version_url(component, config)
     remote_version: Optional[str] = None
     resolved_download: Optional[str] = None
     failure_message: Optional[str] = None
     release_page_url: Optional[str] = None
     asset_name: Optional[str] = None
+    asset_size: Optional[int] = None
+    asset_content_type: Optional[str] = None
+
+    asset_name_preference = _clean_str(component_cfg.get("download_asset_name"))
+    if not asset_name_preference and isinstance(config.get("download_asset_name"), str):
+        asset_name_preference = _clean_str(config.get("download_asset_name"))
+
+    asset_pattern_text = _clean_str(component_cfg.get("download_asset_pattern"))
+    if not asset_pattern_text and isinstance(config.get("download_asset_pattern"), str):
+        asset_pattern_text = _clean_str(config.get("download_asset_pattern"))
+    asset_pattern: Optional[Pattern[str]] = None
+    if asset_pattern_text:
+        try:
+            asset_pattern = re.compile(asset_pattern_text, re.IGNORECASE)
+        except re.error:
+            asset_pattern = None
 
     if config_download_url:
         if _is_official_asset_url(config_download_url, owner, repo) or _is_official_tarball_url(
@@ -271,7 +290,16 @@ def check_for_update(component: str, current_version: str, timeout: float = 5.0)
             release_page_url = config_download_url
 
     if not release_api_url and not version_url:
-        return UpdateResult(None, False, resolved_download, "Update source not configured.")
+        return UpdateResult(
+            None,
+            False,
+            resolved_download,
+            "Update source not configured.",
+            release_page_url,
+            asset_name,
+            asset_size,
+            asset_content_type,
+        )
 
     if release_api_url:
         try:
@@ -314,20 +342,44 @@ def check_for_update(component: str, current_version: str, timeout: float = 5.0)
                         release_page_url = html_url
                 assets = data.get("assets")
                 if isinstance(assets, list):
+                    best_score: tuple[int, int, int] | None = None
+                    best_asset: Optional[dict[str, object]] = None
                     for asset in assets:
                         if not isinstance(asset, dict):
                             continue
                         browser_download = asset.get("browser_download_url")
-                        if (
+                        if not (
                             isinstance(browser_download, str)
                             and browser_download.strip()
                             and _is_official_asset_url(browser_download.strip(), owner, repo)
                         ):
-                            resolved_download = browser_download.strip()
-                            asset_name_value = asset.get("name")
-                            if isinstance(asset_name_value, str) and asset_name_value.strip():
-                                asset_name = asset_name_value.strip()
-                            break
+                            continue
+                        candidate_name = _clean_str(asset.get("name"))
+                        size_value = asset.get("size")
+                        candidate_size = None
+                        if isinstance(size_value, int):
+                            candidate_size = max(size_value, 0)
+                        candidate_content_type = _clean_str(asset.get("content_type"))
+                        match_rank = 0
+                        if candidate_name and asset_name_preference and candidate_name.lower() == asset_name_preference.lower():
+                            match_rank = 2
+                        elif candidate_name and asset_pattern and asset_pattern.search(candidate_name):
+                            match_rank = 1
+                        size_rank = 1 if candidate_size and candidate_size > 0 else 0
+                        score = (match_rank, size_rank, candidate_size or 0)
+                        if best_score is None or score > best_score:
+                            best_score = score
+                            best_asset = {
+                                "url": browser_download.strip(),
+                                "name": candidate_name,
+                                "size": candidate_size,
+                                "content_type": candidate_content_type,
+                            }
+                    if best_asset:
+                        resolved_download = best_asset["url"]  # type: ignore[assignment]
+                        asset_name = best_asset.get("name")  # type: ignore[assignment]
+                        asset_size = best_asset.get("size")  # type: ignore[assignment]
+                        asset_content_type = best_asset.get("content_type")  # type: ignore[assignment]
                 tarball_url = data.get("tarball_url")
                 if (
                     not resolved_download
@@ -355,7 +407,16 @@ def check_for_update(component: str, current_version: str, timeout: float = 5.0)
 
     if not remote_version:
         if failure_message:
-            return UpdateResult(None, False, resolved_download, failure_message, release_page_url, asset_name)
+            return UpdateResult(
+                None,
+                False,
+                resolved_download,
+                failure_message,
+                release_page_url,
+                asset_name,
+                asset_size,
+                asset_content_type,
+            )
         return UpdateResult(
             None,
             False,
@@ -363,6 +424,8 @@ def check_for_update(component: str, current_version: str, timeout: float = 5.0)
             "Update check returned an empty version string.",
             release_page_url,
             asset_name,
+            asset_size,
+            asset_content_type,
         )
 
     try:
@@ -376,8 +439,19 @@ def check_for_update(component: str, current_version: str, timeout: float = 5.0)
             "Unable to compare version strings.",
             release_page_url,
             asset_name,
+            asset_size,
+            asset_content_type,
         )
 
     is_newer = remote_tuple > current_tuple
-    return UpdateResult(remote_version, is_newer, resolved_download, None, release_page_url, asset_name)
+    return UpdateResult(
+        remote_version,
+        is_newer,
+        resolved_download,
+        None,
+        release_page_url,
+        asset_name,
+        asset_size,
+        asset_content_type,
+    )
 
