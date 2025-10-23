@@ -13,6 +13,7 @@ import os
 import queue
 import re
 import shutil
+import tempfile
 import subprocess
 import sys
 import threading
@@ -1490,9 +1491,78 @@ class Sims4ModSorterApp(tk.Tk):
     def _handle_update_download_success(self, target_path: Path, manual: bool) -> None:
         self._hide_update_overlay()
         self.log(f"Update downloaded to {target_path}")
-        message = f"Saved update to {target_path}\nInstall the update by running the downloaded package."
-        if messagebox.askyesno("Update Downloaded", message + "\nOpen the containing folder?", parent=self):
-            self._open_path(target_path.parent)
+        try:
+            replaced = self._install_update_package(target_path)
+        except zipfile.BadZipFile as exc:
+            self.log(f"Downloaded update is not a valid ZIP archive: {exc}", level="error")
+            messagebox.showerror(
+                "Update Installation Failed",
+                "The downloaded update could not be installed because it is not a valid ZIP archive.",
+                parent=self,
+            )
+            return
+        except Exception as exc:
+            self.log(f"Failed to install downloaded update: {exc}", level="error")
+            messagebox.showerror(
+                "Update Installation Failed",
+                f"Unable to install the downloaded update: {exc}",
+                parent=self,
+            )
+            return
+
+        files_message = (
+            f"Replaced {replaced} file{'s' if replaced != 1 else ''}." if replaced > 0 else "No files needed to be replaced."
+        )
+        messagebox.showinfo(
+            "Update Installed",
+            (
+                "The update package was downloaded and installed successfully.\n"
+                f"{files_message}\n"
+                "Please restart Sims4 Mod Sorter to finish applying the update.\n\n"
+                f"The downloaded package is saved at: {target_path}"
+            ),
+            parent=self,
+        )
+
+    def _install_update_package(self, package_path: Path) -> int:
+        self.log(f"Installing update from {package_path}")
+        app_root = Path(__file__).resolve().parent
+        replaced_files = 0
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            with zipfile.ZipFile(package_path, "r") as archive:
+                archive.extractall(temp_path)
+
+            extracted_root = self._resolve_update_root(temp_path)
+            replaced_files = self._copy_update_contents(extracted_root, app_root)
+
+        return replaced_files
+
+    def _resolve_update_root(self, extracted_root: Path) -> Path:
+        candidates = [p for p in extracted_root.iterdir() if p.name != "__MACOSX"]
+        if len(candidates) == 1 and candidates[0].is_dir():
+            return candidates[0]
+        return extracted_root
+
+    def _copy_update_contents(self, source: Path, destination: Path) -> int:
+        replaced = 0
+        if not source.exists():
+            raise FileNotFoundError("Extracted update does not contain any files")
+
+        for path in source.rglob("*"):
+            if any(part == "__MACOSX" for part in path.parts):
+                continue
+            relative = path.relative_to(source)
+            target = destination / relative
+            if path.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, target)
+                replaced += 1
+
+        return replaced
 
     def _handle_update_download_failure(self, target_path: Path, error: BaseException, manual: bool) -> None:
         if target_path.exists():
