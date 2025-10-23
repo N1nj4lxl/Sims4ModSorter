@@ -1780,7 +1780,7 @@ class Sims4ModSorterApp(tk.Tk):
         selected_state = {"cancelled": True, "values": set()}
 
         def confirm_selection() -> None:
-            indices = listbox.curselection()
+            indices = tuple(map(int, listbox.curselection()))
             if not indices:
                 if not messagebox.askyesno(
                     "No Files Selected",
