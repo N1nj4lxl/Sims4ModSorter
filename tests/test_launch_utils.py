@@ -138,8 +138,8 @@ class DownloadWorkerTests(TestCase):
     def _make_dummy_downloader(self) -> object:
         class Dummy:
             def __init__(self) -> None:
-                self.success: Optional[tuple[Path, bool]] = None
-                self.failure: Optional[tuple[Path, BaseException, bool]] = None
+                self.success: Optional[tuple[Path, str]] = None
+                self.failure: Optional[tuple[Path, BaseException, str]] = None
                 self.progress: list[tuple[int, int]] = []
 
             def _enqueue_ui(self, callback):
@@ -148,11 +148,13 @@ class DownloadWorkerTests(TestCase):
             def _update_download_progress(self, written: int, total: int) -> None:
                 self.progress.append((written, total))
 
-            def _handle_update_download_success(self, target_path: Path, manual: bool) -> None:
-                self.success = (target_path, manual)
+            def _handle_update_download_success(self, target_path: Path, mode: str) -> None:
+                self.success = (target_path, mode)
 
-            def _handle_update_download_failure(self, target_path: Path, error: BaseException, manual: bool) -> None:
-                self.failure = (target_path, error, manual)
+            def _handle_update_download_failure(
+                self, target_path: Path, error: BaseException, mode: str
+            ) -> None:
+                self.failure = (target_path, error, mode)
 
         return Dummy()
 
@@ -165,10 +167,11 @@ class DownloadWorkerTests(TestCase):
             dummy,
             f"{self._server.base_url}/redirect",
             destination,
-            manual=False,
+            mode="auto-install",
         )
 
         self.assertIsNotNone(dummy.success)
+        self.assertEqual(dummy.success[1], "auto-install")
         self.assertTrue(destination.exists())
         self.assertTrue(zipfile.is_zipfile(destination))
 
@@ -183,13 +186,99 @@ class DownloadWorkerTests(TestCase):
             dummy,
             f"{self._server.base_url}/empty.zip",
             destination,
-            manual=True,
+            mode="manual-download",
         )
 
         self.assertIsNone(dummy.success)
         self.assertIsNotNone(dummy.failure)
+        self.assertEqual(dummy.failure[2], "manual-download")
         self.assertFalse(destination.exists())
         self.assertIn("empty", str(dummy.failure[1]))
 
         shutil.rmtree(destination_dir)
+
+
+class _DummyButton:
+    def __init__(self) -> None:
+        self.state = "normal"
+
+    def configure(self, **kwargs) -> None:
+        if "state" in kwargs:
+            self.state = kwargs["state"]
+
+    def winfo_exists(self) -> bool:
+        return True
+
+
+class UpdateOverlayWorkflowTests(TestCase):
+    def _make_app(self) -> Sims4ModSorterApp:
+        app = Sims4ModSorterApp.__new__(Sims4ModSorterApp)
+        app._update_check_in_progress = False
+        app.check_updates_button = _DummyButton()
+        app._update_download_url = None
+        app._update_release_page_url = None
+        app._update_download_filename = None
+        app._update_available = False
+        app._latest_version = None
+        app._update_overlay_origin = "general"
+        app._update_overlay_visible = False
+        app._update_overlay = None
+        app._refresh_version_display = mock.Mock()
+        app.log = mock.Mock()
+        app._show_update_overlay = mock.Mock()
+        app._hide_update_overlay = mock.Mock()
+        app.settings_sidebar = mock.Mock()
+        app.settings_sidebar.winfo_exists.return_value = True
+        app.settings_sidebar.focus_set = mock.Mock()
+        return app
+
+    def test_manual_settings_check_uses_overlay(self) -> None:
+        app = self._make_app()
+        result = UpdateResult(
+            latest_version="2.0.0",
+            is_newer=True,
+            download_url="https://example.com/update.zip",
+            message=None,
+            release_page_url="https://example.com/release",
+            asset_name="update.zip",
+        )
+
+        with mock.patch("tkinter.messagebox.askyesno") as mock_ask, mock.patch(
+            "tkinter.messagebox.showinfo"
+        ) as mock_info:
+            app._complete_update_check(result, manual=True, error_message=None, from_settings=True)
+
+        mock_ask.assert_not_called()
+        mock_info.assert_not_called()
+        app._show_update_overlay.assert_called_once()
+        args, kwargs = app._show_update_overlay.call_args
+        self.assertIn("Auto Update", args[0])
+        self.assertTrue(kwargs["enable_manual"])
+        self.assertEqual(kwargs["origin"], "settings")
+        self.assertEqual(app.check_updates_button.state, "normal")
+
+    def test_overlay_buttons_dispatch_modes(self) -> None:
+        app = Sims4ModSorterApp.__new__(Sims4ModSorterApp)
+        app._start_update_download = mock.Mock()
+        app._update_download_url = "https://example.com/update.zip"
+        app._update_release_page_url = "https://example.com/release"
+
+        app._on_update_overlay_auto_update()
+        app._start_update_download.assert_called_once_with(mode="auto-install")
+
+        app._start_update_download.reset_mock()
+        app._on_update_overlay_manual_download()
+        app._start_update_download.assert_called_once_with(mode="manual-download")
+
+    def test_manual_download_button_opens_release_page_when_no_download(self) -> None:
+        app = Sims4ModSorterApp.__new__(Sims4ModSorterApp)
+        app._start_update_download = mock.Mock()
+        app._open_release_page = mock.Mock()
+        app._update_download_url = None
+        app._update_release_page_url = "https://example.com/release"
+
+        app._on_update_overlay_manual_download()
+
+        app._open_release_page.assert_called_once()
+        app._start_update_download.assert_not_called()
 
