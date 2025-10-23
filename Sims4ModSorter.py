@@ -1285,29 +1285,8 @@ class Sims4ModSorterApp(tk.Tk):
         self.btn_scan.pack(side="left", padx=4)
         ttk.Button(top, text="Import Plan", command=self.on_import).pack(side="left", padx=4)
         ttk.Button(top, text="Export Plan", command=self.on_export).pack(side="left", padx=4)
-        loadout_frame = ttk.Frame(top)
-        loadout_frame.pack(side="left", padx=(12, 0))
-        ttk.Label(loadout_frame, text="Loadout:").pack(side="left")
-        self._loadout_selector = ttk.Combobox(
-            loadout_frame,
-            textvariable=self.loadout_var,
-            state="readonly",
-            width=24,
-            values=tuple(sorted(self.loadouts.keys())),
-        )
-        self._loadout_selector.pack(side="left", padx=(4, 0))
-        self._loadout_selector.bind("<<ComboboxSelected>>", self._on_loadout_selected)
-        self._loadout_apply_btn = ttk.Button(loadout_frame, text="Apply", command=self.on_apply_loadout)
-        self._loadout_apply_btn.pack(side="left", padx=4)
-        settings_btn = ttk.Button(top, text="⚙", width=3, command=self.show_settings)
-        self._pack_toolbar_button(settings_btn, button_id="settings", side="right", padx=0)
-        status_btn = ttk.Button(top, text="Plugin Status", command=self.show_mod_status_popup)
-        self._pack_toolbar_button(status_btn, button_id="plugin_status", side="right", padx=6)
-        undo_btn = ttk.Button(top, text="Undo Last", command=self.on_undo)
-        self._pack_toolbar_button(undo_btn, button_id="undo_last", side="right", padx=6)
-        history_btn = ttk.Button(top, text="History", command=self.show_move_history)
-        self._pack_toolbar_button(history_btn, button_id="move_history", side="right", padx=6)
-        self._build_plugin_toolbar_buttons(top)
+        settings_btn = ttk.Button(top, text="Settings", command=self.show_settings)
+        settings_btn.pack(side="right", padx=4)
 
         mid = ttk.Frame(root_container)
         mid.pack(fill="both", expand=True, padx=12, pady=(6, 8))
@@ -1397,34 +1376,99 @@ class Sims4ModSorterApp(tk.Tk):
         tree_frame.grid_columnconfigure(0, weight=1)
         tree_frame.grid_rowconfigure(0, weight=1)
 
-        right = ttk.Frame(mid)
-        right.pack(side="left", fill="y", padx=(10, 0))
-        ttk.Label(right, text="Selection").pack(anchor="w")
-        self.sel_label = ttk.Label(right, text="None selected")
-        self.sel_label.pack(anchor="w", pady=(0, 10))
-        ttk.Label(right, text="Type").pack(anchor="w")
-        self.type_cb = ttk.Combobox(right, values=CATEGORY_ORDER, state="readonly")
-        self.type_cb.pack(fill="x", pady=(0, 8))
-        ttk.Label(right, text="Target Folder").pack(anchor="w")
-        self.target_entry = ttk.Entry(right)
-        self.target_entry.pack(fill="x", pady=(0, 8))
-        ttk.Button(right, text="Apply to Selected", command=self.on_apply_selected).pack(fill="x", pady=4)
-        ttk.Button(right, text="Toggle Include", command=self.on_toggle_include).pack(fill="x", pady=4)
-        ttk.Separator(right).pack(fill="x", pady=10)
-        ttk.Label(right, text="Batch assign by keyword").pack(anchor="w")
-        self.batch_keyword = ttk.Entry(right)
+        right_container = ttk.Frame(mid)
+        right_container.pack(side="left", fill="both", padx=(10, 0))
+        sidebar_canvas = tk.Canvas(right_container, borderwidth=0, highlightthickness=0, width=260)
+        sidebar_canvas.pack(side="left", fill="both", expand=True)
+        sidebar_scrollbar = ttk.Scrollbar(right_container, orient="vertical", command=sidebar_canvas.yview)
+        sidebar_scrollbar.pack(side="right", fill="y")
+        sidebar_canvas.configure(yscrollcommand=sidebar_scrollbar.set)
+        sidebar_frame = ttk.Frame(sidebar_canvas)
+        sidebar_window = sidebar_canvas.create_window((0, 0), window=sidebar_frame, anchor="nw")
+
+        def _configure_sidebar(_event) -> None:
+            sidebar_canvas.configure(scrollregion=sidebar_canvas.bbox("all"))
+            sidebar_canvas.itemconfigure(sidebar_window, width=sidebar_canvas.winfo_width())
+
+        sidebar_frame.bind("<Configure>", _configure_sidebar)
+
+        def _on_sidebar_mousewheel(event) -> None:
+            if event.delta:
+                sidebar_canvas.yview_scroll(int(-event.delta / 120), "units")
+            elif event.num == 4:
+                sidebar_canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                sidebar_canvas.yview_scroll(1, "units")
+
+        sidebar_canvas.bind("<MouseWheel>", _on_sidebar_mousewheel)
+        sidebar_canvas.bind("<Button-4>", lambda _e: sidebar_canvas.yview_scroll(-1, "units"))
+        sidebar_canvas.bind("<Button-5>", lambda _e: sidebar_canvas.yview_scroll(1, "units"))
+        sidebar_frame.bind("<MouseWheel>", _on_sidebar_mousewheel)
+        sidebar_frame.bind("<Button-4>", lambda _e: sidebar_canvas.yview_scroll(-1, "units"))
+        sidebar_frame.bind("<Button-5>", lambda _e: sidebar_canvas.yview_scroll(1, "units"))
+
+        selection_section = ttk.LabelFrame(sidebar_frame, text="Selection", padding=(10, 8))
+        selection_section.pack(fill="x", pady=(0, 10))
+        self.sel_label = ttk.Label(selection_section, text="None selected")
+        self.sel_label.pack(anchor="w", pady=(0, 6))
+        ttk.Label(selection_section, text="Type").pack(anchor="w")
+        self.type_cb = ttk.Combobox(selection_section, values=CATEGORY_ORDER, state="readonly")
+        self.type_cb.pack(fill="x", pady=(0, 6))
+        ttk.Label(selection_section, text="Target Folder").pack(anchor="w")
+        self.target_entry = ttk.Entry(selection_section)
+        self.target_entry.pack(fill="x", pady=(0, 6))
+        ttk.Button(selection_section, text="Apply to Selected", command=self.on_apply_selected).pack(fill="x", pady=(0, 4))
+        ttk.Button(selection_section, text="Toggle Include", command=self.on_toggle_include).pack(fill="x")
+
+        batch_section = ttk.LabelFrame(sidebar_frame, text="Batch Tools", padding=(10, 8))
+        batch_section.pack(fill="x", pady=(0, 10))
+        ttk.Label(batch_section, text="Keyword").pack(anchor="w")
+        self.batch_keyword = ttk.Entry(batch_section)
         self.batch_keyword.pack(fill="x", pady=(0, 6))
-        ttk.Button(right, text="Assign Type to Matches", command=self.on_batch_assign).pack(fill="x")
-        ttk.Separator(right).pack(fill="x", pady=10)
-        ttk.Button(right, text="Recalculate Targets", command=self.on_recalc_targets).pack(fill="x", pady=4)
-        ttk.Button(right, text="Select All", command=lambda: self.tree.selection_set(self.tree.get_children())).pack(fill="x", pady=2)
-        ttk.Button(right, text="Select None", command=lambda: self.tree.selection_remove(self.tree.get_children())).pack(fill="x", pady=2)
-        ttk.Separator(right).pack(fill="x", pady=10)
-        ttk.Label(right, text="Loadouts").pack(anchor="w")
-        ttk.Button(right, text="New Loadout", command=self.on_create_loadout).pack(fill="x", pady=2)
-        ttk.Button(right, text="Rename Loadout", command=self.on_rename_loadout).pack(fill="x", pady=2)
-        ttk.Button(right, text="Delete Loadout", command=self.on_delete_loadout).pack(fill="x", pady=2)
-        ttk.Button(right, text="Apply Selected Loadout", command=self.on_apply_loadout).pack(fill="x", pady=(6, 0))
+        ttk.Button(batch_section, text="Assign Type to Matches", command=self.on_batch_assign).pack(fill="x")
+
+        utilities_section = ttk.LabelFrame(sidebar_frame, text="Utilities", padding=(10, 8))
+        utilities_section.pack(fill="x", pady=(0, 10))
+        ttk.Button(utilities_section, text="Recalculate Targets", command=self.on_recalc_targets).pack(fill="x")
+        ttk.Button(
+            utilities_section,
+            text="Select All",
+            command=lambda: self.tree.selection_set(self.tree.get_children()),
+        ).pack(fill="x", pady=(6, 0))
+        ttk.Button(
+            utilities_section,
+            text="Select None",
+            command=lambda: self.tree.selection_remove(self.tree.get_children()),
+        ).pack(fill="x", pady=(6, 0))
+        ttk.Separator(utilities_section).pack(fill="x", pady=10)
+        ttk.Button(utilities_section, text="Plugin Status", command=self.show_mod_status_popup).pack(fill="x")
+        ttk.Button(utilities_section, text="Undo Last", command=self.on_undo).pack(fill="x", pady=(6, 0))
+        ttk.Button(utilities_section, text="History", command=self.show_move_history).pack(fill="x", pady=(6, 0))
+
+        loadout_section = ttk.LabelFrame(sidebar_frame, text="Loadouts", padding=(10, 8))
+        loadout_section.pack(fill="x", pady=(0, 10))
+        ttk.Label(loadout_section, text="Active Loadout").pack(anchor="w")
+        self._loadout_selector = ttk.Combobox(
+            loadout_section,
+            textvariable=self.loadout_var,
+            state="readonly",
+            width=24,
+            values=tuple(sorted(self.loadouts.keys())),
+        )
+        self._loadout_selector.pack(fill="x", pady=(0, 6))
+        self._loadout_selector.bind("<<ComboboxSelected>>", self._on_loadout_selected)
+        ttk.Button(loadout_section, text="New Loadout", command=self.on_create_loadout).pack(fill="x")
+        ttk.Button(loadout_section, text="Rename Loadout", command=self.on_rename_loadout).pack(fill="x", pady=(6, 0))
+        ttk.Button(loadout_section, text="Delete Loadout", command=self.on_delete_loadout).pack(fill="x", pady=(6, 0))
+        self._loadout_apply_btn = ttk.Button(loadout_section, text="Apply Selected Loadout", command=self.on_apply_loadout)
+        self._loadout_apply_btn.pack(fill="x", pady=(10, 0))
+
+        if self._plugin_toolbar_buttons:
+            plugin_section = ttk.LabelFrame(sidebar_frame, text="Plugin Buttons", padding=(10, 8))
+            plugin_section.pack(fill="x", pady=(0, 10))
+            plugin_container = ttk.Frame(plugin_section)
+            plugin_container.pack(fill="x")
+            self._build_plugin_toolbar_buttons(plugin_container)
 
         bottom = ttk.Frame(root_container)
         bottom.pack(fill="x", padx=12, pady=8)
@@ -1465,6 +1509,8 @@ class Sims4ModSorterApp(tk.Tk):
         side: str = "left",
         padx: int = 4,
         insert_before: Optional[str] = None,
+        fill: Optional[str] = None,
+        pady: int = 0,
     ) -> None:
         target = None
         if insert_before:
@@ -1472,6 +1518,10 @@ class Sims4ModSorterApp(tk.Tk):
             if target is not None and not target.winfo_exists():
                 target = None
         pack_kwargs = {"side": side, "padx": padx}
+        if fill:
+            pack_kwargs["fill"] = fill
+        if pady:
+            pack_kwargs["pady"] = pady
         if target is not None:
             pack_kwargs["before"] = target
         widget.pack(**pack_kwargs)
@@ -1494,11 +1544,14 @@ class Sims4ModSorterApp(tk.Tk):
                 text=text,
                 command=lambda e=entry: self._invoke_plugin_toolbar_button(e),
             )
+            side = entry.side if entry.side in {"top", "bottom"} else "top"
             self._pack_toolbar_button(
                 button,
                 button_id=entry.button_id,
-                side=entry.side,
-                padx=entry.padx,
+                side=side,
+                padx=0,
+                pady=4,
+                fill="x",
                 insert_before=entry.insert_before,
             )
 
