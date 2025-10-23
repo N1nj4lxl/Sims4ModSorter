@@ -1446,7 +1446,11 @@ class Sims4ModSorterApp(tk.Tk):
 
     def _download_update_worker(self, url: str, target_path: Path, manual: bool) -> None:
         try:
-            with urllib.request.urlopen(url) as response:
+            request = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Sims4ModSorter Update Check"},
+            )
+            with urllib.request.urlopen(request) as response:
                 total = int(response.headers.get("Content-Length") or 0)
                 chunk_size = 1024 * 64
                 written = 0
