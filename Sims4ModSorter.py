@@ -23,9 +23,9 @@ import urllib.request
 import webbrowser
 import zipfile
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MethodType
-from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, Union
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple, Union
 
 import tkinter as tk
 import tkinter.font as tkfont
@@ -709,6 +709,14 @@ class Sims4ModSorterApp(tk.Tk):
         self._update_overlay_button_frame: Optional[ttk.Frame] = None
         self._update_overlay_details_btn: Optional[ttk.Button] = None
         self._update_overlay_visible: bool = False
+        self._update_download_mode = tk.StringVar(value="simple")
+        self._update_mode_description = tk.StringVar(
+            value="Downloads and installs every updated file automatically."
+        )
+        self._update_mode_frame: Optional[ttk.LabelFrame] = None
+        self._update_mode_simple_radio: Optional[ttk.Radiobutton] = None
+        self._update_mode_advanced_radio: Optional[ttk.Radiobutton] = None
+        self._update_mode_description_label: Optional[ttk.Label] = None
         self._auto_size_pending = False
 
         self.scan_folder_display = tk.StringVar(value="All folders")
@@ -1254,10 +1262,43 @@ class Sims4ModSorterApp(tk.Tk):
         message = ttk.Label(
             container,
             textvariable=self._update_overlay_message,
-            wraplength=360,
-            justify="center",
+            wraplength=420,
+            justify="left",
         )
         message.pack(fill="x")
+
+        mode_frame = ttk.LabelFrame(container, text="Download Mode")
+        mode_frame.pack(fill="x", pady=(16, 0))
+        self._update_mode_frame = mode_frame
+
+        simple_radio = ttk.Radiobutton(
+            mode_frame,
+            text="Simple — automatically replace all updated files",
+            value="simple",
+            variable=self._update_download_mode,
+            command=self._on_update_mode_changed,
+        )
+        simple_radio.pack(anchor="w", padx=12, pady=(8, 0))
+        self._update_mode_simple_radio = simple_radio
+
+        advanced_radio = ttk.Radiobutton(
+            mode_frame,
+            text="Advanced — choose which files to install",
+            value="advanced",
+            variable=self._update_download_mode,
+            command=self._on_update_mode_changed,
+        )
+        advanced_radio.pack(anchor="w", padx=12, pady=(4, 4))
+        self._update_mode_advanced_radio = advanced_radio
+
+        description_label = ttk.Label(
+            mode_frame,
+            textvariable=self._update_mode_description,
+            wraplength=400,
+            justify="left",
+        )
+        description_label.pack(fill="x", padx=12, pady=(0, 8))
+        self._update_mode_description_label = description_label
 
         progress = ttk.Progressbar(container, mode="indeterminate")
         progress.pack(fill="x", pady=(16, 12))
@@ -1295,6 +1336,7 @@ class Sims4ModSorterApp(tk.Tk):
         self._update_overlay_details_btn = details_btn
         self._update_overlay_skip_btn = skip_btn
         self._update_overlay_button_frame = buttons
+        self._on_update_mode_changed()
         return overlay
 
     def _refresh_update_overlay_theme(self) -> None:
@@ -1302,6 +1344,11 @@ class Sims4ModSorterApp(tk.Tk):
         if overlay and overlay.winfo_exists():
             palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
             overlay.configure(bg=palette.get("bg", "#111316"))
+            if self._update_mode_frame:
+                try:
+                    self._update_mode_frame.configure(style="TLabelframe")
+                except Exception:
+                    pass
 
     def _center_update_overlay(self) -> None:
         overlay = getattr(self, "_update_overlay", None)
@@ -1351,6 +1398,14 @@ class Sims4ModSorterApp(tk.Tk):
         if self._update_overlay_skip_btn:
             state = "normal" if enable_skip else "disabled"
             self._update_overlay_skip_btn.configure(state=state)
+        mode_state = "normal" if enable_download else "disabled"
+        if self._update_mode_simple_radio:
+            self._update_mode_simple_radio.configure(state=mode_state)
+        if self._update_mode_advanced_radio:
+            advanced_state = mode_state
+            if advanced_state == "normal" and not self._update_download_url:
+                advanced_state = "disabled"
+            self._update_mode_advanced_radio.configure(state=advanced_state)
         overlay.deiconify()
         overlay.lift()
         try:
@@ -1377,7 +1432,21 @@ class Sims4ModSorterApp(tk.Tk):
             self._update_overlay_details_btn.configure(state="disabled")
         if self._update_overlay_skip_btn:
             self._update_overlay_skip_btn.configure(state="disabled")
+        if self._update_mode_simple_radio:
+            self._update_mode_simple_radio.configure(state="disabled")
+        if self._update_mode_advanced_radio:
+            self._update_mode_advanced_radio.configure(state="disabled")
         self._update_overlay_visible = False
+
+    def _on_update_mode_changed(self) -> None:
+        mode = self._update_download_mode.get()
+        if mode == "advanced":
+            description = (
+                "You will be prompted to choose which files to install after the download completes."
+            )
+        else:
+            description = "Downloads and installs every updated file automatically."
+        self._update_mode_description.set(description)
 
     def _on_update_overlay_download(self) -> None:
         self._start_update_download(manual=False)
@@ -1491,8 +1560,26 @@ class Sims4ModSorterApp(tk.Tk):
     def _handle_update_download_success(self, target_path: Path, manual: bool) -> None:
         self._hide_update_overlay()
         self.log(f"Update downloaded to {target_path}")
+        selected_entries: Optional[Set[PurePosixPath]] = None
+        if self._update_download_mode.get() == "advanced":
+            selection = self._prompt_advanced_file_selection(target_path)
+            if selection is None:
+                messagebox.showinfo(
+                    "Update Cancelled",
+                    "The update installation was cancelled before copying any files.",
+                    parent=self,
+                )
+                return
+            if not selection:
+                messagebox.showinfo(
+                    "Update Cancelled",
+                    "No files were selected for installation. The update was not applied.",
+                    parent=self,
+                )
+                return
+            selected_entries = selection
         try:
-            new_install_path, copied = self._install_update_package(target_path)
+            new_install_path, copied = self._install_update_package(target_path, selected_entries)
         except zipfile.BadZipFile as exc:
             self.log(f"Downloaded update is not a valid ZIP archive: {exc}", level="error")
             messagebox.showerror(
@@ -1530,7 +1617,9 @@ class Sims4ModSorterApp(tk.Tk):
                 parent=self,
             )
 
-    def _install_update_package(self, package_path: Path) -> Tuple[Path, int]:
+    def _install_update_package(
+        self, package_path: Path, selected_entries: Optional[Set[PurePosixPath]] = None
+    ) -> Tuple[Path, int]:
         self.log(f"Installing update from {package_path}")
         app_root = Path(__file__).resolve().parent
 
@@ -1540,7 +1629,9 @@ class Sims4ModSorterApp(tk.Tk):
                 archive.extractall(temp_path)
 
             extracted_root = self._resolve_update_root(temp_path)
-            new_install_path, copied = self._prepare_new_installation(extracted_root, app_root)
+            new_install_path, copied = self._prepare_new_installation(
+                extracted_root, app_root, selected_entries
+            )
 
         return new_install_path, copied
 
@@ -1550,12 +1641,17 @@ class Sims4ModSorterApp(tk.Tk):
             return candidates[0]
         return extracted_root
 
-    def _prepare_new_installation(self, source: Path, current_root: Path) -> Tuple[Path, int]:
+    def _prepare_new_installation(
+        self,
+        source: Path,
+        current_root: Path,
+        selected_entries: Optional[Set[PurePosixPath]] = None,
+    ) -> Tuple[Path, int]:
         parent = current_root.parent
         base_name = source.name or current_root.name
         destination = self._next_installation_path(parent, base_name, current_root)
         destination.mkdir(parents=True, exist_ok=False)
-        copied = self._copy_update_contents(source, destination)
+        copied = self._copy_update_contents(source, destination, selected_entries)
         preserve = self._identify_preserve_entries(current_root)
         self._copy_preserved_entries(current_root, destination, preserve)
         return destination, copied
@@ -1571,17 +1667,33 @@ class Sims4ModSorterApp(tk.Tk):
             index += 1
         return candidate
 
-    def _copy_update_contents(self, source: Path, destination: Path) -> int:
+    def _copy_update_contents(
+        self, source: Path, destination: Path, selected_entries: Optional[Set[PurePosixPath]] = None
+    ) -> int:
         replaced = 0
         if not source.exists():
             raise FileNotFoundError("Extracted update does not contain any files")
+
+        allowed: Optional[Set[PurePosixPath]] = None
+        if selected_entries is not None:
+            allowed = {PurePosixPath(str(entry)) for entry in selected_entries if str(entry)}
 
         for path in source.rglob("*"):
             if any(part == "__MACOSX" for part in path.parts):
                 continue
             relative = path.relative_to(source)
+            relative_posix = PurePosixPath(relative.as_posix())
+            if allowed is not None and path.is_file() and relative_posix not in allowed:
+                continue
             target = destination / relative
             if path.is_dir():
+                if allowed is not None:
+                    has_descendant = any(
+                        relative_posix == entry or relative_posix in entry.parents
+                        for entry in allowed
+                    )
+                    if not has_descendant:
+                        continue
                 target.mkdir(parents=True, exist_ok=True)
             else:
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -1589,6 +1701,127 @@ class Sims4ModSorterApp(tk.Tk):
                 replaced += 1
 
         return replaced
+
+    def _prompt_advanced_file_selection(
+        self, package_path: Path
+    ) -> Optional[Set[PurePosixPath]]:
+        try:
+            with zipfile.ZipFile(package_path, "r") as archive:
+                entries = [
+                    PurePosixPath(*[part for part in PurePosixPath(info.filename).parts if part])
+                    for info in archive.infolist()
+                    if not info.is_dir()
+                ]
+        except Exception as exc:
+            messagebox.showerror(
+                "Advanced Download",
+                f"Unable to inspect the update package: {exc}",
+                parent=self,
+            )
+            return None
+
+        filtered_entries: List[PurePosixPath] = []
+        for entry in entries:
+            if not entry.parts:
+                continue
+            if entry.parts[0] == "__MACOSX":
+                continue
+            filtered_entries.append(entry)
+
+        if not filtered_entries:
+            messagebox.showwarning(
+                "Advanced Download",
+                "The update package did not contain any installable files.",
+                parent=self,
+            )
+            return set()
+
+        top_levels = {entry.parts[0] for entry in filtered_entries if entry.parts}
+        if len(top_levels) == 1 and all(len(entry.parts) > 1 for entry in filtered_entries):
+            trimmed_entries = [PurePosixPath(*entry.parts[1:]) for entry in filtered_entries]
+        else:
+            trimmed_entries = filtered_entries
+
+        display_entries = [entry for entry in trimmed_entries if entry.parts]
+        if not display_entries:
+            display_entries = trimmed_entries
+
+        sorted_entries = sorted(display_entries, key=lambda p: p.as_posix().lower())
+
+        dialog = tk.Toplevel(self)
+        dialog.title("Select Update Files")
+        dialog.transient(self)
+        dialog.resizable(True, True)
+        dialog.grab_set()
+        dialog.configure(padx=16, pady=16)
+
+        info_label = ttk.Label(
+            dialog,
+            text=(
+                "Choose the files to install from this update. Only the selected files will be copied "
+                "into the new installation."
+            ),
+            wraplength=420,
+            justify="left",
+        )
+        info_label.grid(row=0, column=0, columnspan=3, sticky="we", pady=(0, 12))
+
+        listbox = tk.Listbox(dialog, selectmode=tk.MULTIPLE, exportselection=False)
+        scrollbar = ttk.Scrollbar(dialog, orient="vertical", command=listbox.yview)
+        listbox.configure(yscrollcommand=scrollbar.set)
+        for entry in sorted_entries:
+            listbox.insert(tk.END, entry.as_posix())
+        listbox.grid(row=1, column=0, sticky="nsew")
+        scrollbar.grid(row=1, column=1, sticky="ns")
+
+        button_frame = ttk.Frame(dialog)
+        button_frame.grid(row=1, column=2, sticky="ns", padx=(12, 0))
+
+        selected_state = {"cancelled": True, "values": set()}
+
+        def confirm_selection() -> None:
+            indices = listbox.curselection()
+            if not indices:
+                if not messagebox.askyesno(
+                    "No Files Selected",
+                    "No files are selected. This will skip installing the update. Continue?",
+                    parent=dialog,
+                ):
+                    return
+            selected_state["cancelled"] = False
+            selected_state["values"] = {sorted_entries[i] for i in indices}
+            dialog.destroy()
+
+        def cancel_selection() -> None:
+            selected_state["cancelled"] = True
+            dialog.destroy()
+
+        def select_all() -> None:
+            listbox.select_set(0, tk.END)
+
+        def select_none() -> None:
+            listbox.select_clear(0, tk.END)
+
+        all_button = ttk.Button(button_frame, text="Select All", command=select_all)
+        all_button.pack(fill="x", pady=(0, 6))
+        none_button = ttk.Button(button_frame, text="Select None", command=select_none)
+        none_button.pack(fill="x", pady=(0, 6))
+        confirm_button = ttk.Button(button_frame, text="Install Selected", command=confirm_selection)
+        confirm_button.pack(fill="x", pady=(0, 6))
+        cancel_button = ttk.Button(button_frame, text="Cancel", command=cancel_selection)
+        cancel_button.pack(fill="x")
+
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(1, weight=1)
+
+        dialog.protocol("WM_DELETE_WINDOW", cancel_selection)
+
+        center_window(dialog)
+        self.wait_window(dialog)
+
+        if selected_state["cancelled"]:
+            return None
+        return set(selected_state["values"])
 
     def _launch_new_installation(self, new_install_path: Path) -> bool:
         current_root = Path(__file__).resolve().parent
