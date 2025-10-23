@@ -1657,22 +1657,29 @@ class Sims4ModSorterApp(tk.Tk):
     def _copy_preserved_entries(
         old_root: Path, new_root: Path, entries: Iterable[Path], *, overwrite: bool = True
     ) -> None:
+        def _merge(source: Path, target: Path) -> None:
+            try:
+                if source.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    for child in source.iterdir():
+                        _merge(child, target / child.name)
+                elif source.exists():
+                    if not overwrite and target.exists():
+                        return
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, target)
+            except Exception:
+                return
+
         for entry in entries:
             try:
                 relative = entry.relative_to(old_root)
             except ValueError:
                 continue
             destination = new_root / relative
-            try:
-                if not overwrite and destination.exists():
-                    continue
-                if entry.is_dir():
-                    shutil.copytree(entry, destination, dirs_exist_ok=True)
-                elif entry.exists():
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(entry, destination)
-            except Exception:
+            if not overwrite and entry.is_file() and destination.exists():
                 continue
+            _merge(entry, destination)
 
     def _schedule_update_cleanup(self, old_root: Path, new_root: Path) -> None:
         if not self._start_cleanup_process(old_root, new_root):
@@ -1705,22 +1712,27 @@ def preserve(root: pathlib.Path) -> list[pathlib.Path]:
     return out
 
 def copy_entries(entries: list[pathlib.Path]) -> None:
+    def merge(source: pathlib.Path, target: pathlib.Path) -> None:
+        try:
+            if source.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                for child in source.iterdir():
+                    merge(child, target / child.name)
+            elif source.exists():
+                if target.exists():
+                    return
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+        except Exception:
+            pass
+
     for entry in entries:
         try:
             rel = entry.relative_to(old)
         except Exception:
             continue
         dest = new / rel
-        try:
-            if dest.exists():
-                continue
-            if entry.is_dir():
-                shutil.copytree(entry, dest, dirs_exist_ok=True)
-            elif entry.exists():
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(entry, dest)
-        except Exception:
-            pass
+        merge(entry, dest)
 
 for _ in range(10):
     try:
