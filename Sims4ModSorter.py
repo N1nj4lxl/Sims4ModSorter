@@ -1654,7 +1654,9 @@ class Sims4ModSorterApp(tk.Tk):
         return preserve
 
     @staticmethod
-    def _copy_preserved_entries(old_root: Path, new_root: Path, entries: Iterable[Path]) -> None:
+    def _copy_preserved_entries(
+        old_root: Path, new_root: Path, entries: Iterable[Path], *, overwrite: bool = True
+    ) -> None:
         for entry in entries:
             try:
                 relative = entry.relative_to(old_root)
@@ -1662,6 +1664,8 @@ class Sims4ModSorterApp(tk.Tk):
                 continue
             destination = new_root / relative
             try:
+                if not overwrite and destination.exists():
+                    continue
                 if entry.is_dir():
                     shutil.copytree(entry, destination, dirs_exist_ok=True)
                 elif entry.exists():
@@ -1708,6 +1712,8 @@ def copy_entries(entries: list[pathlib.Path]) -> None:
             continue
         dest = new / rel
         try:
+            if dest.exists():
+                continue
             if entry.is_dir():
                 shutil.copytree(entry, dest, dirs_exist_ok=True)
             elif entry.exists():
@@ -1739,7 +1745,9 @@ for _ in range(10):
         try:
             time.sleep(1.0)
             preserve = Sims4ModSorterApp._identify_preserve_entries(old_root)
-            Sims4ModSorterApp._copy_preserved_entries(old_root, new_root, preserve)
+            Sims4ModSorterApp._copy_preserved_entries(
+                old_root, new_root, preserve, overwrite=False
+            )
             shutil.rmtree(old_root, ignore_errors=True)
         except Exception:
             pass
