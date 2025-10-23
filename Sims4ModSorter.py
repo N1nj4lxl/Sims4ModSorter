@@ -874,11 +874,24 @@ class Sims4ModSorterApp(tk.Tk):
         self._update_available: bool = False
         self._update_overlay: Optional[tk.Toplevel] = None
         self._update_overlay_message = tk.StringVar(value="")
+        self._update_overlay_headline = tk.StringVar(value="Sims4 Mod Sorter Update")
+        self._update_overlay_status_icon = tk.StringVar(value="⬆️")
+        self._update_overlay_progress_title = tk.StringVar(value="")
+        self._update_overlay_progress_detail = tk.StringVar(value="")
+        self._update_overlay_changelog = tk.StringVar(value="")
         self._update_overlay_progress: Optional[ttk.Progressbar] = None
         self._update_overlay_download_btn: Optional[ttk.Button] = None
         self._update_overlay_skip_btn: Optional[ttk.Button] = None
         self._update_overlay_button_frame: Optional[ttk.Frame] = None
         self._update_overlay_details_btn: Optional[ttk.Button] = None
+        self._update_overlay_progress_frame: Optional[ttk.Frame] = None
+        self._update_overlay_progress_title_label: Optional[ttk.Label] = None
+        self._update_overlay_progress_detail_label: Optional[ttk.Label] = None
+        self._update_overlay_changelog_label: Optional[ttk.Label] = None
+        self._update_overlay_headline_label: Optional[ttk.Label] = None
+        self._update_overlay_body_label: Optional[ttk.Label] = None
+        self._update_overlay_headline_font: Optional[tkfont.Font] = None
+        self._update_overlay_icon_font: Optional[tkfont.Font] = None
         self._update_overlay_visible: bool = False
         self._update_download_mode = tk.StringVar(value="simple")
         self._update_mode_description = tk.StringVar(
@@ -1208,6 +1221,12 @@ class Sims4ModSorterApp(tk.Tk):
         style.configure("TCheckbutton", background=palette["bg"], foreground=palette["fg"])
         style.configure("TButton", background=palette["alt"], foreground=palette["fg"], padding=6)
         style.map("TButton", background=[("active", palette["sel"])])
+        style.configure("Accent.TButton", background=palette["accent"], foreground=palette["fg"], padding=(12, 8))
+        style.map(
+            "Accent.TButton",
+            background=[("active", palette["sel"]), ("pressed", palette["sel"]), ("disabled", palette["alt"])],
+            foreground=[("disabled", palette["fg"])],
+        )
         style.configure(
             "Treeview",
             background=palette["alt"],
@@ -1220,6 +1239,20 @@ class Sims4ModSorterApp(tk.Tk):
         style.map("Treeview", background=[("selected", palette["sel"])])
         style.configure("Treeview.Heading", background=palette["bg"], foreground=palette["fg"])
         style.configure("Horizontal.TProgressbar", background=palette["accent"], troughcolor=palette["alt"])
+        style.configure("UpdateOverlay.TFrame", background=palette["alt"])
+        style.configure("UpdateOverlayHero.TFrame", background=palette["alt"])
+        style.configure("UpdateOverlayHeadline.TLabel", background=palette["alt"], foreground=palette["fg"])
+        style.configure("UpdateOverlayBody.TLabel", background=palette["alt"], foreground=palette["fg"])
+        style.configure("UpdateOverlayIcon.TLabel", background=palette["alt"], foreground=palette["accent"])
+        style.configure("UpdateOverlayProgress.TFrame", background=palette["alt"])
+        style.configure("UpdateOverlayProgressTitle.TLabel", background=palette["alt"], foreground=palette["fg"], font=("", 10, "bold"))
+        style.configure("UpdateOverlayProgressDetail.TLabel", background=palette["alt"], foreground=palette["fg"])
+        style.configure("UpdateOverlayChangelog.TLabel", background=palette["alt"], foreground=palette["fg"])
+        style.configure(
+            "UpdateOverlay.Horizontal.TProgressbar",
+            background=palette["accent"],
+            troughcolor=palette["bg"],
+        )
         self.configure(bg=palette["bg"])
 
     def _build_ui(self) -> None:
@@ -1748,19 +1781,103 @@ class Sims4ModSorterApp(tk.Tk):
         palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
         overlay.configure(bg=palette.get("bg", "#111316"))
 
-        container = ttk.Frame(overlay, padding=20)
+        container = ttk.Frame(overlay, padding=(16, 20, 16, 20), style="UpdateOverlay.TFrame")
         container.pack(fill="both", expand=True)
+        container.columnconfigure(0, weight=1)
 
-        message = ttk.Label(
-            container,
+        hero = ttk.Frame(container, style="UpdateOverlayHero.TFrame")
+        hero.grid(row=0, column=0, sticky="we", pady=(0, 16))
+        hero.columnconfigure(1, weight=1)
+
+        icon_label = ttk.Label(
+            hero,
+            textvariable=self._update_overlay_status_icon,
+            style="UpdateOverlayIcon.TLabel",
+            anchor="center",
+            width=3,
+        )
+        if not self._update_overlay_icon_font:
+            try:
+                base_font = tkfont.nametofont("TkHeadingFont")
+                size = max(int(base_font.cget("size")) + 12, int(base_font.cget("size")))
+                self._update_overlay_icon_font = tkfont.Font(
+                    family=base_font.cget("family"), size=size, weight="bold"
+                )
+            except tk.TclError:
+                self._update_overlay_icon_font = tkfont.Font(size=28, weight="bold")
+        icon_label.configure(font=self._update_overlay_icon_font)
+        icon_label.grid(row=0, column=0, rowspan=2, sticky="n", padx=(0, 20))
+
+        headline_label = ttk.Label(
+            hero,
+            textvariable=self._update_overlay_headline,
+            style="UpdateOverlayHeadline.TLabel",
+        )
+        if not self._update_overlay_headline_font:
+            try:
+                heading_font = tkfont.nametofont("TkHeadingFont")
+                headline_size = max(int(heading_font.cget("size")) + 6, int(heading_font.cget("size")))
+                self._update_overlay_headline_font = tkfont.Font(
+                    family=heading_font.cget("family"), size=headline_size, weight="bold"
+                )
+            except tk.TclError:
+                self._update_overlay_headline_font = tkfont.Font(size=20, weight="bold")
+        headline_label.configure(font=self._update_overlay_headline_font)
+        headline_label.grid(row=0, column=1, sticky="w")
+        self._update_overlay_headline_label = headline_label
+
+        body_label = ttk.Label(
+            hero,
             textvariable=self._update_overlay_message,
-            wraplength=420,
+            style="UpdateOverlayBody.TLabel",
+            wraplength=460,
             justify="left",
         )
-        message.pack(fill="x")
+        body_label.grid(row=1, column=1, sticky="we", pady=(6, 0))
+        self._update_overlay_body_label = body_label
+
+        progress_frame = ttk.Frame(container, style="UpdateOverlayProgress.TFrame")
+        progress_frame.grid(row=1, column=0, sticky="we")
+        progress_frame.columnconfigure(0, weight=1)
+        self._update_overlay_progress_frame = progress_frame
+
+        progress_title_label = ttk.Label(
+            progress_frame,
+            textvariable=self._update_overlay_progress_title,
+            style="UpdateOverlayProgressTitle.TLabel",
+        )
+        progress_title_label.pack(fill="x")
+        self._update_overlay_progress_title_label = progress_title_label
+
+        progress_detail_label = ttk.Label(
+            progress_frame,
+            textvariable=self._update_overlay_progress_detail,
+            style="UpdateOverlayProgressDetail.TLabel",
+            wraplength=460,
+            justify="left",
+        )
+        progress_detail_label.pack(fill="x", pady=(4, 0))
+        self._update_overlay_progress_detail_label = progress_detail_label
+
+        progress = ttk.Progressbar(
+            progress_frame,
+            mode="indeterminate",
+            style="UpdateOverlay.Horizontal.TProgressbar",
+        )
+        progress.pack(fill="x", pady=(12, 0))
+
+        changelog_label = ttk.Label(
+            progress_frame,
+            textvariable=self._update_overlay_changelog,
+            style="UpdateOverlayChangelog.TLabel",
+            wraplength=460,
+            justify="left",
+        )
+        changelog_label.pack(fill="x", pady=(12, 0))
+        self._update_overlay_changelog_label = changelog_label
 
         mode_frame = ttk.LabelFrame(container, text="Download Mode")
-        mode_frame.pack(fill="x", pady=(16, 0))
+        mode_frame.grid(row=2, column=0, sticky="we", pady=(24, 0))
         self._update_mode_frame = mode_frame
 
         simple_radio = ttk.Radiobutton(
@@ -1792,17 +1909,15 @@ class Sims4ModSorterApp(tk.Tk):
         description_label.pack(fill="x", padx=12, pady=(0, 8))
         self._update_mode_description_label = description_label
 
-        progress = ttk.Progressbar(container, mode="indeterminate")
-        progress.pack(fill="x", pady=(16, 12))
-
-        buttons = ttk.Frame(container)
-        buttons.pack()
+        buttons = ttk.Frame(container, style="UpdateOverlay.TFrame")
+        buttons.grid(row=3, column=0, sticky="e", pady=(24, 0))
 
         download_btn = ttk.Button(
             buttons,
             text="Download Update",
             command=self._on_update_overlay_download,
             state="disabled",
+            style="Accent.TButton",
         )
         download_btn.pack(side="left", padx=4)
 
@@ -1822,6 +1937,17 @@ class Sims4ModSorterApp(tk.Tk):
         )
         skip_btn.pack(side="left", padx=4)
 
+        if self._update_overlay_progress_title_label:
+            self._update_overlay_progress_title_label.pack_forget()
+        if self._update_overlay_progress_detail_label:
+            self._update_overlay_progress_detail_label.pack_forget()
+        if progress.winfo_manager():
+            progress.pack_forget()
+        if self._update_overlay_changelog_label:
+            self._update_overlay_changelog_label.pack_forget()
+        if self._update_overlay_progress_frame:
+            self._update_overlay_progress_frame.grid_remove()
+
         self._update_overlay = overlay
         self._update_overlay_progress = progress
         self._update_overlay_download_btn = download_btn
@@ -1836,6 +1962,41 @@ class Sims4ModSorterApp(tk.Tk):
         if overlay and overlay.winfo_exists():
             palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
             overlay.configure(bg=palette.get("bg", "#111316"))
+            style = ttk.Style()
+            style.configure("UpdateOverlay.TFrame", background=palette["alt"])
+            style.configure("UpdateOverlayHero.TFrame", background=palette["alt"])
+            style.configure("UpdateOverlayHeadline.TLabel", background=palette["alt"], foreground=palette["fg"])
+            style.configure("UpdateOverlayBody.TLabel", background=palette["alt"], foreground=palette["fg"])
+            style.configure("UpdateOverlayIcon.TLabel", background=palette["alt"], foreground=palette["accent"])
+            style.configure("UpdateOverlayProgress.TFrame", background=palette["alt"])
+            style.configure("UpdateOverlayProgressTitle.TLabel", background=palette["alt"], foreground=palette["fg"])
+            style.configure("UpdateOverlayProgressDetail.TLabel", background=palette["alt"], foreground=palette["fg"])
+            style.configure("UpdateOverlayChangelog.TLabel", background=palette["alt"], foreground=palette["fg"])
+            style.configure("Accent.TButton", background=palette["accent"], foreground=palette["fg"], padding=(12, 8))
+            style.map(
+                "Accent.TButton",
+                background=[("active", palette["sel"]), ("pressed", palette["sel"]), ("disabled", palette["alt"])],
+                foreground=[("disabled", palette["fg"])]
+            )
+            style.configure(
+                "UpdateOverlay.Horizontal.TProgressbar",
+                background=palette["accent"],
+                troughcolor=palette["bg"],
+            )
+            if self._update_overlay_button_frame:
+                self._update_overlay_button_frame.configure(style="UpdateOverlay.TFrame")
+            if self._update_overlay_progress_frame:
+                self._update_overlay_progress_frame.configure(style="UpdateOverlayProgress.TFrame")
+            if self._update_overlay_headline_label:
+                self._update_overlay_headline_label.configure(style="UpdateOverlayHeadline.TLabel")
+            if self._update_overlay_body_label:
+                self._update_overlay_body_label.configure(style="UpdateOverlayBody.TLabel")
+            if self._update_overlay_progress_title_label:
+                self._update_overlay_progress_title_label.configure(style="UpdateOverlayProgressTitle.TLabel")
+            if self._update_overlay_progress_detail_label:
+                self._update_overlay_progress_detail_label.configure(style="UpdateOverlayProgressDetail.TLabel")
+            if self._update_overlay_changelog_label:
+                self._update_overlay_changelog_label.configure(style="UpdateOverlayChangelog.TLabel")
             if self._update_mode_frame:
                 try:
                     self._update_mode_frame.configure(style="TLabelframe")
@@ -1864,23 +2025,79 @@ class Sims4ModSorterApp(tk.Tk):
         self,
         message: str,
         *,
+        headline: Optional[str] = None,
         progress: bool,
         enable_download: bool,
         enable_skip: bool,
         enable_details: bool,
+        progress_title: Optional[str] = None,
+        progress_subtext: Optional[str] = None,
+        changelog: Optional[str] = None,
+        status_icon: Optional[str] = None,
     ) -> None:
         overlay = self._ensure_update_overlay()
+        resolved_headline: str
+        if headline:
+            resolved_headline = headline
+        else:
+            if progress:
+                resolved_headline = "Working on update"
+            elif enable_download:
+                resolved_headline = "Update available"
+            elif enable_details:
+                resolved_headline = "Release information"
+            else:
+                resolved_headline = "Update status"
+        self._update_overlay_headline.set(resolved_headline)
+        icon_value = status_icon if status_icon is not None else ("🔄" if progress else "⬆️")
+        self._update_overlay_status_icon.set(icon_value)
         self._update_overlay_message.set(message)
+
+        if self._update_overlay_progress_frame:
+            if progress or (progress_subtext and progress_subtext.strip()) or (changelog and changelog.strip()):
+                self._update_overlay_progress_frame.grid()
+            else:
+                self._update_overlay_progress_frame.grid_remove()
+
+        resolved_progress_title = progress_title
+        if resolved_progress_title is None:
+            resolved_progress_title = "Progress" if progress else ""
+        self._update_overlay_progress_title.set(resolved_progress_title)
+        if self._update_overlay_progress_title_label:
+            if resolved_progress_title:
+                if not self._update_overlay_progress_title_label.winfo_manager():
+                    self._update_overlay_progress_title_label.pack(fill="x")
+            elif self._update_overlay_progress_title_label.winfo_manager():
+                self._update_overlay_progress_title_label.pack_forget()
+
+        detail_text = progress_subtext.strip() if progress_subtext else ""
+        self._update_overlay_progress_detail.set(detail_text)
+        if self._update_overlay_progress_detail_label:
+            if detail_text:
+                if not self._update_overlay_progress_detail_label.winfo_manager():
+                    self._update_overlay_progress_detail_label.pack(fill="x", pady=(4, 0))
+            elif self._update_overlay_progress_detail_label.winfo_manager():
+                self._update_overlay_progress_detail_label.pack_forget()
+
+        changelog_text = changelog.strip() if changelog else ""
+        self._update_overlay_changelog.set(changelog_text)
+        if self._update_overlay_changelog_label:
+            if changelog_text:
+                if not self._update_overlay_changelog_label.winfo_manager():
+                    self._update_overlay_changelog_label.pack(fill="x", pady=(12, 0))
+            elif self._update_overlay_changelog_label.winfo_manager():
+                self._update_overlay_changelog_label.pack_forget()
+
         if self._update_overlay_progress:
+            self._update_overlay_progress.stop()
             if progress:
                 if not self._update_overlay_progress.winfo_manager():
-                    self._update_overlay_progress.pack(fill="x", pady=(16, 12))
+                    self._update_overlay_progress.pack(fill="x", pady=(12, 0))
                 self._update_overlay_progress.configure(mode="indeterminate", value=0)
                 self._update_overlay_progress.start(12)
-            else:
-                self._update_overlay_progress.stop()
-                if self._update_overlay_progress.winfo_manager():
-                    self._update_overlay_progress.pack_forget()
+            elif self._update_overlay_progress.winfo_manager():
+                self._update_overlay_progress.pack_forget()
+
         if self._update_overlay_download_btn:
             state = "normal" if enable_download else "disabled"
             self._update_overlay_download_btn.configure(state=state)
@@ -1898,12 +2115,26 @@ class Sims4ModSorterApp(tk.Tk):
             if advanced_state == "normal" and not self._update_download_url:
                 advanced_state = "disabled"
             self._update_mode_advanced_radio.configure(state=advanced_state)
+
         overlay.deiconify()
         overlay.lift()
         try:
             overlay.grab_set()
         except tk.TclError:
             pass
+
+        focus_target: Optional[tk.Widget] = None
+        if enable_download and self._update_overlay_download_btn:
+            focus_target = self._update_overlay_download_btn
+        elif enable_skip and self._update_overlay_skip_btn:
+            focus_target = self._update_overlay_skip_btn
+        elif enable_details and self._update_overlay_details_btn:
+            focus_target = self._update_overlay_details_btn
+        if focus_target and focus_target.winfo_exists():
+            focus_target.focus_set()
+        else:
+            overlay.focus_set()
+
         self._center_update_overlay()
         self._update_overlay_visible = True
 
@@ -1918,6 +2149,21 @@ class Sims4ModSorterApp(tk.Tk):
         if self._update_overlay_progress:
             self._update_overlay_progress.stop()
             self._update_overlay_progress.configure(mode="indeterminate", value=0)
+            if self._update_overlay_progress.winfo_manager():
+                self._update_overlay_progress.pack_forget()
+        self._update_overlay_headline.set("Sims4 Mod Sorter Update")
+        self._update_overlay_status_icon.set("⬆️")
+        self._update_overlay_progress_title.set("")
+        self._update_overlay_progress_detail.set("")
+        self._update_overlay_changelog.set("")
+        if self._update_overlay_progress_title_label and self._update_overlay_progress_title_label.winfo_manager():
+            self._update_overlay_progress_title_label.pack_forget()
+        if self._update_overlay_progress_detail_label and self._update_overlay_progress_detail_label.winfo_manager():
+            self._update_overlay_progress_detail_label.pack_forget()
+        if self._update_overlay_changelog_label and self._update_overlay_changelog_label.winfo_manager():
+            self._update_overlay_changelog_label.pack_forget()
+        if self._update_overlay_progress_frame:
+            self._update_overlay_progress_frame.grid_remove()
         if self._update_overlay_download_btn:
             self._update_overlay_download_btn.configure(state="disabled")
         if self._update_overlay_details_btn:
@@ -1974,10 +2220,14 @@ class Sims4ModSorterApp(tk.Tk):
         target_path = Path(destination)
         self._show_update_overlay(
             "Downloading update…",
+            headline="Downloading update",
             progress=True,
             enable_download=False,
             enable_skip=False,
             enable_details=False,
+            progress_title="Download progress",
+            progress_subtext="Preparing download…",
+            status_icon="⬇️",
         )
         if self._update_overlay_progress:
             self._update_overlay_progress.configure(mode="determinate", maximum=100, value=0)
@@ -2080,16 +2330,26 @@ class Sims4ModSorterApp(tk.Tk):
             else:
                 progress.configure(mode="indeterminate", value=0)
                 progress.start(12)
+        if self._update_overlay_progress_frame:
+            self._update_overlay_progress_frame.grid()
+        if self._update_overlay_progress_title_label and not self._update_overlay_progress_title_label.winfo_manager():
+            self._update_overlay_progress_title_label.pack(fill="x")
+        if self._update_overlay_progress_detail_label and not self._update_overlay_progress_detail_label.winfo_manager():
+            self._update_overlay_progress_detail_label.pack(fill="x", pady=(4, 0))
+        if self._update_overlay_progress and not self._update_overlay_progress.winfo_manager():
+            self._update_overlay_progress.pack(fill="x", pady=(12, 0))
+        self._update_overlay_progress_title.set("Download progress")
+        self._update_overlay_message.set("Downloading update…")
+        self._update_overlay_status_icon.set("⬇️")
         if total > 0:
             percent = min(100, max(0, int((written / total) * 100)))
             human_total = total / (1024 * 1024)
             human_written = written / (1024 * 1024)
-            self._update_overlay_message.set(
-                f"Downloading update… {percent}% ({human_written:.2f} / {human_total:.2f} MB)"
-            )
+            detail = f"{percent}% complete ({human_written:.2f} / {human_total:.2f} MB)"
         else:
             human_written = written / (1024 * 1024)
-            self._update_overlay_message.set(f"Downloading update… {human_written:.2f} MB")
+            detail = f"{human_written:.2f} MB downloaded"
+        self._update_overlay_progress_detail.set(detail)
 
     def _handle_update_download_success(self, target_path: Path, manual: bool) -> None:
         self._hide_update_overlay()
@@ -2599,10 +2859,14 @@ for _ in range(10):
         if not manual:
             self._show_update_overlay(
                 "Checking for updates…",
+                headline="Checking for updates",
                 progress=True,
                 enable_download=False,
                 enable_skip=False,
                 enable_details=False,
+                progress_title="Status",
+                progress_subtext="Contacting update service…",
+                status_icon="🔄",
             )
 
         def worker() -> None:
@@ -2635,10 +2899,12 @@ for _ in range(10):
                 self.log(error_message, level="error")
                 self._show_update_overlay(
                     error_message,
+                    headline="Update check failed",
                     progress=False,
                     enable_download=False,
                     enable_skip=True,
                     enable_details=False,
+                    status_icon="⚠️",
                 )
             return
 
@@ -2660,10 +2926,12 @@ for _ in range(10):
                 self.log(result.message, level="warn")
                 self._show_update_overlay(
                     result.message,
+                    headline="Update service message",
                     progress=False,
                     enable_download=False,
                     enable_skip=True,
                     enable_details=False,
+                    status_icon="⚠️",
                 )
             return
 
@@ -2732,10 +3000,12 @@ for _ in range(10):
                     )
                 self._show_update_overlay(
                     message,
+                    headline=f"Version {result.latest_version} available",
                     progress=False,
                     enable_download=bool(self._update_download_url),
                     enable_skip=True,
                     enable_details=bool(self._update_release_page_url),
+                    status_icon="✨" if self._update_download_url else "ℹ️",
                 )
         else:
             self._update_download_url = None
