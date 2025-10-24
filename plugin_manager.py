@@ -510,6 +510,22 @@ class PluginManagerApp(tk.Tk):
             foreground="#c5c5cf",
             wraplength=420,
         )
+        style.layout(
+            "Overlay.Vertical.TScrollbar",
+            style.layout("Vertical.TScrollbar"),
+        )
+        style.configure(
+            "Overlay.Vertical.TScrollbar",
+            background="#2d2d34",
+            troughcolor="#1f1f24",
+            bordercolor="#1f1f24",
+            arrowcolor="#f2f2f7",
+        )
+        style.map(
+            "Overlay.Vertical.TScrollbar",
+            background=[("active", "#3b3b44")],
+            arrowcolor=[("disabled", "#5c5c68"), ("active", "#f2f2f7")],
+        )
 
     def _build_ui(self) -> None:
         self.body = ttk.Frame(self, padding=16)
@@ -859,8 +875,34 @@ class PluginSettingsOverlay(tk.Frame):
         ttk.Label(header, textvariable=self._title_var, style="OverlayTitle.TLabel").pack(side="left")
         ttk.Button(header, text="✕", command=self._handle_cancel).pack(side="right")
 
-        self._content = ttk.Frame(self._card)
-        self._content.pack(fill="both", expand=True, pady=(12, 0))
+        self._content_container = ttk.Frame(self._card, style="Overlay.TFrame")
+        self._content_container.pack(fill="both", expand=True, pady=(12, 0))
+
+        self._content_canvas = tk.Canvas(
+            self._content_container,
+            highlightthickness=0,
+            borderwidth=0,
+            background="#2d2d34",
+        )
+        self._content_canvas.pack(side="left", fill="both", expand=True)
+
+        self._scrollbar = ttk.Scrollbar(
+            self._content_container,
+            orient="vertical",
+            command=self._content_canvas.yview,
+            style="Overlay.Vertical.TScrollbar",
+        )
+        self._scrollbar.pack(side="right", fill="y")
+
+        self._content_canvas.configure(yscrollcommand=self._scrollbar.set)
+
+        self._content = ttk.Frame(self._content_canvas, style="Overlay.TFrame")
+        self._content_window = self._content_canvas.create_window(
+            (0, 0), anchor="nw", window=self._content
+        )
+
+        self._content.bind("<Configure>", self._on_content_configure)
+        self._content_canvas.bind("<Configure>", self._on_canvas_configure)
 
         self._button_row = ttk.Frame(self._card)
         self._button_row.pack(fill="x", pady=(18, 0))
@@ -878,6 +920,7 @@ class PluginSettingsOverlay(tk.Frame):
         for child in self._content.winfo_children():
             child.destroy()
         self._feature_vars.clear()
+        self._content_canvas.yview_moveto(0)
 
         if not entry.features:
             ttk.Label(
@@ -900,12 +943,21 @@ class PluginSettingsOverlay(tk.Frame):
                         style="OverlayMessage.TLabel",
                     ).pack(anchor="w", pady=(0, 10))
 
+        self._content.update_idletasks()
+        self._on_content_configure(None)
+
         self.place(relx=0, rely=0, relwidth=1, relheight=1)
         self.lift()
         self.visible = True
         self.focus_set()
         self.bind_all("<Escape>", self._handle_escape)
         self.parent._update_buttons()
+
+    def _on_content_configure(self, _event) -> None:
+        self._content_canvas.configure(scrollregion=self._content_canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event) -> None:
+        self._content_canvas.itemconfigure(self._content_window, width=event.width)
 
     def hide(self) -> None:
         if not self.visible:
