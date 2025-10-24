@@ -208,7 +208,7 @@ class CommandCenter:
             quick,
             text="Show the Command Center on launch",
             variable=self.app.show_command_center_var,
-            style="CommandCenter.Checkbutton",
+            style="CommandCenter.Checkbutton.TCheckbutton",
         ).grid(row=3, column=0, sticky="w", pady=(16, 0))
         row += 1
 
@@ -478,13 +478,13 @@ class CommandCenter:
             foreground=[("disabled", muted)],
         )
         style.configure(
-            "CommandCenter.Checkbutton",
+            "CommandCenter.Checkbutton.TCheckbutton",
             background=alt,
             foreground=fg,
             padding=(2, 2),
         )
         style.map(
-            "CommandCenter.Checkbutton",
+            "CommandCenter.Checkbutton.TCheckbutton",
             foreground=[("disabled", muted)],
         )
 
