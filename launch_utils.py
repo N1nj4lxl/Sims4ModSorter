@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -23,6 +24,31 @@ def _clean_str(value: object) -> Optional[str]:
         if value:
             return value
     return None
+
+
+def _platform_asset_tokens(platform: str) -> tuple[str, ...]:
+    platform = platform.lower()
+    if platform.startswith("win"):
+        return ("win", "windows", ".exe")
+    if platform.startswith("darwin") or platform.startswith("mac"):
+        return ("mac", "macos", ".app")
+    if platform.startswith("linux"):
+        return ("linux", "appimage")
+    return ()
+
+
+def _value_matches_tokens(value: Optional[str], tokens: tuple[str, ...]) -> bool:
+    if not value or not tokens:
+        return False
+    lowered = value.lower()
+    for token in tokens:
+        token_lower = token.lower()
+        if token_lower.startswith("."):
+            if lowered.endswith(token_lower):
+                return True
+        elif token_lower in lowered:
+            return True
+    return False
 
 
 def _extract_repo_from_url(url: str) -> tuple[Optional[str], Optional[str]]:
@@ -342,8 +368,11 @@ def check_for_update(component: str, current_version: str, timeout: float = 5.0)
                         release_page_url = html_url
                 assets = data.get("assets")
                 if isinstance(assets, list):
-                    best_score: tuple[int, int, int] | None = None
+                    best_score: tuple[int, int, int, int] | None = None
                     best_asset: Optional[dict[str, object]] = None
+                    platform_tokens: tuple[str, ...] = ()
+                    if not asset_name_preference and not asset_pattern:
+                        platform_tokens = _platform_asset_tokens(sys.platform)
                     for asset in assets:
                         if not isinstance(asset, dict):
                             continue
@@ -365,8 +394,14 @@ def check_for_update(component: str, current_version: str, timeout: float = 5.0)
                             match_rank = 2
                         elif candidate_name and asset_pattern and asset_pattern.search(candidate_name):
                             match_rank = 1
+                        platform_rank = 0
+                        if platform_tokens:
+                            if _value_matches_tokens(candidate_name, platform_tokens) or _value_matches_tokens(
+                                candidate_content_type, platform_tokens
+                            ):
+                                platform_rank = 1
                         size_rank = 1 if candidate_size and candidate_size > 0 else 0
-                        score = (match_rank, size_rank, candidate_size or 0)
+                        score = (match_rank, platform_rank, size_rank, candidate_size or 0)
                         if best_score is None or score > best_score:
                             best_score = score
                             best_asset = {
