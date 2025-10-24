@@ -15,6 +15,34 @@ _DEFAULT_PALETTE = {
 }
 
 
+def _parse_hex_color(value: str) -> tuple[int, int, int] | None:
+    value = value.strip().lstrip("#")
+    if len(value) != 6:
+        return None
+    try:
+        r = int(value[0:2], 16)
+        g = int(value[2:4], 16)
+        b = int(value[4:6], 16)
+    except ValueError:
+        return None
+    return r, g, b
+
+
+def _mix_colors(foreground: str, background: str, ratio: float) -> str:
+    """Blend two hex colours together."""
+
+    fg = _parse_hex_color(foreground)
+    bg = _parse_hex_color(background)
+    if fg is None or bg is None:
+        return foreground
+    ratio = max(0.0, min(1.0, ratio))
+    blend = []
+    for left, right in zip(fg, bg):
+        value = int(round(left * (1.0 - ratio) + right * ratio))
+        blend.append(max(0, min(255, value)))
+    return f"#{blend[0]:02x}{blend[1]:02x}{blend[2]:02x}"
+
+
 def _center(window: tk.Toplevel) -> None:
     try:
         window.update_idletasks()
@@ -80,6 +108,7 @@ class CommandCenter:
     def refresh(self) -> None:
         if self.window is None or not self.window.winfo_exists() or self._content is None:
             return
+        self._apply_theme()
         for child in list(self._content.winfo_children()):
             child.destroy()
         self._populate_content(self._content)
@@ -110,46 +139,80 @@ class CommandCenter:
         self.window.protocol("WM_DELETE_WINDOW", self.hide)
         self.window.bind("<Escape>", lambda _e: self.hide())
 
-        self._content = ttk.Frame(self.window, padding=(16, 20, 16, 20))
+        self._content = ttk.Frame(
+            self.window,
+            padding=(24, 26, 24, 24),
+            style="CommandCenter.Container.TFrame",
+        )
         self._content.pack(fill="both", expand=True)
         self._content.columnconfigure(0, weight=1)
+        self._apply_theme()
 
     def _populate_content(self, container: ttk.Frame) -> None:
         row = 0
-        header = ttk.Frame(container)
+        header = ttk.Frame(container, style="CommandCenter.Header.TFrame")
         header.grid(row=row, column=0, sticky="ew")
-        ttk.Label(header, text="Command Center", font=("TkDefaultFont", 14, "bold")).pack(side="left")
+        ttk.Label(header, text="Command Center", style="CommandCenter.Title.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
         ttk.Label(
             header,
-            text="Quick shortcuts for common launch actions",
-            foreground="#7f8c9a",
-        ).pack(side="left", padx=(12, 0))
+            text="Launch the actions you need as soon as the sorter starts.",
+            style="CommandCenter.Subtitle.TLabel",
+        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
         row += 1
 
-        ttk.Separator(container).grid(row=row, column=0, sticky="ew", pady=(12, 16))
-        row += 1
-
-        quick = ttk.LabelFrame(container, text="Quick actions", padding=(12, 10))
-        quick.grid(row=row, column=0, sticky="ew")
-        for column in range(3):
-            quick.columnconfigure(column, weight=1)
-        ttk.Button(quick, text="Start scan", command=self._trigger_scan).grid(row=0, column=0, sticky="ew")
-        ttk.Button(quick, text="Open settings", command=self._open_settings).grid(row=0, column=1, sticky="ew", padx=6)
-        ttk.Button(quick, text="Plugin manager", command=self._open_plugin_manager).grid(row=0, column=2, sticky="ew")
-        ttk.Button(
+        quick = ttk.Frame(
+            container,
+            style="CommandCenter.Card.TFrame",
+            padding=(18, 18, 18, 20),
+        )
+        quick.grid(row=row, column=0, sticky="ew", pady=(18, 0))
+        quick.columnconfigure(0, weight=1)
+        ttk.Label(quick, text="Quick actions", style="CommandCenter.CardHeading.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        current_mods = getattr(self.app, "mods_root", None)
+        mods_value = ""
+        if hasattr(current_mods, "get"):
+            try:
+                mods_value = str(current_mods.get()).strip()
+            except Exception:
+                mods_value = ""
+        mods_display = mods_value or "No Mods folder selected yet"
+        ttk.Label(
             quick,
-            text="Plugin status",
-            command=self._open_plugin_status,
-        ).grid(row=1, column=0, sticky="ew", columnspan=3, pady=(8, 0))
-        row += 1
-
-        ttk.Separator(container).grid(row=row, column=0, sticky="ew", pady=(16, 12))
+            text=f"Mods folder: {mods_display}",
+            style="CommandCenter.Muted.TLabel",
+            wraplength=460,
+        ).grid(row=1, column=0, sticky="w", pady=(8, 12))
+        actions = ttk.Frame(quick, style="CommandCenter.CardBody.TFrame")
+        actions.grid(row=2, column=0, sticky="ew")
+        buttons = [
+            ("Start scan", self._trigger_scan, "CommandCenter.Primary.TButton"),
+            ("Change Mods folder", self._change_mods_folder, "CommandCenter.Secondary.TButton"),
+            ("Open settings", self._open_settings, "CommandCenter.Secondary.TButton"),
+        ]
+        if getattr(self.app, "plugin_manager", None) is not None:
+            buttons.append(
+                ("Manage plugins", self._open_plugin_manager, "CommandCenter.Secondary.TButton")
+            )
+        for index, (_label, _command, _style) in enumerate(buttons):
+            actions.columnconfigure(index, weight=1)
+        for index, (label, command, style_name) in enumerate(buttons):
+            padx = (0, 0) if index == 0 else (10, 0)
+            ttk.Button(actions, text=label, command=command, style=style_name).grid(
+                row=0, column=index, sticky="ew", padx=padx
+            )
+        ttk.Checkbutton(
+            quick,
+            text="Show the Command Center on launch",
+            variable=self.app.show_command_center_var,
+            style="CommandCenter.Checkbutton",
+        ).grid(row=3, column=0, sticky="w", pady=(16, 0))
         row += 1
 
         self._build_recent_section(container, row)
-        row += 1
-
-        ttk.Separator(container).grid(row=row, column=0, sticky="ew", pady=(16, 12))
         row += 1
 
         self._build_loadouts_section(container, row)
@@ -160,50 +223,102 @@ class CommandCenter:
             panels = list(manager.get_command_center_panels())
         else:
             panels = []
-        if panels:
-            ttk.Separator(container).grid(row=row, column=0, sticky="ew", pady=(16, 12))
-            row += 1
         for panel in panels:
-            frame = ttk.LabelFrame(container, text=panel.title, padding=(12, 10))
-            frame.grid(row=row, column=0, sticky="ew", pady=(0, 12))
+            frame = ttk.LabelFrame(
+                container,
+                text=panel.title,
+                padding=(16, 14, 16, 16),
+                style="CommandCenter.Section.TLabelframe",
+            )
+            frame.grid(row=row, column=0, sticky="ew", pady=(18, 0))
             try:
                 panel.builder(self.app, frame, manager.api if manager else None)
             except Exception as exc:  # pragma: no cover - defensive
-                ttk.Label(frame, text=f"Unable to load panel: {exc}").grid(row=0, column=0, sticky="w")
+                ttk.Label(
+                    frame,
+                    text=f"Unable to load panel: {exc}",
+                    style="CommandCenter.Muted.TLabel",
+                ).grid(row=0, column=0, sticky="w")
             row += 1
 
-        actions = ttk.Frame(container)
-        actions.grid(row=row, column=0, sticky="e", pady=(8, 0))
-        ttk.Button(actions, text="Close", command=self.hide).pack(side="right")
+        actions = ttk.Frame(container, style="CommandCenter.Footer.TFrame")
+        actions.grid(row=row, column=0, sticky="e", pady=(20, 0))
+        ttk.Button(
+            actions,
+            text="Close",
+            command=self.hide,
+            style="CommandCenter.Secondary.TButton",
+        ).pack(side="right")
 
     def _build_recent_section(self, container: ttk.Frame, row: int) -> None:
-        frame = ttk.LabelFrame(container, text="Recent Mods folders", padding=(12, 10))
-        frame.grid(row=row, column=0, sticky="ew")
+        frame = ttk.LabelFrame(
+            container,
+            text="Recent Mods folders",
+            padding=(16, 14, 16, 16),
+            style="CommandCenter.Section.TLabelframe",
+        )
+        frame.grid(row=row, column=0, sticky="ew", pady=(18, 0))
         frame.columnconfigure(0, weight=1)
         history = list(self._recent_directories())
         if not history:
-            ttk.Label(frame, text="Browse to a Mods folder to populate this list.").grid(row=0, column=0, sticky="w")
+            ttk.Label(
+                frame,
+                text="Browse to a Mods folder to populate this list.",
+                style="CommandCenter.Muted.TLabel",
+                wraplength=440,
+            ).grid(row=0, column=0, sticky="w")
             return
         for index, directory in enumerate(history):
             button = ttk.Button(
                 frame,
                 text=directory,
                 command=lambda value=directory: self._select_directory(value),
+                style="CommandCenter.List.TButton",
             )
             button.grid(row=index, column=0, sticky="ew", pady=(0, 6))
 
     def _build_loadouts_section(self, container: ttk.Frame, row: int) -> None:
-        frame = ttk.LabelFrame(container, text="Loadout presets", padding=(12, 10))
-        frame.grid(row=row, column=0, sticky="ew")
+        frame = ttk.LabelFrame(
+            container,
+            text="Loadout presets",
+            padding=(16, 14, 16, 16),
+            style="CommandCenter.Section.TLabelframe",
+        )
+        frame.grid(row=row, column=0, sticky="ew", pady=(18, 0))
         frame.columnconfigure(0, weight=1)
         names = list(self._loadout_names())
         if not names:
-            ttk.Label(frame, text="Create a loadout to quick load specific plans.").grid(row=0, column=0, sticky="w")
+            ttk.Label(
+                frame,
+                text="Create a loadout to quick load specific plans.",
+                style="CommandCenter.Muted.TLabel",
+                wraplength=440,
+            ).grid(row=0, column=0, sticky="w")
             return
+        active_name = ""
+        loadout_var = getattr(self.app, "loadout_var", None)
+        if hasattr(loadout_var, "get"):
+            try:
+                active_name = str(loadout_var.get() or "")
+            except Exception:
+                active_name = ""
+        if active_name:
+            ttk.Label(
+                frame,
+                text=f"Active: {active_name}",
+                style="CommandCenter.Muted.TLabel",
+            ).grid(row=0, column=0, sticky="w", pady=(0, 10))
+            start_row = 1
+        else:
+            start_row = 0
         for index, name in enumerate(names):
-            ttk.Button(frame, text=name, command=lambda value=name: self._apply_loadout(value)).grid(
-                row=index, column=0, sticky="ew", pady=(0, 6)
-            )
+            style_name = "CommandCenter.ActiveList.TButton" if name == active_name else "CommandCenter.List.TButton"
+            ttk.Button(
+                frame,
+                text=name,
+                command=lambda value=name: self._apply_loadout(value),
+                style=style_name,
+            ).grid(row=start_row + index, column=0, sticky="ew", pady=(0, 6))
 
     # ------------------------------------------------------------------
     # Action callbacks
@@ -226,9 +341,9 @@ class CommandCenter:
         if callable(command):
             self.app.after(0, command)
 
-    def _open_plugin_status(self) -> None:
+    def _change_mods_folder(self) -> None:
         self.hide()
-        command = getattr(self.app, "show_mod_status_popup", None)
+        command = getattr(self.app, "on_browse", None)
         if callable(command):
             self.app.after(0, command)
 
@@ -258,7 +373,127 @@ class CommandCenter:
         if self.window is None:
             return
         palette = self._palette()
-        self.window.configure(bg=palette.get("bg", _DEFAULT_PALETTE["bg"]))
+        bg = palette.get("bg", _DEFAULT_PALETTE["bg"])
+        fg = palette.get("fg", _DEFAULT_PALETTE["fg"])
+        alt = palette.get("alt", _DEFAULT_PALETTE["alt"])
+        accent = palette.get("accent", _DEFAULT_PALETTE["accent"])
+        sel = palette.get("sel", _DEFAULT_PALETTE["sel"])
+        muted = _mix_colors(fg, bg, 0.45)
+        hover_accent = _mix_colors(accent, bg, 0.25)
+        list_hover = _mix_colors(sel, bg, 0.35)
+        border = _mix_colors(fg, bg, 0.75)
+
+        style = ttk.Style(self.window)
+        style.configure("CommandCenter.Container.TFrame", background=bg)
+        style.configure("CommandCenter.Header.TFrame", background=bg)
+        style.configure("CommandCenter.Footer.TFrame", background=bg)
+        style.configure(
+            "CommandCenter.Card.TFrame",
+            background=alt,
+            borderwidth=1,
+            relief="solid",
+        )
+        style.configure("CommandCenter.CardBody.TFrame", background=alt)
+        style.configure(
+            "CommandCenter.CardHeading.TLabel",
+            background=alt,
+            foreground=fg,
+            font=("TkDefaultFont", 11, "bold"),
+        )
+        style.configure(
+            "CommandCenter.Title.TLabel",
+            background=bg,
+            foreground=fg,
+            font=("TkDefaultFont", 16, "bold"),
+        )
+        style.configure(
+            "CommandCenter.Subtitle.TLabel",
+            background=bg,
+            foreground=muted,
+            wraplength=460,
+        )
+        style.configure(
+            "CommandCenter.Muted.TLabel",
+            background=alt,
+            foreground=muted,
+            wraplength=460,
+        )
+        style.configure(
+            "CommandCenter.Section.TLabelframe",
+            background=alt,
+            foreground=fg,
+            borderwidth=1,
+            relief="solid",
+        )
+        style.configure(
+            "CommandCenter.Section.TLabelframe.Label",
+            background=alt,
+            foreground=fg,
+        )
+        style.configure("CommandCenter.TSeparator", background=border)
+        style.configure(
+            "CommandCenter.Primary.TButton",
+            background=accent,
+            foreground=fg,
+            padding=(16, 10),
+        )
+        style.map(
+            "CommandCenter.Primary.TButton",
+            background=[("active", hover_accent), ("pressed", hover_accent)],
+            foreground=[("disabled", muted)],
+        )
+        style.configure(
+            "CommandCenter.Secondary.TButton",
+            background=sel,
+            foreground=fg,
+            padding=(14, 10),
+        )
+        style.map(
+            "CommandCenter.Secondary.TButton",
+            background=[("active", list_hover), ("pressed", list_hover)],
+            foreground=[("disabled", muted)],
+        )
+        style.configure(
+            "CommandCenter.List.TButton",
+            background=alt,
+            foreground=fg,
+            anchor="w",
+            padding=(12, 8),
+        )
+        style.map(
+            "CommandCenter.List.TButton",
+            background=[("active", list_hover), ("pressed", list_hover)],
+            foreground=[("disabled", muted)],
+        )
+        style.configure(
+            "CommandCenter.ActiveList.TButton",
+            background=sel,
+            foreground=fg,
+            anchor="w",
+            padding=(12, 8),
+        )
+        style.map(
+            "CommandCenter.ActiveList.TButton",
+            background=[("active", hover_accent), ("pressed", hover_accent)],
+            foreground=[("disabled", muted)],
+        )
+        style.configure(
+            "CommandCenter.Checkbutton",
+            background=alt,
+            foreground=fg,
+            padding=(2, 2),
+        )
+        style.map(
+            "CommandCenter.Checkbutton",
+            foreground=[("disabled", muted)],
+        )
+
+        self.window.configure(bg=bg)
+        if self._content is not None and self._content.winfo_exists():
+            try:
+                self._content.configure(style="CommandCenter.Container.TFrame")
+            except tk.TclError:
+                pass
 
     def _recent_directories(self) -> Iterable[str]:
         getter = getattr(self.app, "get_recent_mods_dirs", None)
