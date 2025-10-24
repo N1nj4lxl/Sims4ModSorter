@@ -283,6 +283,8 @@ def _build_request(url: str) -> urllib.request.Request:
 def check_for_update(component: str, current_version: str, timeout: float = 5.0) -> UpdateResult:
     """Fetch the latest version string and compare it with the current version."""
     config = _load_update_config()
+    config_owner = _clean_str(config.get("repo_owner"))
+    config_repo = _clean_str(config.get("repo_name"))
     component_cfg = _component_config(component, config)
     version_url, config_download_url, release_api_url, owner, repo = _build_version_url(component, config)
     remote_version: Optional[str] = None
@@ -479,6 +481,20 @@ def check_for_update(component: str, current_version: str, timeout: float = 5.0)
         )
 
     is_newer = remote_tuple > current_tuple
+
+    if (
+        remote_version
+        and owner
+        and repo
+        and config_owner
+        and config_repo
+        and owner.lower() == config_owner.lower() == "n1nj4lxl"
+        and repo.lower() == config_repo.lower() == "sims4modsorter"
+    ):
+        resolved_download = f"https://github.com/{owner}/{repo}/archive/refs/tags/{remote_version}.zip"
+        asset_name = f"{repo}-{remote_version}.zip"
+        asset_size = None
+        asset_content_type = "application/zip"
     return UpdateResult(
         remote_version,
         is_newer,
