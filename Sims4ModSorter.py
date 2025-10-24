@@ -3164,7 +3164,10 @@ class Sims4ModSorterApp(tk.Tk):
                 return
             selected_entries = selection
         try:
-            new_install_path, copied = self._install_update_package(target_path, selected_entries)
+            expected_version = self._latest_version if self._update_available else None
+            new_install_path, copied = self._install_update_package(
+                target_path, selected_entries, expected_version
+            )
         except zipfile.BadZipFile as exc:
             self.log(f"Downloaded update is not a valid ZIP archive: {exc}", level="error")
             messagebox.showerror(
@@ -3203,7 +3206,10 @@ class Sims4ModSorterApp(tk.Tk):
             )
 
     def _install_update_package(
-        self, package_path: Path, selected_entries: Optional[Set[PurePosixPath]] = None
+        self,
+        package_path: Path,
+        selected_entries: Optional[Set[PurePosixPath]] = None,
+        expected_version: Optional[str] = None,
     ) -> Tuple[Path, int]:
         self.log(f"Installing update from {package_path}")
         app_root = Path(__file__).resolve().parent
@@ -3215,7 +3221,7 @@ class Sims4ModSorterApp(tk.Tk):
 
             extracted_root = self._resolve_update_root(temp_path)
             new_install_path, copied = self._prepare_new_installation(
-                extracted_root, app_root, selected_entries
+                extracted_root, app_root, selected_entries, expected_version
             )
 
         return new_install_path, copied
@@ -3231,14 +3237,21 @@ class Sims4ModSorterApp(tk.Tk):
         source: Path,
         current_root: Path,
         selected_entries: Optional[Set[PurePosixPath]] = None,
+        expected_version: Optional[str] = None,
     ) -> Tuple[Path, int]:
         parent = current_root.parent
         base_name = source.name or current_root.name
         destination = self._next_installation_path(parent, base_name, current_root)
         destination.mkdir(parents=True, exist_ok=False)
-        copied = self._copy_update_contents(source, destination, selected_entries)
-        preserve = self._identify_preserve_entries(current_root)
-        self._copy_preserved_entries(current_root, destination, preserve)
+        if selected_entries is not None:
+            self._copy_existing_installation(current_root, destination)
+        copied = self._copy_update_contents(
+            source, destination, selected_entries
+        )
+        if selected_entries is None:
+            preserve = self._identify_preserve_entries(current_root)
+            self._copy_preserved_entries(current_root, destination, preserve)
+        self._update_version_file(destination, expected_version)
         return destination, copied
 
     def _next_installation_path(self, parent: Path, base_name: str, current_root: Path) -> Path:
@@ -3253,7 +3266,10 @@ class Sims4ModSorterApp(tk.Tk):
         return candidate
 
     def _copy_update_contents(
-        self, source: Path, destination: Path, selected_entries: Optional[Set[PurePosixPath]] = None
+        self,
+        source: Path,
+        destination: Path,
+        selected_entries: Optional[Set[PurePosixPath]] = None,
     ) -> int:
         replaced = 0
         if not source.exists():
@@ -3262,6 +3278,7 @@ class Sims4ModSorterApp(tk.Tk):
         allowed: Optional[Set[PurePosixPath]] = None
         if selected_entries is not None:
             allowed = {PurePosixPath(str(entry)) for entry in selected_entries if str(entry)}
+            allowed.update(self._mandatory_update_entries(source))
 
         for path in source.rglob("*"):
             if any(part == "__MACOSX" for part in path.parts):
@@ -3286,6 +3303,52 @@ class Sims4ModSorterApp(tk.Tk):
                 replaced += 1
 
         return replaced
+
+    @staticmethod
+    def _mandatory_update_entries(source: Path) -> Set[PurePosixPath]:
+        mandatory: Set[PurePosixPath] = set()
+        try:
+            for path in source.rglob("*"):
+                if not path.is_file():
+                    continue
+                name_lower = path.name.lower()
+                stem_lower = Path(path.name).stem.lower()
+                if name_lower == "version" or stem_lower == "sims4modsorter":
+                    relative = path.relative_to(source)
+                    mandatory.add(PurePosixPath(relative.as_posix()))
+        except Exception:
+            return mandatory
+        return mandatory
+
+    @staticmethod
+    def _copy_existing_installation(current_root: Path, destination: Path) -> None:
+        for path in current_root.rglob("*"):
+            relative = path.relative_to(current_root)
+            target = destination / relative
+            try:
+                if path.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(path, target)
+            except Exception:
+                continue
+
+    def _update_version_file(self, install_root: Path, expected_version: Optional[str]) -> None:
+        if not expected_version:
+            return
+        version_path = install_root / "VERSION"
+        try:
+            current = version_path.read_text(encoding="utf-8").strip() if version_path.exists() else None
+        except Exception:
+            current = None
+        if current == expected_version:
+            return
+        try:
+            version_path.parent.mkdir(parents=True, exist_ok=True)
+            version_path.write_text(f"{expected_version}\n", encoding="utf-8")
+        except Exception as exc:
+            self.log(f"Failed to synchronize version file: {exc}", level="warn")
 
     def _prompt_advanced_file_selection(
         self, package_path: Path
