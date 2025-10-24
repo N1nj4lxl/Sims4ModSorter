@@ -1,0 +1,8 @@
+{
+  "name": "Column Layout Manager",
+  "id": "column_layout_manager",
+  "entry": "plugin.py",
+  "callable": "register",
+  "enabled": true,
+  "version": "1.0.0"
+}
