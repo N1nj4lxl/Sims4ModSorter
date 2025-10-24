@@ -1471,20 +1471,35 @@ class Sims4ModSorterApp(tk.Tk):
         sidebar_frame.update_idletasks()
         _configure_sidebar()
 
-        def _on_sidebar_mousewheel(event) -> None:
-            if event.delta:
-                sidebar_canvas.yview_scroll(int(-event.delta / 120), "units")
-            elif event.num == 4:
-                sidebar_canvas.yview_scroll(-1, "units")
-            elif event.num == 5:
-                sidebar_canvas.yview_scroll(1, "units")
+        def _sidebar_contains(widget: Optional[tk.Widget]) -> bool:
+            while widget is not None:
+                if widget in (sidebar_canvas, sidebar_frame):
+                    return True
+                widget = getattr(widget, "master", None)
+            return False
 
-        sidebar_canvas.bind("<MouseWheel>", _on_sidebar_mousewheel)
-        sidebar_canvas.bind("<Button-4>", lambda _e: sidebar_canvas.yview_scroll(-1, "units"))
-        sidebar_canvas.bind("<Button-5>", lambda _e: sidebar_canvas.yview_scroll(1, "units"))
-        sidebar_frame.bind("<MouseWheel>", _on_sidebar_mousewheel)
-        sidebar_frame.bind("<Button-4>", lambda _e: sidebar_canvas.yview_scroll(-1, "units"))
-        sidebar_frame.bind("<Button-5>", lambda _e: sidebar_canvas.yview_scroll(1, "units"))
+        def _scroll_sidebar(units: int) -> None:
+            if units:
+                sidebar_canvas.yview_scroll(units, "units")
+
+        def _on_sidebar_mousewheel(event) -> Optional[str]:
+            widget = sidebar_canvas.winfo_containing(event.x_root, event.y_root)
+            if not _sidebar_contains(widget):
+                return None
+            if event.delta:
+                delta = int(-event.delta / 120)
+                if delta == 0:
+                    delta = -1 if event.delta > 0 else 1
+                _scroll_sidebar(delta)
+            elif event.num == 4:
+                _scroll_sidebar(-1)
+            elif event.num == 5:
+                _scroll_sidebar(1)
+            return "break"
+
+        sidebar_canvas.bind_all("<MouseWheel>", _on_sidebar_mousewheel, add="+")
+        sidebar_canvas.bind_all("<Button-4>", lambda e: _on_sidebar_mousewheel(e) or "break", add="+")
+        sidebar_canvas.bind_all("<Button-5>", lambda e: _on_sidebar_mousewheel(e) or "break", add="+")
 
         selection_section = ttk.LabelFrame(
             sidebar_frame,
