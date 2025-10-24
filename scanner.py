@@ -396,6 +396,16 @@ def _tokenise_path_parts(path: Path) -> Tuple[str, ...]:
     return tuple(tokens)
 
 
+def _shorten_note(note: str, max_words: int = 10) -> str:
+    """Trim notes that become overly long during scanning."""
+
+    words = note.split()
+    if len(words) <= max_words:
+        return note
+    trimmed = " ".join(words[:max_words])
+    return trimmed + "\u2026"
+
+
 DECISIVE_DBPF = {
     "CAS": {"CASP"},
     "BuildBuy": {"OBJD", "RSLT", "SLOT"},
@@ -1159,7 +1169,7 @@ class Classifier:
             confidence = max(confidence, float(thresholds.get("high_conf", 0.8)))
 
         needs_enrich = confidence < float(thresholds.get("high_conf", 0.8))
-        notes_text = "; ".join(note for note in notes if note)
+        notes_text = "; ".join(_shorten_note(note) for note in notes if note)
         target = "Unsorted"
 
         finding = ScanFinding(
