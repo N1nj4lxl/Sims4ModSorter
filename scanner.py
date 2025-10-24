@@ -6,6 +6,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 import zipfile
 from collections import Counter
 from dataclasses import dataclass, field, replace
@@ -137,6 +138,55 @@ class AdultEvidence:
 
 
 # ---------------------------------------------------------------------------
+# Feature flags and metrics
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class FeatureFlags:
+    fast_mode: bool = True
+    peek_budget_bytes: int = 131072
+    enable_folder_bias: bool = True
+    treat_package_as_nonfinal: bool = True
+    cache_db: str = "scan_cache.db"
+    routing_map: str = "DEFAULT_FOLDER_MAP_V2"
+    use_legacy_routing: bool = False
+
+
+@dataclass(slots=True)
+class ScanMetrics:
+    total_time: float = 0.0
+    files_scanned: int = 0
+    cache_hits: int = 0
+    decisive_headers: int = 0
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def record_scan(self, duration: float, decisive: bool) -> None:
+        with self.lock:
+            self.total_time += max(0.0, duration)
+            self.files_scanned += 1
+            if decisive:
+                self.decisive_headers += 1
+
+    def record_cache_hit(self) -> None:
+        with self.lock:
+            self.cache_hits += 1
+
+    def average_time_ms(self) -> float:
+        with self.lock:
+            if not self.files_scanned:
+                return 0.0
+            return (self.total_time / self.files_scanned) * 1000.0
+
+
+@dataclass(slots=True)
+class PathBiasRule:
+    category: str
+    score: int
+    patterns: Tuple[str, ...]
+
+
+# ---------------------------------------------------------------------------
 # Classification constants
 # ---------------------------------------------------------------------------
 
@@ -146,6 +196,7 @@ CATEGORY_ORDER: List[str] = [
     "Adult",
     "CAS",
     "BuildBuy",
+    "Pose or Animation",
     "Tuning",
     "Mixed",
     "Resources",
@@ -156,17 +207,24 @@ CATEGORY_ORDER: List[str] = [
 
 CATEGORY_INDEX: Dict[str, int] = {name: idx for idx, name in enumerate(CATEGORY_ORDER)}
 
-DEFAULT_FOLDER_MAP: Dict[str, str] = {
-    "Script Mod": "Mods/ScriptMods",
-    "Adult": "Mods/Adult",
-    "CAS": "Mods/CAS",
-    "BuildBuy": "Mods/BuildBuy",
-    "Tuning": "Mods/Tuning",
-    "Mixed": "Mods/Mixed",
-    "Resources": "Mods/Resources",
-    "Archive": "Mods/Archives",
-    "Other": "Mods/Other",
-    "Unknown": UNKNOWN_DEFAULT_FOLDER,
+DEFAULT_FOLDER_MAP_V2: Dict[str, str] = {
+    "Script Mod": "Mods/Scripts/",
+    "Adult": "Mods/NeedsReview/Adult/",
+    "CAS": "Mods/CAS/",
+    "BuildBuy": "Mods/BuildBuy/",
+    "Pose or Animation": "Mods/Animations/",
+    "Tuning": "Mods/Tuning/",
+    "Mixed": "Mods/NeedsReview/",
+    "Resources": "Mods/NeedsReview/",
+    "Archive": "Mods/NeedsReview/",
+    "Other": "Mods/NeedsReview/",
+    "Unknown": "Mods/NeedsReview/",
+}
+
+DEFAULT_FOLDER_MAP: Dict[str, str] = DEFAULT_FOLDER_MAP_V2
+
+ROUTING_MAPS: Dict[str, Dict[str, str]] = {
+    "DEFAULT_FOLDER_MAP_V2": DEFAULT_FOLDER_MAP_V2,
 }
 
 PACKAGE_EXTS = {".package"}
@@ -243,6 +301,14 @@ TYPE_IDS: Dict[int, str] = {
     0x0354796A: "TONE",
     0x067CAA11: "BGEO",
     0x00B2D882: "IMG",
+    0x2F7D0004: "RLE2",
+    0xCD0F1220: "SLOT",
+    0x160D0E6A: "RSLT",
+    0x0AE3FDE5: "FTPT",
+    0x6B20C4F3: "CLIP",
+    0xE882D22F: "I7",
+    0x03B33DDF: "ITUN",
+    0xD1F577C6: "SXML",
 }
 
 
@@ -407,11 +473,46 @@ def _shorten_note(note: str, max_words: int = 10) -> str:
     return trimmed + "\u2026"
 
 
-DECISIVE_DBPF = {
-    "CAS": {"CASP"},
-    "BuildBuy": {"OBJD", "RSLT", "SLOT"},
-    "Tuning": {"ITUN", "SITN", "CLIP"},
+DECISIVE_DBPF: Dict[str, set[int]] = {
+    "CAS": {0x034AEECB, 0x015A1849, 0x067CAA11, 0x2F7D0004},
+    "BuildBuy": {0x319E4F1D, 0xCD0F1220, 0x160D0E6A, 0x0AE3FDE5},
+    "Pose or Animation": {0x6B20C4F3, 0xE882D22F},
+    "Tuning": {0x03B33DDF, 0xD1F577C6},
 }
+
+POSE_HEADER_TYPES: set[int] = {0x6B20C4F3, 0xE882D22F}
+TUNING_HEADER_TYPES: set[int] = {0x03B33DDF, 0xD1F577C6}
+STBL_TYPE_ID = 0x220557DA
+
+
+def _score_dbpf_types(types: Dict[int, int]) -> Tuple[Dict[str, int], List[str], bool, Optional[str]]:
+    scores: Dict[str, int] = {}
+    signals: List[str] = []
+    decisive = False
+    decisive_type: Optional[str] = None
+    for type_id, count in types.items():
+        name = TYPE_IDS.get(type_id, hex(type_id))
+        weight = max(1, int(count))
+        if type_id in DECISIVE_DBPF.get("CAS", set()):
+            scores["CAS"] = scores.get("CAS", 0) + 5 * weight
+            decisive = True
+            decisive_type = name
+            signals.append(f"header:{name}")
+        elif type_id in DECISIVE_DBPF.get("BuildBuy", set()):
+            scores["BuildBuy"] = scores.get("BuildBuy", 0) + 5 * weight
+            decisive = True
+            decisive_type = name
+            signals.append(f"header:{name}")
+        elif type_id in POSE_HEADER_TYPES:
+            scores["Pose or Animation"] = scores.get("Pose or Animation", 0) + 4 * weight
+            signals.append(f"header:{name}")
+        elif type_id in TUNING_HEADER_TYPES:
+            scores["Tuning"] = scores.get("Tuning", 0) + 4 * weight
+            signals.append(f"header:{name}")
+        elif type_id == STBL_TYPE_ID:
+            scores["Tuning"] = scores.get("Tuning", 0) + 2 * weight
+            signals.append(f"header:{name}")
+    return scores, signals, decisive, decisive_type
 
 
 @dataclass(slots=True)
@@ -423,6 +524,9 @@ class NameSignal:
     notes: List[str]
     family: Optional[str] = None
     tokens: Tuple[str, ...] = field(default_factory=tuple)
+    score: int = 0
+    signals: Tuple[str, ...] = field(default_factory=tuple)
+    score_map: Dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -435,6 +539,9 @@ class HeaderSignal:
     family: Optional[str] = None
     supported: set[str] = field(default_factory=set)
     handler: str = "unknown"
+    score: int = 0
+    signals: Tuple[str, ...] = field(default_factory=tuple)
+    decisive_type: Optional[str] = None
 
     def supports(self, category: str) -> bool:
         if not category:
@@ -463,6 +570,9 @@ class ScanFinding:
     disabled: bool
     extras: Dict[str, str] = field(default_factory=dict)
     handler: str = ""
+    confidence_score: int = 0
+    signals: Tuple[str, ...] = field(default_factory=tuple)
+    decisive_header: bool = False
 
     def to_payload(self) -> Dict[str, object]:
         return {
@@ -478,6 +588,9 @@ class ScanFinding:
             "disabled": self.disabled,
             "extras": self.extras,
             "handler": self.handler,
+            "confidence_score": int(self.confidence_score),
+            "signals": list(self.signals),
+            "decisive_header": bool(self.decisive_header),
         }
 
     @classmethod
@@ -495,6 +608,9 @@ class ScanFinding:
             disabled=bool(payload.get("disabled", False)),
             extras={str(k): str(v) for k, v in dict(payload.get("extras", {})).items()},
             handler=str(payload.get("handler", "")),
+            confidence_score=int(payload.get("confidence_score", 0)),
+            signals=tuple(str(sig) for sig in payload.get("signals", [])),
+            decisive_header=bool(payload.get("decisive_header", False)),
         )
 
 
@@ -512,104 +628,130 @@ def _ensure_fingerprint_extra(finding: ScanFinding, fingerprint: str) -> None:
 
 
 class ScanCache:
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, rules_version: int) -> None:
         self._path = db_path
+        self._rules_version = rules_version
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._ensure_schema()
+        self._purge_old_versions()
 
     def _ensure_schema(self) -> None:
         with self._conn:
+            self._conn.execute("DROP TABLE IF EXISTS entries")
+            self._conn.execute("DROP TABLE IF EXISTS fingerprints")
             self._conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS entries (
-                    id INTEGER PRIMARY KEY,
-                    path TEXT NOT NULL,
+                CREATE TABLE IF NOT EXISTS files (
+                    hash TEXT PRIMARY KEY,
                     size INTEGER NOT NULL,
-                    mtime REAL NOT NULL,
-                    payload TEXT NOT NULL
+                    mtime INTEGER NOT NULL,
+                    rules_version INTEGER NOT NULL,
+                    category TEXT NOT NULL,
+                    confidence INTEGER NOT NULL,
+                    decisive_header INTEGER NOT NULL,
+                    disabled INTEGER NOT NULL,
+                    payload TEXT
                 )
-                """
-            )
-            self._conn.execute(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_key
-                ON entries(path, size, mtime)
                 """
             )
             self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS fingerprints (
                     fingerprint TEXT PRIMARY KEY,
-                    entry_id INTEGER NOT NULL,
-                    FOREIGN KEY(entry_id) REFERENCES entries(id) ON DELETE CASCADE
+                    hash TEXT NOT NULL,
+                    FOREIGN KEY(hash) REFERENCES files(hash) ON DELETE CASCADE
                 )
                 """
             )
 
-    def lookup(self, path: Path, size: int, mtime: float) -> Optional[ScanFinding]:
-        with self._lock, self._conn:
-            row = self._conn.execute(
-                "SELECT payload FROM entries WHERE path=? AND size=? AND mtime=?",
-                (str(path), int(size), float(mtime)),
-            ).fetchone()
-        if not row:
-            return None
-        payload = json.loads(row[0])
-        return ScanFinding.from_payload(payload)
+    def _make_hash(self, path: Path, size: int, mtime: float) -> str:
+        return f"{path}:{int(size)}:{int(mtime)}"
 
-    def get_by_id(self, entry_id: int) -> Optional[ScanFinding]:
+    def _purge_old_versions(self) -> None:
         with self._lock, self._conn:
-            row = self._conn.execute(
-                "SELECT payload FROM entries WHERE id=?",
-                (entry_id,),
-            ).fetchone()
-        if not row:
-            return None
-        payload = json.loads(row[0])
-        return ScanFinding.from_payload(payload)
-
-    def upsert(self, finding: ScanFinding, st: os.stat_result, fingerprint: Optional[str]) -> None:
-        payload = json.dumps(finding.to_payload(), ensure_ascii=False)
-        with self._lock, self._conn:
-            cur = self._conn.execute(
-                "SELECT id FROM entries WHERE path=? AND size=? AND mtime=?",
-                (str(finding.path), int(st.st_size), float(st.st_mtime)),
+            self._conn.execute(
+                "DELETE FROM files WHERE rules_version<>?",
+                (self._rules_version,),
             )
-            row = cur.fetchone()
-            if row:
-                entry_id = row[0]
-                self._conn.execute(
-                    "UPDATE entries SET payload=? WHERE id=?",
-                    (payload, entry_id),
-                )
-            else:
-                cur = self._conn.execute(
-                    "INSERT INTO entries(path, size, mtime, payload) VALUES(?,?,?,?)",
-                    (str(finding.path), int(st.st_size), float(st.st_mtime), payload),
-                )
-                entry_id = cur.lastrowid
+
+    def lookup(self, path: Path, size: int, mtime: float) -> Optional[ScanFinding]:
+        key = self._make_hash(path, size, mtime)
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT rules_version, payload FROM files WHERE hash=?",
+                (key,),
+            ).fetchone()
+        if not row:
+            return None
+        if int(row[0]) != self._rules_version:
+            return None
+        payload_raw = row[1]
+        if not payload_raw:
+            return None
+        payload = json.loads(payload_raw)
+        finding = ScanFinding.from_payload(payload)
+        finding.path = path
+        return finding
+
+    def upsert(
+        self, finding: ScanFinding, st: os.stat_result, fingerprint: Optional[str]
+    ) -> None:
+        payload = json.dumps(finding.to_payload(), ensure_ascii=False)
+        key = self._make_hash(finding.path, int(st.st_size), float(st.st_mtime))
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO files(hash, size, mtime, rules_version, category, confidence, decisive_header, disabled, payload)
+                VALUES(?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(hash) DO UPDATE SET
+                    size=excluded.size,
+                    mtime=excluded.mtime,
+                    rules_version=excluded.rules_version,
+                    category=excluded.category,
+                    confidence=excluded.confidence,
+                    decisive_header=excluded.decisive_header,
+                    disabled=excluded.disabled,
+                    payload=excluded.payload
+                """,
+                (
+                    key,
+                    int(st.st_size),
+                    int(st.st_mtime),
+                    self._rules_version,
+                    finding.category,
+                    int(finding.confidence_score),
+                    1 if finding.decisive_header else 0,
+                    1 if finding.disabled else 0,
+                    payload,
+                ),
+            )
             if fingerprint:
                 self._conn.execute(
-                    "INSERT OR REPLACE INTO fingerprints(fingerprint, entry_id) VALUES(?, ?)",
-                    (fingerprint, entry_id),
+                    "INSERT OR REPLACE INTO fingerprints(fingerprint, hash) VALUES(?, ?)",
+                    (fingerprint, key),
                 )
 
     def lookup_fingerprint(self, fingerprint: str) -> Optional[ScanFinding]:
         with self._lock, self._conn:
             row = self._conn.execute(
                 """
-                SELECT entries.payload
+                SELECT files.payload, files.rules_version
                 FROM fingerprints
-                JOIN entries ON entries.id = fingerprints.entry_id
+                JOIN files ON files.hash = fingerprints.hash
                 WHERE fingerprints.fingerprint=?
                 """,
                 (fingerprint,),
             ).fetchone()
         if not row:
             return None
-        payload = json.loads(row[0])
+        if int(row[1]) != self._rules_version:
+            return None
+        payload_raw = row[0]
+        if not payload_raw:
+            return None
+        payload = json.loads(payload_raw)
         return ScanFinding.from_payload(payload)
 
     def close(self) -> None:
@@ -646,6 +788,11 @@ class ScanContext:
     thresholds: Dict[str, float]
     pool: concurrent.futures.ThreadPoolExecutor
     semaphore: threading.Semaphore
+    features: FeatureFlags
+    folder_map: Dict[str, str]
+    path_bias: Tuple[PathBiasRule, ...]
+    metrics: ScanMetrics
+    rules_version: int
 
 
 class KeywordAutomaton:
@@ -698,88 +845,140 @@ def load_keywords(path: str) -> Dict[str, List[str]]:
         return {"adult": [], "script": [], "cas": [], "buildbuy": []}
 
 
+def load_feature_flags(base_dir: Path) -> Tuple[FeatureFlags, int]:
+    cfg_path = base_dir / "update_config.json"
+    features = FeatureFlags()
+    rules_version = 1
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except Exception:
+        return features, rules_version
+    rules_version = int(data.get("scanner_rules_version", rules_version))
+    flags = data.get("scanner_features", {})
+    if isinstance(flags, dict):
+        features.fast_mode = bool(flags.get("fast_mode", features.fast_mode))
+        features.peek_budget_bytes = int(flags.get("peek_budget_bytes", features.peek_budget_bytes))
+        features.enable_folder_bias = bool(flags.get("enable_folder_bias", features.enable_folder_bias))
+        features.treat_package_as_nonfinal = bool(
+            flags.get("treat_package_as_nonfinal", features.treat_package_as_nonfinal)
+        )
+        cache_db = flags.get("cache_db")
+        if isinstance(cache_db, str) and cache_db.strip():
+            features.cache_db = cache_db.strip()
+        routing_map = flags.get("routing_map")
+        if isinstance(routing_map, str) and routing_map.strip():
+            features.routing_map = routing_map.strip()
+        features.use_legacy_routing = bool(flags.get("use_legacy_routing", features.use_legacy_routing))
+    return features, rules_version
+
+
 class NameHeuristics:
-    CAS_TOKENS = {
-        "hair",
-        "hairstyle",
-        "preset",
-        "eyes",
-        "skin",
-        "skintone",
-        "tattoo",
-        "brow",
-        "lip",
-        "makeup",
-        "recolor",
-        "recolour",
-        "overlay",
-        "lashes",
-    }
-    BUILD_TOKENS = {
-        "sofa",
-        "clutter",
-        "chair",
-        "table",
-        "bed",
-        "counter",
-        "window",
-        "door",
-        "wall",
-        "floor",
-        "lamp",
-        "decor",
-    }
-    SCRIPT_TOKENS = {
-        "script",
-        "python",
-        "mc_command_center",
-        "mccc",
-        "wickedwhims",
-        "ts4script",
-    }
-    ADULT_TOKENS = {
-        "wickedwhims",
-        "deviousdesires",
-        "basemental",
-        "nsfw",
-        "adult",
-        "strip",
-        "nude",
-    }
+    _name_token_map: Dict[str, Tuple[set[str], int]] = {}
+    _cas_tokens: set[str] = set()
+    _script_tokens: set[str] = set()
+    _adult_tokens: set[str] = set()
+    _generic_tokens: set[str] = set()
+    _features: FeatureFlags = FeatureFlags()
+    _path_bias: Tuple[PathBiasRule, ...] = tuple()
+
+    @classmethod
+    def configure(
+        cls,
+        keywords: Dict[str, List[str]],
+        path_bias: Tuple[PathBiasRule, ...],
+        features: FeatureFlags,
+    ) -> None:
+        name_tokens = dict(keywords.get("name_tokens", {}))
+        cas_tokens = {token.lower() for token in name_tokens.get("cas", [])}
+        build_tokens = {token.lower() for token in name_tokens.get("buildbuy", [])}
+        pose_tokens = {token.lower() for token in name_tokens.get("pose", [])}
+        tuning_tokens = {token.lower() for token in name_tokens.get("tuning", [])}
+        cls._name_token_map = {
+            "CAS": (cas_tokens, 3),
+            "BuildBuy": (build_tokens, 3),
+            "Pose or Animation": (pose_tokens, 4),
+            "Tuning": (tuning_tokens, 3),
+        }
+        cls._cas_tokens = cas_tokens
+        cls._generic_tokens = {token.lower() for token in name_tokens.get("generic", [])}
+        cls._script_tokens = {token.lower() for token in keywords.get("script", [])}
+        cls._adult_tokens = {token.lower() for token in keywords.get("adult", [])}
+        cls._path_bias = path_bias
+        cls._features = features
+
+    @classmethod
+    def cas_tokens(cls) -> set[str]:
+        return set(cls._cas_tokens)
 
     @classmethod
     def guess(cls, path: Path, rules: Dict[str, object]) -> NameSignal:
         name = path.name
         tokens = _tokenise(name)
+        token_set = set(tokens)
         folder_tokens = _tokenise_path_parts(path.parent)
+        folder_token_set = set(folder_tokens)
         ext, _ = _effective_extension(path)
 
-        category = "Archive" if ext in ARCHIVE_EXTS else "Script Mod" if ext in SCRIPT_EXTS else "Package"
-        confidence = 0.4 if category == "Package" else 0.5
         notes: List[str] = []
         tags: set[str] = set()
+        signals: List[str] = []
+        scores: Dict[str, int] = {}
+        base_scores: Dict[str, int] = {}
         adult_risk = "low"
+        adult_hits: set[str] = set()
         family: Optional[str] = None
 
-        if cls.CAS_TOKENS & set(tokens):
-            category = "CAS"
-            confidence = max(confidence, 0.55)
-            tags.add("name:cas")
-        if cls.BUILD_TOKENS & set(tokens):
-            category = "BuildBuy"
-            confidence = max(confidence, 0.55)
-            tags.add("name:buildbuy")
-        if cls.SCRIPT_TOKENS & set(tokens):
-            category = "Script Mod"
-            confidence = max(confidence, 0.65)
-            tags.add("name:script")
-        if cls.ADULT_TOKENS & set(tokens):
-            adult_risk = "high"
-            tags.add("name:adult")
-            notes.append("Adult keywords in name")
-        elif cls.ADULT_TOKENS & set(folder_tokens):
+        def bump(category: str, amount: int, signal: Optional[str] = None) -> None:
+            if not category or amount <= 0:
+                return
+            scores[category] = scores.get(category, 0) + amount
+            if signal:
+                signals.append(signal)
+
+        def base(category: str, amount: int) -> None:
+            if not category:
+                return
+            base_scores.setdefault(category, amount)
+            scores.setdefault(category, 0)
+
+        if ext in SCRIPT_EXTS:
+            base("Script Mod", 10)
+            bump("Script Mod", 10, "name:ext:ts4script")
+        elif ext in ARCHIVE_EXTS:
+            base("Archive", 6)
+            bump("Archive", 2, "name:ext:archive")
+        elif ext in PACKAGE_EXTS:
+            base("Package", 4)
+        else:
+            base("Other", 3)
+
+        seen_token_hits: Dict[Tuple[str, str], bool] = {}
+        for token in token_set:
+            for category, (token_pool, amount) in cls._name_token_map.items():
+                if token in token_pool and (category, token) not in seen_token_hits:
+                    seen_token_hits[(category, token)] = True
+                    bump(category, amount, f"name:{token}")
+                    tags.add(f"name:{category.lower().replace(' ', '_')}")
+                    notes.append(f"Name token: {token}")
+            if token in cls._script_tokens:
+                bump("Script Mod", 4, f"name:{token}")
+                tags.add("name:script")
+            if token in cls._adult_tokens:
+                adult_risk = "high"
+                adult_hits.add(token)
+                tags.add("name:adult")
+
+        if adult_risk == "low" and cls._adult_tokens & folder_token_set:
             adult_risk = "medium"
             tags.add("folder:adult")
+
+        for token in folder_token_set:
+            if token in cls._script_tokens:
+                bump("Script Mod", 3, f"folder:{token}")
+                tags.add("folder:script")
+
+        if cls._generic_tokens & token_set:
+            bump("Mixed", len(cls._generic_tokens & token_set), "name:generic")
 
         author_rules = dict(rules.get("authors", {}))
         for token in tokens + folder_tokens:
@@ -787,64 +986,102 @@ class NameHeuristics:
             if not bias:
                 continue
             bias_category = str(bias.get("bias", ""))
+            base_category = bias_category
+            local_family: Optional[str] = None
             if ":" in bias_category:
-                base, fam = bias_category.split(":", 1)
-                if base:
-                    category = base
-                family = fam or family
-            elif bias_category:
-                category = bias_category
+                base_category, local_family = bias_category.split(":", 1)
             boost = float(bias.get("boost", 0.2))
-            confidence = min(1.0, max(confidence, 0.5 + boost))
-            tags.add(f"author:{token}")
-            notes.append(f"Author bias: {token}")
+            if base_category:
+                bump(base_category, max(3, int(round(10 * boost))), f"author:{token}")
+                tags.add(f"author:{token}")
+                if local_family:
+                    family = local_family or family
+                notes.append(f"Author bias: {token}")
 
         pack_rules = dict(rules.get("packs", {}))
-        for token in tokens:
+        for token in token_set:
             bias = pack_rules.get(token)
             if not bias:
                 continue
             bias_category = str(bias.get("bias", ""))
+            base_category = bias_category
+            local_family: Optional[str] = None
             if ":" in bias_category:
-                base, fam = bias_category.split(":", 1)
-                if base:
-                    category = base
-                family = fam or family
-            elif bias_category:
-                category = bias_category
-            confidence = min(1.0, max(confidence, 0.6))
-            tags.add(f"pack:{token}")
-            notes.append(f"Pack bias: {token}")
+                base_category, local_family = bias_category.split(":", 1)
+            if base_category:
+                bump(base_category, 6, f"pack:{token}")
+                tags.add(f"pack:{token}")
+                if local_family:
+                    family = local_family or family
+                notes.append(f"Pack bias: {token}")
 
         folder_rules = dict(rules.get("folders", {}))
-        for token in folder_tokens:
+        for token in folder_token_set:
             bias = folder_rules.get(token)
             if not bias:
                 continue
             bias_category = str(bias.get("bias", ""))
+            base_category = bias_category
+            local_family: Optional[str] = None
             if ":" in bias_category:
-                base, fam = bias_category.split(":", 1)
-                if base:
-                    category = base
-                family = fam or family
-            elif bias_category:
-                category = bias_category
+                base_category, local_family = bias_category.split(":", 1)
             boost = float(bias.get("boost", 0.0))
-            confidence = min(1.0, confidence + boost)
-            tags.add(f"folder:{token}")
-            notes.append(f"Folder bias: {token}")
+            if base_category:
+                bump(base_category, max(2, int(round(10 * boost))), f"folder:{token}")
+                tags.add(f"folder:{token}")
+                if local_family:
+                    family = local_family or family
+                notes.append(f"Folder bias: {token}")
 
-        category = category or "Unknown"
+        name_best = max((score for category, score in scores.items() if category != "Package"), default=0)
+        if cls._features.enable_folder_bias and name_best < 6:
+            folder_text = str(path.parent).lower()
+            for rule in cls._path_bias:
+                if any(pattern.lower() in folder_text for pattern in rule.patterns):
+                    bump(rule.category, rule.score, f"folderbias:{rule.category}")
+                    tags.add(f"folderbias:{rule.category}")
+                    notes.append(f"Folder bias: {rule.category}")
+
+        if not scores:
+            scores["Unknown"] = 0
+
+        best_category = max(
+            scores.items(),
+            key=lambda kv: (kv[1], -CATEGORY_INDEX.get(kv[0].split(":", 1)[0], len(CATEGORY_ORDER))),
+        )[0]
+
+        total_score = scores.get(best_category, 0)
+        base_amount = base_scores.get(best_category, 0)
+        base_confidence = 0.35
+        if best_category == "Script Mod":
+            base_confidence = 0.7
+        elif best_category == "Archive":
+            base_confidence = 0.5
+        elif best_category == "CAS" or best_category == "BuildBuy" or best_category == "Pose or Animation":
+            base_confidence = 0.45
+        elif best_category == "Tuning":
+            base_confidence = 0.45
+        elif best_category == "Package":
+            base_confidence = 0.35
+        confidence = min(1.0, base_confidence + max(0, total_score - base_amount) * 0.05)
+
+        if adult_hits:
+            notes.append("Adult keywords in name")
+
+        signals = tuple(dict.fromkeys(signals))
         notes.append(f"Tokens: {', '.join(tokens[:6])}" if tokens else "No tokens")
 
         return NameSignal(
-            category=category,
-            confidence=min(1.0, confidence),
+            category=best_category,
+            confidence=confidence,
             adult_risk=adult_risk,
             tags=tags,
             notes=notes,
             family=family,
             tokens=tokens,
+            score=total_score,
+            signals=signals,
+            score_map=dict(scores),
         )
 
 
@@ -859,14 +1096,21 @@ class HeaderProbe:
         elif ext == ".zip":
             signal = ZipProbe.inspect(path, ctx)
         else:
-            signal = HeaderSignal(category=None, confidence=0.0, decisive=False, handler="none")
+            signal = HeaderSignal(
+                category=None,
+                confidence=0.0,
+                decisive=False,
+                handler="none",
+                score=0,
+                signals=tuple(),
+            )
         return signal
 
 
 class DbpfProbe:
     @staticmethod
     def inspect(path: Path) -> HeaderSignal:
-        types = dbpf_scan_types(path)
+        types = dbpf_scan_types(path, limit=10)
         if not types:
             return HeaderSignal(
                 category=None,
@@ -874,37 +1118,50 @@ class DbpfProbe:
                 decisive=False,
                 notes=["No DBPF index"],
                 handler="dbpf",
+                score=0,
+                signals=tuple(),
             )
         tags = {TYPE_IDS.get(key, hex(key)) for key in types}
         notes = [
             "DBPF types: "
             + ", ".join(f"{TYPE_IDS.get(key, hex(key))}:{count}" for key, count in sorted(types.items()))
         ]
-        for category, decisive_set in DECISIVE_DBPF.items():
-            if decisive_set <= {TYPE_IDS.get(key, hex(key)).split("/")[0] for key in types}:
-                return HeaderSignal(
-                    category=category,
-                    confidence=0.92,
-                    decisive=True,
-                    tags=tags,
-                    notes=notes,
-                    handler="dbpf",
-                )
-        supported = set()
-        if any(TYPE_IDS.get(key, "").startswith("CASP") for key in types):
-            supported.add("CAS")
-        if 0x319E4F1D in types or 0x015A1849 in types:
-            supported.add("BuildBuy")
-        if 0x220557DA in types:
-            supported.add("Tuning")
+        score_map, raw_signals, decisive, decisive_type = _score_dbpf_types(types)
+        supported = {category for category, score in score_map.items() if score > 0}
+        if decisive and decisive_type:
+            notes.append(f"Decisive header: {decisive_type}")
+        if not score_map:
+            return HeaderSignal(
+                category=None,
+                confidence=0.5,
+                decisive=False,
+                tags=tags,
+                notes=notes,
+                supported=set(),
+                handler="dbpf",
+                score=0,
+                signals=tuple(),
+            )
+        best_category = max(
+            score_map.items(),
+            key=lambda kv: (kv[1], -CATEGORY_INDEX.get(kv[0].split(":", 1)[0], len(CATEGORY_ORDER))),
+        )[0]
+        score_value = score_map.get(best_category, 0)
+        confidence = 0.55 + 0.04 * score_value
+        if decisive:
+            confidence = max(confidence, 0.92)
+        confidence = min(0.99, confidence)
         return HeaderSignal(
-            category=next(iter(supported), None),
-            confidence=0.7 if supported else 0.4,
-            decisive=False,
+            category=best_category,
+            confidence=confidence,
+            decisive=decisive,
             tags=tags,
             notes=notes,
             supported=supported,
             handler="dbpf",
+            score=score_value,
+            signals=tuple(dict.fromkeys(raw_signals)),
+            decisive_type=decisive_type,
         )
 
 
@@ -922,6 +1179,8 @@ class ZipProbe:
                 decisive=False,
                 notes=[f"Zip read error: {exc}"],
                 handler="zip",
+                score=0,
+                signals=tuple(),
             )
 
         ext_counts = Counter()
@@ -937,21 +1196,34 @@ class ZipProbe:
         category: Optional[str] = None
         confidence = 0.5
         supported: set[str] = set()
+        signals: List[str] = []
+        score = 0
 
         if ext_counts and set(ext_counts) <= {".package"}:
             category = "CAS"
             confidence = 0.75
             supported.add("CAS")
-            cas_tokens = {token for name in names for token in _tokenise(name) if token in NameHeuristics.CAS_TOKENS}
+            cas_tokens = {
+                token
+                for name in names
+                for token in _tokenise(name)
+                if token in NameHeuristics.cas_tokens()
+            }
             if cas_tokens:
                 notes.append("CAS-like package names: " + ", ".join(sorted(cas_tokens)))
+                signals.extend(f"header:zip:{token}" for token in sorted(cas_tokens))
+            score = 3
+            signals.append("header:zip:package")
         elif any(ext in SCRIPT_EXTS for ext in ext_counts):
             category = "Script Mod"
             confidence = 0.75
             supported.add("Script Mod")
+            score = 4
+            signals.append("header:zip:script")
         elif all(ext in TEXT_FILE_EXTS for ext in ext_counts if ext):
             category = "Resources"
             confidence = 0.6
+            score = 2
         else:
             supported.update({"CAS", "BuildBuy", "Script Mod"})
 
@@ -982,6 +1254,8 @@ class ZipProbe:
                         if group_hits:
                             sample_notes.append(f"Sample hit {group}: {', '.join(sorted(group_hits))}")
                             supported.add(group.capitalize())
+                            for hit in sorted(group_hits):
+                                signals.append(f"header:zip:{group}:{hit}")
                     sampled += 1
                 except Exception:
                     continue
@@ -996,6 +1270,8 @@ class ZipProbe:
             notes=notes,
             supported=supported,
             handler="zip",
+            score=score,
+            signals=tuple(dict.fromkeys(signals)),
         )
 
 
@@ -1027,6 +1303,8 @@ class Ts4ScriptProbe:
                 decisive=False,
                 notes=[f"ts4script error: {exc}"],
                 handler="ts4script",
+                score=0,
+                signals=tuple(),
             )
 
         family: Optional[str] = None
@@ -1043,8 +1321,12 @@ class Ts4ScriptProbe:
                         notes=["Modules: " + ", ".join(sorted(modules))],
                         family=fam,
                         handler="ts4script",
+                        score=12,
+                        signals=tuple(f"module:{mod}" for mod in sorted(modules)),
+                        decisive_type=f"module:{module}",
                     )
                 family = bias
+        score = 8 if modules else 4
         return HeaderSignal(
             category="Script Mod",
             confidence=0.8 if modules else 0.6,
@@ -1053,22 +1335,38 @@ class Ts4ScriptProbe:
             notes=["Modules: " + ", ".join(sorted(modules))] if modules else ["No python modules"],
             family=family,
             handler="ts4script",
+            score=score,
+            signals=tuple(f"module:{mod}" for mod in sorted(modules)),
+            decisive_type=None,
         )
 
 
 class ContentPeek:
     @staticmethod
-    def sample(path: Path, budgets: Dict[str, object], automaton: KeywordAutomaton) -> Optional[PeekSignal]:
+    def sample(
+        path: Path,
+        budgets: Dict[str, object],
+        automaton: KeywordAutomaton,
+        features: FeatureFlags,
+    ) -> Optional[PeekSignal]:
         ext, _ = _effective_extension(path)
-        budget = budgets.get(ext, 0)
-        if not budget:
-            return None
-        max_bytes = int(budget)
+        default_budget = int(budgets.get(ext, 0) or 0)
+        if ext == ".package":
+            max_bytes = max(int(features.peek_budget_bytes), default_budget)
+        else:
+            max_bytes = default_budget
         if max_bytes <= 0:
             return None
         try:
+            size = path.stat().st_size
             with path.open("rb") as fh:
-                data = fh.read(max_bytes)
+                if size <= max_bytes:
+                    data = fh.read(max_bytes)
+                else:
+                    midpoint = size // 2
+                    start = max(0, midpoint - max_bytes // 2)
+                    fh.seek(start)
+                    data = fh.read(max_bytes)
         except Exception:
             return None
         hits = automaton.search(data)
@@ -1124,6 +1422,7 @@ class Classifier:
         name_sig: NameSignal,
         head_sig: HeaderSignal,
         peek_sig: Optional[PeekSignal],
+        features: FeatureFlags,
         thresholds: Dict[str, float],
     ) -> ScanFinding:
         notes: List[str] = []
@@ -1133,74 +1432,177 @@ class Classifier:
         notes.extend(name_sig.notes)
         notes.extend(head_sig.notes)
 
+        score_board: Dict[str, int] = {}
+        signals: List[str] = []
         adult_hits: set[str] = set()
+
+        for category, value in name_sig.score_map.items():
+            if category:
+                score_board[category] = score_board.get(category, 0) + max(0, value)
+        signals.extend(name_sig.signals)
+
+        if head_sig.category:
+            score_board[head_sig.category] = score_board.get(head_sig.category, 0) + max(0, head_sig.score)
+        for supported in head_sig.supported:
+            score_board.setdefault(supported, 0)
+        signals.extend(head_sig.signals)
+
         if peek_sig:
             for group, hits in peek_sig.hits.items():
-                if hits:
-                    tags.add(f"peek:{group}")
-                    if group == "adult":
-                        adult_hits.update(hits)
-                    notes.append(f"Content hits {group}: {', '.join(sorted(hits))}")
+                if not hits:
+                    continue
+                tags.add(f"peek:{group}")
+                note_hits = ", ".join(sorted(hits))
+                notes.append(f"Content hits {group}: {note_hits}")
+                if group == "adult":
+                    adult_hits.update(hits)
+                category_map = {
+                    "adult": "Adult",
+                    "script": "Script Mod",
+                    "cas": "CAS",
+                    "buildbuy": "BuildBuy",
+                    "pose": "Pose or Animation",
+                    "tuning": "Tuning",
+                }
+                mapped = category_map.get(group)
+                if mapped:
+                    score_board[mapped] = score_board.get(mapped, 0) + 2 * len(hits)
+                for hit in sorted(hits):
+                    signals.append(f"peek:{group}:{hit}")
 
-        base_category = head_sig.category or name_sig.category or "Unknown"
-        confidence = max(name_sig.confidence, head_sig.confidence)
+        if not score_board:
+            score_board["Unknown"] = 0
+
+        base_category = name_sig.category or "Unknown"
+        if head_sig.category:
+            base_category = head_sig.category
+
+        if head_sig.decisive and head_sig.category:
+            best_category = head_sig.category
+            best_score = max(score_board.get(best_category, 0), head_sig.score)
+        else:
+            best_category, best_score = max(
+                score_board.items(),
+                key=lambda kv: (kv[1], -CATEGORY_INDEX.get(kv[0].split(":", 1)[0], len(CATEGORY_ORDER))),
+            )
+            tied = [cat for cat, score in score_board.items() if score == best_score]
+            if len(tied) > 1:
+                supported = [cat for cat in tied if head_sig.supports(cat)]
+                if supported:
+                    tied = supported
+                elif head_sig.category in tied:
+                    tied = [head_sig.category]
+                if len(tied) > 1 and {"BuildBuy", "CAS"} <= set(tied):
+                    build_has_objd = any(
+                        signal.startswith("header:COBJ/OBJD")
+                        or signal.startswith("header:SLOT")
+                        or signal.startswith("header:FTPT")
+                        for signal in head_sig.signals
+                    )
+                    if build_has_objd:
+                        tied = ["BuildBuy"]
+                    else:
+                        tied = ["CAS"]
+                if len(tied) > 1:
+                    tied.sort(key=lambda cat: CATEGORY_INDEX.get(cat.split(":", 1)[0], len(CATEGORY_ORDER)))
+                best_category = tied[0]
+                best_score = score_board.get(best_category, best_score)
+
+        if (
+            features.treat_package_as_nonfinal
+            and best_category in {"Package", "Unknown"}
+            and name_sig.score_map
+            and any(cat not in {"Package", "Unknown"} for cat in name_sig.score_map)
+        ):
+            alternatives = sorted(
+                ((cat, score) for cat, score in score_board.items() if cat not in {"Package", "Unknown"}),
+                key=lambda kv: (kv[1], -CATEGORY_INDEX.get(kv[0].split(":", 1)[0], len(CATEGORY_ORDER))),
+                reverse=True,
+            )
+            for candidate, value in alternatives:
+                if value >= 5:
+                    best_category = candidate
+                    best_score = value
+                    break
+
         family = head_sig.family or name_sig.family
-
         adult_flag = name_sig.adult_risk == "high" or bool(adult_hits)
-        if base_category == "Adult":
+        if head_sig.category == "Adult":
             adult_flag = True
 
-        if adult_flag:
-            base = "Adult"
-            if family:
-                category = f"Adult:{family}"
-            else:
-                category = "Adult"
-            confidence = max(confidence, 0.85 if adult_hits else 0.75)
-            if adult_hits:
-                tags.update(f"adult:{hit}" for hit in adult_hits)
-        else:
-            base = base_category
-            if family:
-                category = f"{base}:{family}"
-            else:
-                category = base
+        category = best_category
+        if adult_flag and not category.startswith("Adult"):
+            base = category
+            category = "Adult" if not base else f"Adult:{base}"
+            signals.append("adult:promotion")
 
+        if family and not category.startswith("Adult"):
+            category = f"{best_category}:{family}" if best_category else family
+        elif family and category.startswith("Adult") and ":" not in category:
+            category = f"Adult:{family}"
+
+        if adult_hits:
+            tags.update(f"adult:{hit}" for hit in adult_hits)
+
+        combined_confidence = max(
+            name_sig.confidence,
+            head_sig.confidence,
+            0.4 + 0.05 * max(0, best_score),
+        )
         if head_sig.decisive:
-            confidence = max(confidence, float(thresholds.get("high_conf", 0.8)))
+            combined_confidence = max(combined_confidence, float(thresholds.get("high_conf", 0.8)))
+        if adult_flag:
+            combined_confidence = max(combined_confidence, 0.75 if adult_hits else 0.7)
+        combined_confidence = min(0.99, combined_confidence)
 
-        needs_enrich = confidence < float(thresholds.get("high_conf", 0.8))
         notes_text = "; ".join(_shorten_note(note) for note in notes if note)
-        target = UNKNOWN_DEFAULT_FOLDER
+        needs_enrich = combined_confidence < float(thresholds.get("high_conf", 0.8))
+        extras: Dict[str, str] = {}
+        if adult_hits:
+            extras["adult_hits"] = ", ".join(sorted(adult_hits))
+        extras["confidence_score"] = str(best_score)
+        extras["signals"] = ", ".join(dict.fromkeys(signals))
 
         finding = ScanFinding(
             path=path,
             ext=ext,
             size=int(st.st_size),
             category=category or "Unknown",
-            confidence=min(1.0, confidence),
+            confidence=combined_confidence,
             notes=notes_text,
             tags=tuple(sorted(tags)),
-            target=target,
+            target=UNKNOWN_DEFAULT_FOLDER,
             needs_enrich=needs_enrich,
             disabled=disabled,
-            extras={"adult_hits": ", ".join(sorted(adult_hits))} if adult_hits else {},
+            extras=extras,
             handler=head_sig.handler,
+            confidence_score=best_score,
+            signals=tuple(dict.fromkeys(signals)),
+            decisive_header=head_sig.decisive,
         )
         return finding
 
 
 class Router:
     @staticmethod
-    def apply(finding: ScanFinding, rules: Dict[str, object]) -> ScanFinding:
-        routing = dict(rules.get("routing", {}))
+    def apply(finding: ScanFinding, ctx: ScanContext) -> ScanFinding:
+        rules = ctx.rules
+        features = ctx.features
+        folder_map = ctx.folder_map
+        routing = dict(rules.get("routing", {})) if features.use_legacy_routing else {}
         category = finding.category
         base = category.split(":", 1)[0] if category else "Unknown"
-        dest = routing.get(base, DEFAULT_FOLDER_MAP.get(base, UNKNOWN_DEFAULT_FOLDER))
+        dest = routing.get(base)
+        if not dest:
+            dest = folder_map.get(base, folder_map.get("Unknown", UNKNOWN_DEFAULT_FOLDER))
         if ":" in category:
             fam = category.split(":", 1)[1]
             if fam:
-                dest = f"{dest}/{fam}"
+                dest = f"{dest}{'' if dest.endswith('/') else '/'}{fam}"
+        if finding.disabled:
+            if not dest.endswith("/"):
+                dest = dest + "/"
+            dest = f"{dest}Disabled/"
         finding.target = dest
         return finding
 
@@ -1226,16 +1628,17 @@ class Scheduler:
         paths: Sequence[Path],
         progress_cb: Optional[ProgressCallback],
     ) -> Tuple[List[ScanFinding], List[str]]:
-        results: List[Optional[ScanFinding]] = [None] * len(paths)
+        total = len(paths)
+        results: List[Optional[ScanFinding]] = [None] * total
         errors: List[str] = []
-        futures: List[Tuple[int, Path, os.stat_result, concurrent.futures.Future[ScanFinding]]] = []
+        groups: Dict[Path, List[Tuple[int, Path, os.stat_result]]] = {}
         for index, path in enumerate(paths):
             try:
                 st = path.stat()
             except OSError as exc:
                 errors.append(f"stat failed for {path.name}: {exc}")
                 if progress_cb:
-                    progress_cb(index + 1, len(paths), path, "error")
+                    progress_cb(index + 1, total, path, "error")
                 continue
             cached = self._ctx.cache.lookup(path, st.st_size, st.st_mtime)
             if cached:
@@ -1243,24 +1646,51 @@ class Scheduler:
                 _ensure_fingerprint_extra(cached, fingerprint)
                 self._ctx.cache.upsert(cached, st, fingerprint)
                 results[index] = cached
+                self._ctx.metrics.record_cache_hit()
                 if progress_cb:
-                    progress_cb(index + 1, len(paths), path, "cached")
+                    progress_cb(index + 1, total, path, "cached")
                 continue
-            future = self._ctx.pool.submit(scan_light, path, st, self._ctx)
-            futures.append((index, path, st, future))
+            groups.setdefault(path.parent, []).append((index, path, st))
 
-        for index, path, st, future in futures:
+        futures: List[concurrent.futures.Future[Tuple[List[Tuple[int, ScanFinding]], List[str]]]] = []
+        for entries in groups.values():
+            future = self._ctx.pool.submit(self._scan_directory, entries, progress_cb, total)
+            futures.append(future)
+
+        for future in futures:
             try:
-                finding = future.result()
-                results[index] = finding
+                group_results, group_errors = future.result()
+                for index, finding in group_results:
+                    results[index] = finding
+                errors.extend(group_errors)
             except Exception as exc:
-                errors.append(f"scan failed for {path.name}: {exc}")
-                results[index] = None
-            if progress_cb:
-                progress_cb(index + 1, len(paths), path, "scanned")
+                errors.append(str(exc))
 
         final_results = [finding for finding in results if finding]
         return final_results, errors
+
+    def _scan_directory(
+        self,
+        entries: List[Tuple[int, Path, os.stat_result]],
+        progress_cb: Optional[ProgressCallback],
+        total: int,
+    ) -> Tuple[List[Tuple[int, ScanFinding]], List[str]]:
+        local_results: List[Tuple[int, ScanFinding]] = []
+        local_errors: List[str] = []
+        for index, path, st in entries:
+            start = time.perf_counter()
+            try:
+                finding = scan_light(path, st, self._ctx)
+                duration = time.perf_counter() - start
+                self._ctx.metrics.record_scan(duration, finding.decisive_header)
+                local_results.append((index, finding))
+                if progress_cb:
+                    progress_cb(index + 1, total, path, "scanned")
+            except Exception as exc:
+                local_errors.append(f"scan failed for {path.name}: {exc}")
+                if progress_cb:
+                    progress_cb(index + 1, total, path, "error")
+        return local_results, local_errors
 
 
 def scan_light(path: Path, st: os.stat_result, ctx: ScanContext) -> ScanFinding:
@@ -1284,14 +1714,24 @@ def scan_light(path: Path, st: os.stat_result, ctx: ScanContext) -> ScanFinding:
     name_sig = NameHeuristics.guess(path, ctx.rules)
     head_sig = HeaderProbe.run(path, ctx)
 
-    if should_escalate(name_sig, head_sig, ctx.thresholds):
-        peek_sig = ContentPeek.sample(path, ctx.budgets, ctx.aho)
-    else:
-        peek_sig = None
-
     ext, disabled = _effective_extension(path)
-    finding = Classifier.merge(path, st, ext, disabled, name_sig, head_sig, peek_sig, ctx.thresholds)
-    finding = Router.apply(finding, ctx.rules)
+    preliminary = Classifier.merge(path, st, ext, disabled, name_sig, head_sig, None, ctx.features, ctx.thresholds)
+
+    need_peek = False
+    if ctx.features.fast_mode and not head_sig.decisive:
+        base_category = (preliminary.category or "Unknown").split(":", 1)[0]
+        if base_category in {"Package", "Unknown"}:
+            need_peek = True
+    if not need_peek and should_escalate(name_sig, head_sig, ctx.thresholds):
+        need_peek = True
+
+    peek_sig: Optional[PeekSignal] = None
+    finding = preliminary
+    if need_peek:
+        peek_sig = ContentPeek.sample(path, ctx.budgets, ctx.aho, ctx.features)
+        if peek_sig:
+            finding = Classifier.merge(path, st, ext, disabled, name_sig, head_sig, peek_sig, ctx.features, ctx.thresholds)
+    finding = Router.apply(finding, ctx)
     _ensure_fingerprint_extra(finding, fingerprint)
 
     ctx.cache.upsert(finding, st, fingerprint)
@@ -1321,22 +1761,22 @@ def classify_from_types(
     notes = "DBPF types: " + ", ".join(
         f"{TYPE_IDS.get(key, hex(key))}:{count}" for key, count in sorted(types.items())
     )
-    category: Optional[str] = None
-    for target, decisive_set in DECISIVE_DBPF.items():
-        if decisive_set <= {name.split("/")[0] for name in header_types}:
-            category = target
-            break
-    if not category:
-        if any(name.startswith("CASP") for name in header_types):
-            category = "CAS"
-        elif "COBJ/OBJD" in header_types or "GEOM" in header_types:
-            category = "BuildBuy"
-        elif "STBL" in header_types:
-            category = "Tuning"
-        else:
-            category = "Other"
-    confidence = 0.9 if category in DECISIVE_DBPF else 0.7
-    if adult_hint and category != "Adult":
+    score_map, _, decisive, decisive_type = _score_dbpf_types(types)
+    if not score_map:
+        category = "Adult" if adult_hint else "Unknown"
+        confidence = 0.6 if category != "Unknown" else 0.5
+        return category, confidence, notes, tuple(sorted(header_types))
+    category = max(
+        score_map.items(),
+        key=lambda kv: (kv[1], -CATEGORY_INDEX.get(kv[0].split(":", 1)[0], len(CATEGORY_ORDER))),
+    )[0]
+    score_value = score_map.get(category, 0)
+    confidence = min(0.99, 0.55 + 0.04 * score_value)
+    if decisive:
+        confidence = max(confidence, 0.9)
+        if decisive_type:
+            notes += f"; decisive {decisive_type}"
+    if adult_hint and not category.startswith("Adult"):
         category = f"Adult:{category}"
         confidence = max(confidence, 0.8)
     tags = tuple(sorted(header_types))
@@ -1389,7 +1829,6 @@ def scan_folder(
     if not root.is_dir():
         return ScanResult([], 0, ["Folder not found"])
 
-    folder_map = folder_map or DEFAULT_FOLDER_MAP
     ignore_exts_set = {
         (ext.lower() if ext.startswith(".") else f".{ext.lower()}")
         for ext in (ignore_exts or [])
@@ -1419,6 +1858,8 @@ def scan_folder(
                 selected_paths.append(token)
 
     ctx = _build_context()
+    if folder_map is not None:
+        ctx.folder_map = dict(folder_map)
     files: List[Path] = []
     debug_discovery: Optional[Counter[str]] = Counter() if _SCAN_DEBUG else None
     results: List[ScanFinding]
@@ -1557,6 +1998,27 @@ def scan_folder(
                 tooltips = candidate.tooltips
             tooltips[DUPLICATE_EXTRA_KEY] = f"Duplicate of {primary.relpath}"
 
+    summary_counts = Counter(finding.category.split(":", 1)[0] if finding.category else "Unknown" for finding in results)
+    needs_review_prefix = ctx.folder_map.get("Unknown", UNKNOWN_DEFAULT_FOLDER).rstrip("/")
+    needs_review_count = sum(
+        1
+        for finding in results
+        if finding.target.rstrip("/").startswith(needs_review_prefix)
+    )
+    total_processed = ctx.metrics.files_scanned + ctx.metrics.cache_hits
+    hit_rate = ctx.metrics.cache_hits / total_processed if total_processed else 0.0
+    avg_ms = ctx.metrics.average_time_ms()
+    print(
+        "Scan summary: "
+        + f"total={len(results)}, needs_review={needs_review_count}, "
+        + f"cache_hit_rate={hit_rate:.0%}, avg_ms={avg_ms:.1f}"
+    )
+    if summary_counts:
+        category_summary = ", ".join(
+            f"{category}:{count}" for category, count in sorted(summary_counts.items(), key=lambda kv: kv[0])
+        )
+        print(f"Categories -> {category_summary}")
+
     if _SCAN_DEBUG and items:
         category_counts = Counter(item.guess_type for item in items)
         route_counts = Counter(item.target_folder for item in items)
@@ -1592,8 +2054,44 @@ def _build_context() -> ScanContext:
     budgets = load_budgets(str(base_dir / "budgets.json"))
     thresholds = load_thresholds(str(base_dir / "thresholds.json"))
     keywords = load_keywords(str(base_dir / "keywords.json"))
-    automaton = KeywordAutomaton(keywords)
-    cache = ScanCache(str(base_dir / "scan_cache.db"))
+    features, rules_version = load_feature_flags(base_dir)
+
+    path_bias_raw = rules.get("path_bias", [])
+    path_bias_rules: List[PathBiasRule] = []
+    if isinstance(path_bias_raw, list):
+        for entry in path_bias_raw:
+            if not isinstance(entry, dict):
+                continue
+            category = str(entry.get("category", "")).strip()
+            score = int(entry.get("score", 0))
+            patterns_raw = entry.get("patterns", [])
+            patterns: Tuple[str, ...] = tuple(
+                str(pattern).strip() for pattern in patterns_raw if isinstance(pattern, str) and pattern.strip()
+            )
+            if category and score and patterns:
+                path_bias_rules.append(PathBiasRule(category=category, score=score, patterns=patterns))
+
+    automaton_keywords: Dict[str, List[str]] = {}
+    for key, values in keywords.items():
+        if isinstance(values, list):
+            automaton_keywords[key] = [str(value) for value in values if isinstance(value, str)]
+    name_token_groups = keywords.get("name_tokens", {})
+    if isinstance(name_token_groups, dict):
+        for group, values in name_token_groups.items():
+            if isinstance(values, list):
+                automaton_keywords[str(group)] = [str(value) for value in values if isinstance(value, str)]
+
+    automaton = KeywordAutomaton(automaton_keywords)
+
+    folder_map_template = ROUTING_MAPS.get(features.routing_map, DEFAULT_FOLDER_MAP_V2)
+    folder_map = {key: value for key, value in folder_map_template.items()}
+
+    NameHeuristics.configure(keywords, tuple(path_bias_rules), features)
+
+    cache_path = base_dir / features.cache_db
+    cache = ScanCache(str(cache_path), rules_version)
+    worker_count = max(1, (os.cpu_count() or 2) - 1)
+    metrics = ScanMetrics()
     ctx = ScanContext(
         rules=rules,
         aho=automaton,
@@ -1601,8 +2099,13 @@ def _build_context() -> ScanContext:
         seen=FingerprintIndex(cache),
         budgets=budgets,
         thresholds=thresholds,
-        pool=concurrent.futures.ThreadPoolExecutor(max_workers=8),
-        semaphore=threading.Semaphore(8),
+        pool=concurrent.futures.ThreadPoolExecutor(max_workers=worker_count),
+        semaphore=threading.Semaphore(worker_count),
+        features=features,
+        folder_map=folder_map,
+        path_bias=tuple(path_bias_rules),
+        metrics=metrics,
+        rules_version=rules_version,
     )
     return ctx
 
@@ -1636,7 +2139,7 @@ def bundle_scripts_and_packages(items: Sequence[FileItem], folder_map: Dict[str,
     return {"linked": linked, "scripts": len(script_lookup)}
 
 
-def dbpf_scan_types(path: Path) -> Dict[int, int]:
+def dbpf_scan_types(path: Path, limit: int = 10) -> Dict[int, int]:
     result: Dict[int, int] = {}
     try:
         with path.open("rb") as fh:
@@ -1652,6 +2155,7 @@ def dbpf_scan_types(path: Path) -> Dict[int, int]:
             flagged_slots = [idx for idx in range(8) if (flags >> idx) & 1]
             header_vals = [int.from_bytes(fh.read(4), "little") for _ in flagged_slots]
             per_entry = 8 - len(flagged_slots)
+            inspected = 0
             for _ in range(count):
                 entry_vals = [int.from_bytes(fh.read(4), "little") for _ in range(per_entry)]
                 vals: Dict[int, int] = {}
@@ -1668,6 +2172,9 @@ def dbpf_scan_types(path: Path) -> Dict[int, int]:
                 if rtype is None:
                     continue
                 result[rtype] = result.get(rtype, 0) + 1
+                inspected += 1
+                if limit and inspected >= limit:
+                    break
     except Exception as exc:
         _debug_log(f"DBPF probe exception for {path.name}: {exc}")
         return {}
