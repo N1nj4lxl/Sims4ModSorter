@@ -57,6 +57,9 @@ PROFILE_CHOICES = (
 )
 
 
+SMALL_COLUMNS = {"inc", "linked", "duplicate"}
+
+
 class ColumnCustomizerPlugin:
     def __init__(self, api) -> None:
         self.api = api
@@ -70,16 +73,17 @@ class ColumnCustomizerPlugin:
         self._status_var: Optional[tk.StringVar] = None
         self._profile_var: Optional[tk.StringVar] = None
         self._buttons: Dict[str, ttk.Button] = {}
+        self._settings_status_var: Optional[tk.StringVar] = None
         self._load_layout()
         self._start_app_monitor()
         self.api.register_toolbar_button(
             "modern-column-customizer",
             text="⚙️ Customize Columns",
             command=self._open_from_toolbar,
-            side="right",
-            insert_before="settings",
+            side="sidebar",
             padx=6,
         )
+        self.api.register_settings_section("Column Layout", self._build_settings_section)
 
     def _start_app_monitor(self) -> None:
         def worker() -> None:
@@ -93,11 +97,91 @@ class ColumnCustomizerPlugin:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _schedule_on_app(self, callback) -> bool:
+        app = self._app or self.api.app
+        if app is None:
+            return False
+        try:
+            app.after(0, callback)
+        except Exception:
+            return False
+        return True
+
     def _on_app_ready(self) -> None:
         self._refresh_layout_from_app()
         self.apply_layout()
+        self._capture_current_widths()
+        self._update_settings_status("Applied saved column layout.")
         self.api.log("[Column Customizer] Layout initialized.")
 
+    def _build_settings_section(self, app: tk.Tk, frame: ttk.Frame, _api) -> None:
+        frame.columnconfigure(0, weight=1)
+
+        ttk.Label(
+            frame,
+            text="Control which columns appear in the main table and restore defaults if needed.",
+            wraplength=360,
+            justify="left",
+        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+        ttk.Button(
+            frame,
+            text="Open Column Customizer",
+            command=lambda: self.show_dialog(app),
+        ).grid(row=1, column=0, sticky="w")
+
+        ttk.Button(
+            frame,
+            text="Apply Saved Layout",
+            command=self._apply_saved_from_settings,
+        ).grid(row=2, column=0, sticky="w", pady=(6, 0))
+
+        ttk.Button(
+            frame,
+            text="Restore Default Layout",
+            command=self._reset_from_settings,
+        ).grid(row=3, column=0, sticky="w", pady=(6, 0))
+
+        self._settings_status_var = tk.StringVar(app, value="")
+        ttk.Label(frame, textvariable=self._settings_status_var).grid(
+            row=4, column=0, sticky="w", pady=(8, 0)
+        )
+
+    def _apply_saved_from_settings(self) -> None:
+        def _run() -> None:
+            self._refresh_layout_from_app()
+            if not self.layout:
+                self._update_settings_status("No saved layout available yet.")
+                return
+            self.apply_layout()
+            self._capture_current_widths()
+            self._update_settings_status("Applied saved column layout.")
+
+        if not self._schedule_on_app(_run):
+            self._update_settings_status("App UI is not ready yet.")
+
+    def _reset_from_settings(self) -> None:
+        def _run() -> None:
+            if not self._default_layout:
+                self._refresh_layout_from_app()
+            if not self._default_layout:
+                self._update_settings_status("Unable to determine default layout.")
+                return
+            self.layout = [state.clone() for state in self._default_layout]
+            self.apply_layout()
+            self._capture_current_widths()
+            if self._save_layout():
+                self._update_settings_status("Restored default column layout.")
+            else:
+                self._update_settings_status("Unable to save column layout.")
+
+        if not self._schedule_on_app(_run):
+            self._update_settings_status("App UI is not ready yet.")
+
+    def _update_settings_status(self, message: str) -> None:
+        if self._settings_status_var is not None:
+            self._settings_status_var.set(message)
+        
     def _load_layout(self) -> None:
         if not self.config_path.exists():
             self.layout = []
@@ -209,8 +293,15 @@ class ColumnCustomizerPlugin:
             heading_text = headings.get(state.column_id, state.label)
             anchor = anchors.get(state.column_id, tree.column(state.column_id).get("anchor", "w"))
             if state.visible:
-                width_value = max(24, int(state.width or 0))
-                tree.column(state.column_id, width=width_value, minwidth=width_value, stretch=False, anchor=anchor)
+                base_min = 36 if state.column_id in SMALL_COLUMNS else 60
+                width_value = max(base_min, int(state.width or 0))
+                tree.column(
+                    state.column_id,
+                    width=width_value,
+                    minwidth=base_min,
+                    stretch=False,
+                    anchor=anchor,
+                )
             else:
                 tree.column(state.column_id, width=0, minwidth=0, stretch=False, anchor=anchor)
             tree.heading(state.column_id, text=heading_text)
@@ -479,6 +570,9 @@ class ColumnCustomizerPlugin:
             self.api.log("[Column Customizer] Saved column layout.")
             if self._profile_var:
                 self._profile_var.set(PROFILE_CHOICES[0])
+            self._update_settings_status("Layout saved and applied.")
+        else:
+            self._update_settings_status("Unable to save column layout.")
 
 
 def register(api) -> None:
