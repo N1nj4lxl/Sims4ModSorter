@@ -654,6 +654,11 @@ LOG_NAME = ".sims4_modsorter_moves.json"
 LOADOUTS_FILENAME = ".sims4_modsorter_loadouts.json"
 DEFAULT_LOADOUT_NAME = "Default Loadout"
 LOADOUTS_VERSION = 1
+SETTINGS_VERSION = 1
+
+
+def _default_settings_path() -> Path:
+    return Path.home() / ".sims4_modsorter" / "settings.json"
 
 
 def ensure_folder(path: Path) -> None:
@@ -906,6 +911,7 @@ class Sims4ModSorterApp(tk.Tk):
         self.geometry("1280x860")
         self.minsize(1100, 740)
         self.resizable(True, True)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
 
         self.folder_map: Dict[str, str] = DEFAULT_FOLDER_MAP.copy()
         self.recurse_var = tk.BooleanVar(value=True)
@@ -925,13 +931,8 @@ class Sims4ModSorterApp(tk.Tk):
         self.items_by_path: Dict[str, FileItem] = {}
         self.scan_errors: List[str] = []
         self.disabled_items: List[FileItem] = []
-        self.plugin_manager = load_user_plugins()
         self._plugin_columns: List[PluginColumn] = []
         self._plugin_toolbar_buttons: List[PluginToolbarButton] = []
-        if self.plugin_manager:
-            self.plugin_manager.attach_app(self)
-            self._plugin_columns = self.plugin_manager.get_columns()
-            self._plugin_toolbar_buttons = self.plugin_manager.get_toolbar_buttons()
 
         self.status_var = tk.StringVar(value="Ready")
         self.summary_var = tk.StringVar(value="No plan yet")
@@ -942,6 +943,15 @@ class Sims4ModSorterApp(tk.Tk):
         self._theme_cache: Dict[str, str] = {}
         self._recent_mods_dirs: List[str] = []
         self._column_order: List[str] = []
+        self._settings_path: Path = _default_settings_path()
+        self._settings_version: int = SETTINGS_VERSION
+        self._desired_plugin_states: Dict[str, bool] = {}
+        self._load_app_settings()
+        self.plugin_manager = load_user_plugins()
+        if self.plugin_manager:
+            self.plugin_manager.attach_app(self)
+            self._plugin_columns = self.plugin_manager.get_columns()
+            self._plugin_toolbar_buttons = self.plugin_manager.get_toolbar_buttons()
         self._tooltip_payload: Dict[str, Dict[str, str]] = {}
         self._tooltip_window: Optional[tk.Toplevel] = None
         self._tooltip_label: Optional[tk.Label] = None
@@ -1025,6 +1035,215 @@ class Sims4ModSorterApp(tk.Tk):
         self.after(1000, self._check_updates_on_launch)
         self.after(0, lambda: center_window(self))
         self.after(120, self._maybe_show_command_center)
+
+    # ------------------------------------------------------------------
+    # Settings persistence
+    # ------------------------------------------------------------------
+    def _settings_file_path(self) -> Path:
+        path = getattr(self, "_settings_path", None)
+        if isinstance(path, Path):
+            return path
+        return _default_settings_path()
+
+    def _load_app_settings(self) -> None:
+        self._desired_plugin_states = {}
+        path = self._settings_file_path()
+        if not path.exists():
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(payload, dict):
+            return
+
+        theme_value = payload.get("theme")
+        if isinstance(theme_value, str):
+            candidate = theme_value.strip()
+            if candidate in THEMES:
+                try:
+                    self.theme_name.set(candidate)
+                except Exception:
+                    pass
+
+        string_settings = {
+            "mods_root": self.mods_root,
+            "ignore_exts": self.ignore_exts_var,
+            "ignore_names": self.ignore_names_var,
+        }
+        for key, variable in string_settings.items():
+            value = payload.get(key)
+            if isinstance(value, str):
+                try:
+                    variable.set(value)
+                except Exception:
+                    pass
+
+        bool_settings = {
+            "recurse": self.recurse_var,
+            "scan_package": self.scan_package_var,
+            "scan_script": self.scan_script_var,
+            "scan_archive": self.scan_archive_var,
+            "scan_misc": self.scan_misc_var,
+            "include_adult": self.include_adult_var,
+            "show_command_center": self.show_command_center_var,
+        }
+        for key, variable in bool_settings.items():
+            if key in payload:
+                try:
+                    variable.set(bool(payload.get(key)))
+                except Exception:
+                    pass
+
+        recents = payload.get("recent_mods_dirs")
+        clean_recents: List[str] = []
+        if isinstance(recents, list):
+            for entry in recents:
+                if not isinstance(entry, str):
+                    continue
+                normalized = entry.strip()
+                if not normalized or normalized in clean_recents:
+                    continue
+                clean_recents.append(normalized)
+                if len(clean_recents) >= 8:
+                    break
+        self._recent_mods_dirs = clean_recents[:5]
+
+        plugin_states = payload.get("plugin_states")
+        desired: Dict[str, bool] = {}
+        if isinstance(plugin_states, dict):
+            for folder, enabled in plugin_states.items():
+                if isinstance(folder, str):
+                    token = folder.strip()
+                    if token:
+                        desired[token] = bool(enabled)
+        self._desired_plugin_states = desired
+        if self._desired_plugin_states:
+            self._apply_plugin_state_preferences()
+
+    def _apply_plugin_state_preferences(self) -> None:
+        desired = getattr(self, "_desired_plugin_states", {})
+        if not desired:
+            return
+        for folder, enabled in desired.items():
+            try:
+                folder_name = str(folder).strip()
+            except Exception:
+                continue
+            if not folder_name:
+                continue
+            plugin_dir = USER_PLUGINS_DIR / folder_name
+            if not plugin_dir.exists():
+                continue
+            manifest_path = plugin_dir / "plugin.json"
+            manifest: Dict[str, object]
+            if manifest_path.exists():
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except Exception:
+                    manifest = {}
+                if not isinstance(manifest, dict):
+                    manifest = {}
+            else:
+                manifest = {
+                    "name": folder_name,
+                    "entry": "plugin.py",
+                    "enabled": True,
+                    "callable": "register",
+                }
+            current = bool(manifest.get("enabled", True))
+            desired_state = bool(enabled)
+            if current == desired_state:
+                continue
+            manifest["enabled"] = desired_state
+            try:
+                manifest_path.parent.mkdir(parents=True, exist_ok=True)
+                manifest_path.write_text(
+                    json.dumps(manifest, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+            except Exception:
+                continue
+
+    def _collect_settings_payload(self) -> Dict[str, object]:
+        payload: Dict[str, object] = {"version": getattr(self, "_settings_version", SETTINGS_VERSION)}
+
+        def _safe_get(var, default=None):
+            if var is None:
+                return default
+            try:
+                value = var.get()
+            except Exception:
+                return default
+            return value
+
+        theme_var = getattr(self, "theme_name", None)
+        payload["theme"] = str(_safe_get(theme_var, "Dark Mode"))
+
+        mods_var = getattr(self, "mods_root", None)
+        payload["mods_root"] = str(_safe_get(mods_var, "")).strip()
+
+        ignore_exts_var = getattr(self, "ignore_exts_var", None)
+        payload["ignore_exts"] = str(_safe_get(ignore_exts_var, ""))
+        ignore_names_var = getattr(self, "ignore_names_var", None)
+        payload["ignore_names"] = str(_safe_get(ignore_names_var, ""))
+
+        bool_sources = {
+            "recurse": getattr(self, "recurse_var", None),
+            "scan_package": getattr(self, "scan_package_var", None),
+            "scan_script": getattr(self, "scan_script_var", None),
+            "scan_archive": getattr(self, "scan_archive_var", None),
+            "scan_misc": getattr(self, "scan_misc_var", None),
+            "include_adult": getattr(self, "include_adult_var", None),
+            "show_command_center": getattr(self, "show_command_center_var", None),
+        }
+        for key, variable in bool_sources.items():
+            if variable is None:
+                payload[key] = False
+                continue
+            try:
+                payload[key] = bool(variable.get())
+            except Exception:
+                payload[key] = bool(variable)
+
+        payload["recent_mods_dirs"] = list(getattr(self, "_recent_mods_dirs", []))
+
+        plugin_states: Dict[str, bool] = {}
+        manager = getattr(self, "plugin_manager", None)
+        if manager is not None:
+            try:
+                statuses = manager.get_statuses()
+            except Exception:
+                statuses = []
+            for status in statuses:
+                state = getattr(status, "status", "")
+                if state not in {"loaded", "disabled"}:
+                    continue
+                folder = getattr(status, "folder", "")
+                if not folder:
+                    continue
+                plugin_states[str(folder)] = state == "loaded"
+        payload["plugin_states"] = plugin_states
+        return payload
+
+    def _save_settings_to_disk(self) -> None:
+        path = self._settings_file_path()
+        try:
+            payload = self._collect_settings_payload()
+        except Exception:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        except Exception:
+            return
+
+    def destroy(self) -> None:  # type: ignore[override]
+        try:
+            self._save_settings_to_disk()
+        except Exception:
+            pass
+        super().destroy()
 
     # ------------------------------------------------------------------
     # Launch helpers
