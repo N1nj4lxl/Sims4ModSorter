@@ -840,6 +840,7 @@ class Sims4ModSorterApp(tk.Tk):
         self.items: List[FileItem] = []
         self.items_by_path: Dict[str, FileItem] = {}
         self.scan_errors: List[str] = []
+        self.disabled_items: List[FileItem] = []
         self.plugin_manager = load_user_plugins()
         self._plugin_columns: List[PluginColumn] = []
         self._plugin_toolbar_buttons: List[PluginToolbarButton] = []
@@ -1444,11 +1445,16 @@ class Sims4ModSorterApp(tk.Tk):
         sidebar_frame = ttk.Frame(sidebar_canvas, style="Sidebar.TFrame")
         sidebar_window = sidebar_canvas.create_window((0, 0), window=sidebar_frame, anchor="nw")
 
-        def _configure_sidebar(_event) -> None:
+        def _configure_sidebar(_event=None) -> None:
             sidebar_canvas.configure(scrollregion=sidebar_canvas.bbox("all"))
             sidebar_canvas.itemconfigure(sidebar_window, width=sidebar_canvas.winfo_width())
 
         sidebar_frame.bind("<Configure>", _configure_sidebar)
+        sidebar_canvas.bind(
+            "<Configure>", lambda event: sidebar_canvas.itemconfigure(sidebar_window, width=event.width)
+        )
+        sidebar_frame.update_idletasks()
+        _configure_sidebar()
 
         def _on_sidebar_mousewheel(event) -> None:
             if event.delta:
@@ -3625,7 +3631,11 @@ for _ in range(10):
 
     def _apply_scan_result(self, result: ScanResult, stats: Dict[str, int]) -> None:
         self.btn_scan.configure(state="normal")
-        self.items = list(result.items)
+        self.disabled_items = list(result.disabled_items)
+        combined_items = list(result.items)
+        if self.disabled_items:
+            combined_items.extend(self.disabled_items)
+        self.items = combined_items
         self.items_by_path = {str(item.path): item for item in self.items}
         self.scan_errors = result.errors
         self._apply_loadout_to_items()
@@ -3634,6 +3644,11 @@ for _ in range(10):
         self.log(
             f"Scan complete. Planned {len(self.items)} files. Linked packages: {stats['linked']} across {stats['scripts']} script(s)."
         )
+        if self.disabled_items:
+            self.log(
+                f"Found {len(self.disabled_items)} disabled mod(s); they remain excluded from moves unless re-enabled.",
+                level="warning",
+            )
         for error in result.errors:
             self.log(f"Scan warning: {error}")
         self._report_mod_runtime_messages()
@@ -4221,8 +4236,13 @@ for _ in range(10):
         counts: Dict[str, int] = {}
         for item in display_items:
             counts[item.guess_type] = counts.get(item.guess_type, 0) + 1
+            include_icon = ""
+            if item.disabled:
+                include_icon = "🚫"
+            elif item.include:
+                include_icon = "✓"
             row_map = {
-                "inc": "✓" if item.include else "",
+                "inc": include_icon,
                 "rel": os.path.dirname(item.relpath) or ".",
                 "name": pretty_display_name(item.name),
                 "size": f"{item.size_mb:.2f}",
