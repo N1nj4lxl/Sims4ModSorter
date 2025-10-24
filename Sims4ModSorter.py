@@ -1255,6 +1255,56 @@ class Sims4ModSorterApp(tk.Tk):
             background=palette["accent"],
             troughcolor=palette["bg"],
         )
+        sidebar_bg = palette["alt"]
+        style.configure("Sidebar.TFrame", background=sidebar_bg)
+        style.configure(
+            "Sidebar.TLabelframe",
+            background=sidebar_bg,
+            foreground=palette["fg"],
+            borderwidth=0,
+            relief="flat",
+        )
+        style.configure(
+            "Sidebar.TLabelframe.Label",
+            background=sidebar_bg,
+            foreground=palette["fg"],
+            font=("", 10, "bold"),
+        )
+        style.configure("Sidebar.TLabel", background=sidebar_bg, foreground=palette["fg"])
+        style.configure(
+            "SidebarHeading.TLabel",
+            background=sidebar_bg,
+            foreground=palette["fg"],
+            font=("", 9, "bold"),
+        )
+        style.configure("Sidebar.TButton", background=palette["alt"], foreground=palette["fg"], padding=(10, 6))
+        style.map("Sidebar.TButton", background=[("active", palette["sel"]), ("pressed", palette["sel"])])
+        style.configure(
+            "Sidebar.TEntry",
+            fieldbackground=sidebar_bg,
+            foreground=palette["fg"],
+            background=sidebar_bg,
+            bordercolor=palette["bg"],
+        )
+        style.configure(
+            "Sidebar.TCombobox",
+            fieldbackground=sidebar_bg,
+            background=sidebar_bg,
+            foreground=palette["fg"],
+            arrowcolor=palette["fg"],
+            bordercolor=palette["bg"],
+        )
+        style.map(
+            "Sidebar.TCombobox",
+            fieldbackground=[("readonly", sidebar_bg)],
+            background=[("readonly", sidebar_bg)],
+            foreground=[("readonly", palette["fg"])],
+        )
+        style.configure(
+            "Sidebar.TSeparator",
+            background=palette["sel"],
+            foreground=palette["sel"],
+        )
         self.configure(bg=palette["bg"])
 
     def _build_ui(self) -> None:
@@ -1378,12 +1428,20 @@ class Sims4ModSorterApp(tk.Tk):
 
         right_container = ttk.Frame(mid)
         right_container.pack(side="left", fill="both", padx=(10, 0))
-        sidebar_canvas = tk.Canvas(right_container, borderwidth=0, highlightthickness=0, width=260)
+        palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
+        sidebar_canvas = tk.Canvas(
+            right_container,
+            borderwidth=0,
+            highlightthickness=0,
+            width=260,
+            bg=palette.get("alt", "#1f2328"),
+        )
+        self.sidebar_canvas = sidebar_canvas
         sidebar_canvas.pack(side="left", fill="both", expand=True)
         sidebar_scrollbar = ttk.Scrollbar(right_container, orient="vertical", command=sidebar_canvas.yview)
         sidebar_scrollbar.pack(side="right", fill="y")
         sidebar_canvas.configure(yscrollcommand=sidebar_scrollbar.set)
-        sidebar_frame = ttk.Frame(sidebar_canvas)
+        sidebar_frame = ttk.Frame(sidebar_canvas, style="Sidebar.TFrame")
         sidebar_window = sidebar_canvas.create_window((0, 0), window=sidebar_frame, anchor="nw")
 
         def _configure_sidebar(_event) -> None:
@@ -1407,66 +1465,154 @@ class Sims4ModSorterApp(tk.Tk):
         sidebar_frame.bind("<Button-4>", lambda _e: sidebar_canvas.yview_scroll(-1, "units"))
         sidebar_frame.bind("<Button-5>", lambda _e: sidebar_canvas.yview_scroll(1, "units"))
 
-        selection_section = ttk.LabelFrame(sidebar_frame, text="Selection", padding=(10, 8))
+        selection_section = ttk.LabelFrame(
+            sidebar_frame,
+            text="Selection",
+            padding=(12, 10),
+            style="Sidebar.TLabelframe",
+        )
         selection_section.pack(fill="x", pady=(0, 10))
-        self.sel_label = ttk.Label(selection_section, text="None selected")
+        self.sel_label = ttk.Label(selection_section, text="None selected", style="Sidebar.TLabel")
         self.sel_label.pack(anchor="w", pady=(0, 6))
-        ttk.Label(selection_section, text="Type").pack(anchor="w")
-        self.type_cb = ttk.Combobox(selection_section, values=CATEGORY_ORDER, state="readonly")
+        ttk.Label(selection_section, text="Type", style="SidebarHeading.TLabel").pack(anchor="w")
+        self.type_cb = ttk.Combobox(
+            selection_section,
+            values=CATEGORY_ORDER,
+            state="readonly",
+            style="Sidebar.TCombobox",
+        )
         self.type_cb.pack(fill="x", pady=(0, 6))
-        ttk.Label(selection_section, text="Target Folder").pack(anchor="w")
-        self.target_entry = ttk.Entry(selection_section)
+        ttk.Label(selection_section, text="Target Folder", style="SidebarHeading.TLabel").pack(anchor="w")
+        self.target_entry = ttk.Entry(selection_section, style="Sidebar.TEntry")
         self.target_entry.pack(fill="x", pady=(0, 6))
-        ttk.Button(selection_section, text="Apply to Selected", command=self.on_apply_selected).pack(fill="x", pady=(0, 4))
-        ttk.Button(selection_section, text="Toggle Include", command=self.on_toggle_include).pack(fill="x")
+        ttk.Button(
+            selection_section,
+            text="Apply to Selected",
+            command=self.on_apply_selected,
+            style="Sidebar.TButton",
+        ).pack(fill="x", pady=(0, 4))
+        ttk.Button(
+            selection_section,
+            text="Toggle Include",
+            command=self.on_toggle_include,
+            style="Sidebar.TButton",
+        ).pack(fill="x")
 
-        batch_section = ttk.LabelFrame(sidebar_frame, text="Batch Tools", padding=(10, 8))
+        batch_section = ttk.LabelFrame(
+            sidebar_frame,
+            text="Batch Tools",
+            padding=(12, 10),
+            style="Sidebar.TLabelframe",
+        )
         batch_section.pack(fill="x", pady=(0, 10))
-        ttk.Label(batch_section, text="Keyword").pack(anchor="w")
-        self.batch_keyword = ttk.Entry(batch_section)
+        ttk.Label(batch_section, text="Keyword", style="SidebarHeading.TLabel").pack(anchor="w")
+        self.batch_keyword = ttk.Entry(batch_section, style="Sidebar.TEntry")
         self.batch_keyword.pack(fill="x", pady=(0, 6))
-        ttk.Button(batch_section, text="Assign Type to Matches", command=self.on_batch_assign).pack(fill="x")
+        ttk.Button(
+            batch_section,
+            text="Assign Type to Matches",
+            command=self.on_batch_assign,
+            style="Sidebar.TButton",
+        ).pack(fill="x")
 
-        utilities_section = ttk.LabelFrame(sidebar_frame, text="Utilities", padding=(10, 8))
+        utilities_section = ttk.LabelFrame(
+            sidebar_frame,
+            text="Utilities",
+            padding=(12, 10),
+            style="Sidebar.TLabelframe",
+        )
         utilities_section.pack(fill="x", pady=(0, 10))
-        ttk.Button(utilities_section, text="Recalculate Targets", command=self.on_recalc_targets).pack(fill="x")
+        ttk.Button(
+            utilities_section,
+            text="Recalculate Targets",
+            command=self.on_recalc_targets,
+            style="Sidebar.TButton",
+        ).pack(fill="x")
         ttk.Button(
             utilities_section,
             text="Select All",
             command=lambda: self.tree.selection_set(self.tree.get_children()),
+            style="Sidebar.TButton",
         ).pack(fill="x", pady=(6, 0))
         ttk.Button(
             utilities_section,
             text="Select None",
             command=lambda: self.tree.selection_remove(self.tree.get_children()),
+            style="Sidebar.TButton",
         ).pack(fill="x", pady=(6, 0))
-        ttk.Separator(utilities_section).pack(fill="x", pady=10)
-        ttk.Button(utilities_section, text="Plugin Status", command=self.show_mod_status_popup).pack(fill="x")
-        ttk.Button(utilities_section, text="Undo Last", command=self.on_undo).pack(fill="x", pady=(6, 0))
-        ttk.Button(utilities_section, text="History", command=self.show_move_history).pack(fill="x", pady=(6, 0))
+        ttk.Separator(utilities_section, style="Sidebar.TSeparator").pack(fill="x", pady=10)
+        ttk.Button(
+            utilities_section,
+            text="Plugin Status",
+            command=self.show_mod_status_popup,
+            style="Sidebar.TButton",
+        ).pack(fill="x")
+        ttk.Button(
+            utilities_section,
+            text="Undo Last",
+            command=self.on_undo,
+            style="Sidebar.TButton",
+        ).pack(fill="x", pady=(6, 0))
+        ttk.Button(
+            utilities_section,
+            text="History",
+            command=self.show_move_history,
+            style="Sidebar.TButton",
+        ).pack(fill="x", pady=(6, 0))
 
-        loadout_section = ttk.LabelFrame(sidebar_frame, text="Loadouts", padding=(10, 8))
+        loadout_section = ttk.LabelFrame(
+            sidebar_frame,
+            text="Loadouts",
+            padding=(12, 10),
+            style="Sidebar.TLabelframe",
+        )
         loadout_section.pack(fill="x", pady=(0, 10))
-        ttk.Label(loadout_section, text="Active Loadout").pack(anchor="w")
+        ttk.Label(loadout_section, text="Active Loadout", style="SidebarHeading.TLabel").pack(anchor="w")
         self._loadout_selector = ttk.Combobox(
             loadout_section,
             textvariable=self.loadout_var,
             state="readonly",
             width=24,
             values=tuple(sorted(self.loadouts.keys())),
+            style="Sidebar.TCombobox",
         )
         self._loadout_selector.pack(fill="x", pady=(0, 6))
         self._loadout_selector.bind("<<ComboboxSelected>>", self._on_loadout_selected)
-        ttk.Button(loadout_section, text="New Loadout", command=self.on_create_loadout).pack(fill="x")
-        ttk.Button(loadout_section, text="Rename Loadout", command=self.on_rename_loadout).pack(fill="x", pady=(6, 0))
-        ttk.Button(loadout_section, text="Delete Loadout", command=self.on_delete_loadout).pack(fill="x", pady=(6, 0))
-        self._loadout_apply_btn = ttk.Button(loadout_section, text="Apply Selected Loadout", command=self.on_apply_loadout)
+        ttk.Button(
+            loadout_section,
+            text="New Loadout",
+            command=self.on_create_loadout,
+            style="Sidebar.TButton",
+        ).pack(fill="x")
+        ttk.Button(
+            loadout_section,
+            text="Rename Loadout",
+            command=self.on_rename_loadout,
+            style="Sidebar.TButton",
+        ).pack(fill="x", pady=(6, 0))
+        ttk.Button(
+            loadout_section,
+            text="Delete Loadout",
+            command=self.on_delete_loadout,
+            style="Sidebar.TButton",
+        ).pack(fill="x", pady=(6, 0))
+        self._loadout_apply_btn = ttk.Button(
+            loadout_section,
+            text="Apply Selected Loadout",
+            command=self.on_apply_loadout,
+            style="Sidebar.TButton",
+        )
         self._loadout_apply_btn.pack(fill="x", pady=(10, 0))
 
         if self._plugin_toolbar_buttons:
-            plugin_section = ttk.LabelFrame(sidebar_frame, text="Plugin Buttons", padding=(10, 8))
+            plugin_section = ttk.LabelFrame(
+                sidebar_frame,
+                text="Plugin Buttons",
+                padding=(12, 10),
+                style="Sidebar.TLabelframe",
+            )
             plugin_section.pack(fill="x", pady=(0, 10))
-            plugin_container = ttk.Frame(plugin_section)
+            plugin_container = ttk.Frame(plugin_section, style="Sidebar.TFrame")
             plugin_container.pack(fill="x")
             self._build_plugin_toolbar_buttons(plugin_container)
 
@@ -1543,6 +1689,7 @@ class Sims4ModSorterApp(tk.Tk):
                 parent,
                 text=text,
                 command=lambda e=entry: self._invoke_plugin_toolbar_button(e),
+                style="Sidebar.TButton",
             )
             side = entry.side if entry.side in {"top", "bottom"} else "top"
             self._pack_toolbar_button(
@@ -3315,6 +3462,9 @@ for _ in range(10):
         palette = self._theme_cache
         self.log_text.configure(bg=palette.get("alt", "#1f2328"), fg=palette.get("fg", "#E6E6E6"))
         self._configure_log_tags()
+        sidebar_canvas = getattr(self, "sidebar_canvas", None)
+        if sidebar_canvas and sidebar_canvas.winfo_exists():
+            sidebar_canvas.configure(bg=palette.get("alt", "#1f2328"))
         if hasattr(self, "settings_sidebar"):
             self.settings_sidebar.configure(bg=palette.get("sel", "#2A2F3A"))
         scrim = getattr(self, "settings_scrim", None)
