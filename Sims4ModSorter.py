@@ -1435,6 +1435,19 @@ class Sims4ModSorterApp(tk.Tk):
             foreground=[("readonly", palette["fg"])],
         )
         style.configure(
+            "Sidebar.Vertical.TScrollbar",
+            gripcount=0,
+            background=sidebar_bg,
+            troughcolor=palette["sel"],
+            bordercolor=palette["sel"],
+            arrowcolor=palette["fg"],
+        )
+        style.map(
+            "Sidebar.Vertical.TScrollbar",
+            background=[("active", palette["accent"]), ("pressed", palette["accent"])],
+            arrowcolor=[("active", palette["fg"]), ("pressed", palette["fg"])],
+        )
+        style.configure(
             "Sidebar.TSeparator",
             background=palette["sel"],
             foreground=palette["sel"],
@@ -1926,9 +1939,74 @@ class Sims4ModSorterApp(tk.Tk):
         self.settings_sidebar.columnconfigure(0, weight=1)
         self.settings_sidebar.rowconfigure(0, weight=1)
 
-        container = ttk.Frame(self.settings_sidebar, padding=(16, 20, 16, 20))
-        container.grid(row=0, column=0, sticky="nsew")
+        scroll_container = ttk.Frame(self.settings_sidebar)
+        scroll_container.grid(row=0, column=0, sticky="nsew")
+        scroll_container.columnconfigure(0, weight=1)
+        scroll_container.rowconfigure(0, weight=1)
+
+        settings_canvas = tk.Canvas(
+            scroll_container,
+            highlightthickness=0,
+            borderwidth=0,
+            bg=palette.get("sel", "#2A2F3A"),
+        )
+        settings_canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(
+            scroll_container,
+            orient="vertical",
+            command=settings_canvas.yview,
+            style="Sidebar.Vertical.TScrollbar",
+        )
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        settings_canvas.configure(yscrollcommand=scrollbar.set)
+
+        container = ttk.Frame(settings_canvas, padding=(16, 20, 16, 20))
+        window_id = settings_canvas.create_window((0, 0), window=container, anchor="nw")
         container.columnconfigure(0, weight=1)
+
+        def _configure_settings_scroll_region(_event=None) -> None:
+            settings_canvas.configure(scrollregion=settings_canvas.bbox("all"))
+            settings_canvas.itemconfigure(window_id, width=settings_canvas.winfo_width())
+
+        container.bind("<Configure>", _configure_settings_scroll_region)
+        settings_canvas.bind("<Configure>", lambda event: settings_canvas.itemconfigure(window_id, width=event.width))
+        container.update_idletasks()
+        _configure_settings_scroll_region()
+
+        def _settings_contains(widget: Optional[tk.Widget]) -> bool:
+            while widget is not None:
+                if widget in (self.settings_sidebar, settings_canvas, container):
+                    return True
+                widget = getattr(widget, "master", None)
+            return False
+
+        def _scroll_settings(units: int) -> None:
+            if units:
+                settings_canvas.yview_scroll(units, "units")
+
+        def _on_settings_mousewheel(event) -> Optional[str]:
+            if not self.settings_sidebar.winfo_ismapped():
+                return None
+            widget = settings_canvas.winfo_containing(event.x_root, event.y_root)
+            if not _settings_contains(widget):
+                return None
+            if event.delta:
+                delta = int(-event.delta / 120)
+                if delta == 0:
+                    delta = -1 if event.delta > 0 else 1
+                _scroll_settings(delta)
+            elif getattr(event, "num", None) == 4:
+                _scroll_settings(-1)
+            elif getattr(event, "num", None) == 5:
+                _scroll_settings(1)
+            return "break"
+
+        settings_canvas.bind_all("<MouseWheel>", _on_settings_mousewheel, add="+")
+        settings_canvas.bind_all("<Button-4>", lambda e: _on_settings_mousewheel(e) or "break", add="+")
+        settings_canvas.bind_all("<Button-5>", lambda e: _on_settings_mousewheel(e) or "break", add="+")
+
+        self.settings_canvas = settings_canvas
+        self.settings_scrollbar = scrollbar
 
         row = 0
         header = ttk.Frame(container)
@@ -3560,6 +3638,10 @@ for _ in range(10):
             scrim.place(relx=0, rely=0, relwidth=1, relheight=1)
             scrim.tkraise()
         self.settings_sidebar.configure(bg=palette.get("sel", "#2A2F3A"))
+        canvas = getattr(self, "settings_canvas", None)
+        if canvas:
+            canvas.configure(bg=palette.get("sel", "#2A2F3A"))
+            canvas.yview_moveto(0.0)
         self.settings_sidebar.place(
             relx=1.0,
             rely=0,
