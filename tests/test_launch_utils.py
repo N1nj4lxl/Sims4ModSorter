@@ -141,6 +141,13 @@ def _make_zip_bytes() -> bytes:
     return buffer.getvalue()
 
 
+def _make_empty_zip_bytes() -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w"):
+        pass
+    return buffer.getvalue()
+
+
 class _DownloadHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # type: ignore[override]
         if self.path == "/redirect":
@@ -150,6 +157,14 @@ class _DownloadHandler(http.server.BaseHTTPRequestHandler):
             return
         if self.path == "/good.zip":
             data = self.server.good_zip  # type: ignore[attr-defined]
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if self.path == "/empty_archive.zip":
+            data = self.server.empty_zip  # type: ignore[attr-defined]
             self.send_response(200)
             self.send_header("Content-Type", "application/zip")
             self.send_header("Content-Length", str(len(data)))
@@ -173,8 +188,10 @@ class DownloadWorkerTests(TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls._zip_data = _make_zip_bytes()
+        cls._empty_zip = _make_empty_zip_bytes()
         cls._server = _ThreadedHTTPServer(("127.0.0.1", 0), _DownloadHandler)
         cls._server.good_zip = cls._zip_data  # type: ignore[attr-defined]
+        cls._server.empty_zip = cls._empty_zip  # type: ignore[attr-defined]
         cls._server.base_url = f"http://127.0.0.1:{cls._server.server_address[1]}"  # type: ignore[attr-defined]
         cls._thread = threading.Thread(target=cls._server.serve_forever, daemon=True)
         cls._thread.start()
@@ -244,6 +261,26 @@ class DownloadWorkerTests(TestCase):
         self.assertEqual(dummy.failure[2], "manual-download")
         self.assertFalse(destination.exists())
         self.assertIn("empty", str(dummy.failure[1]))
+
+        shutil.rmtree(destination_dir)
+
+    def test_download_worker_rejects_empty_archive(self) -> None:
+        dummy = self._make_dummy_downloader()
+        destination_dir = Path(tempfile.mkdtemp())
+        destination = destination_dir / "empty_archive.zip"
+
+        Sims4ModSorterApp._download_update_worker(  # type: ignore[arg-type]
+            dummy,
+            f"{self._server.base_url}/empty_archive.zip",
+            destination,
+            mode="auto-install",
+        )
+
+        self.assertIsNone(dummy.success)
+        self.assertIsNotNone(dummy.failure)
+        self.assertEqual(dummy.failure[2], "auto-install")
+        self.assertFalse(destination.exists())
+        self.assertIn("archive", str(dummy.failure[1]).lower())
 
         shutil.rmtree(destination_dir)
 
