@@ -20,12 +20,9 @@
   "folders": {
     "_recolors": {"bias": "CAS:Recolor", "boost": 0.15}
   },
-  "routing": {
-    "CAS": "Mods/CAS",
-    "BuildBuy": "Mods/BuildBuy",
-    "Script Mod": "Mods/ScriptMods",
-    "Adult": "Mods/Adult",
-    "Mixed": "Mods/Mixed",
-    "Resources": "Mods/Resources"
-  }
+  "path_bias": [
+    {"category": "CAS", "score": 2, "patterns": ["cas", "create a sim", "makeup", "hair"]},
+    {"category": "BuildBuy", "score": 2, "patterns": ["build", "build mode", "object", "furniture"]},
+    {"category": "Pose or Animation", "score": 3, "patterns": ["pose", "animation"]}
+  ]
 }

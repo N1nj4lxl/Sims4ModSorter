@@ -3,5 +3,15 @@
   "repo_name": "Sims4ModSorter",
   "branch": "main",
   "download_url": "https://github.com/N1nj4lxl/Sims4ModSorter/releases",
-  "release_api_url": "https://api.github.com/repos/N1nj4lxl/Sims4ModSorter/releases/latest"
+  "release_api_url": "https://api.github.com/repos/N1nj4lxl/Sims4ModSorter/releases/latest",
+  "scanner_rules_version": 2,
+  "scanner_features": {
+    "fast_mode": true,
+    "peek_budget_bytes": 131072,
+    "enable_folder_bias": true,
+    "treat_package_as_nonfinal": true,
+    "cache_db": "scan_cache.db",
+    "routing_map": "DEFAULT_FOLDER_MAP_V2",
+    "use_legacy_routing": false
+  }
 }
