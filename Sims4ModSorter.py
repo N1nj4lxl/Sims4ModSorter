@@ -494,7 +494,7 @@ class PluginManager:
             return
         text_value = str(text) if text else normalized
         side_value = str(side).lower()
-        if side_value not in {"left", "right"}:
+        if side_value not in {"left", "right", "sidebar"}:
             side_value = "left"
         try:
             padx_value = int(padx)
@@ -1331,13 +1331,24 @@ class Sims4ModSorterApp(tk.Tk):
         ttk.Label(top, text="Mods folder:").pack(side="left")
         self.entry_path = ttk.Entry(top, textvariable=self.mods_root, width=80)
         self.entry_path.pack(side="left", padx=8)
-        ttk.Button(top, text="Browse", command=self.on_browse).pack(side="left", padx=4)
+        browse_btn = ttk.Button(top, text="Browse", command=self.on_browse)
+        browse_btn.pack(side="left", padx=4)
+        self._toolbar_widgets["browse"] = browse_btn
         self.btn_scan = ttk.Button(top, text="Scan", command=self.on_scan)
         self.btn_scan.pack(side="left", padx=4)
-        ttk.Button(top, text="Import Plan", command=self.on_import).pack(side="left", padx=4)
-        ttk.Button(top, text="Export Plan", command=self.on_export).pack(side="left", padx=4)
-        settings_btn = ttk.Button(top, text="Settings", command=self.show_settings)
+        self._toolbar_widgets["scan"] = self.btn_scan
+        import_btn = ttk.Button(top, text="Import Plan", command=self.on_import)
+        import_btn.pack(side="left", padx=4)
+        self._toolbar_widgets["import_plan"] = import_btn
+        export_btn = ttk.Button(top, text="Export Plan", command=self.on_export)
+        export_btn.pack(side="left", padx=4)
+        self._toolbar_widgets["export_plan"] = export_btn
+
+        sidebar_buttons: List[PluginToolbarButton] = list(self._plugin_toolbar_buttons)
+
+        settings_btn = ttk.Button(top, text="⚙", width=3, command=self.show_settings)
         settings_btn.pack(side="right", padx=4)
+        self._toolbar_widgets["settings"] = settings_btn
 
         mid = ttk.Frame(root_container)
         mid.pack(fill="both", expand=True, padx=12, pady=(6, 8))
@@ -1444,6 +1455,8 @@ class Sims4ModSorterApp(tk.Tk):
         sidebar_canvas.configure(yscrollcommand=sidebar_scrollbar.set)
         sidebar_frame = ttk.Frame(sidebar_canvas, style="Sidebar.TFrame")
         sidebar_window = sidebar_canvas.create_window((0, 0), window=sidebar_frame, anchor="nw")
+        self.sidebar = sidebar_frame
+        self.sidebar_frame = sidebar_frame
 
         def _configure_sidebar(_event=None) -> None:
             sidebar_canvas.configure(scrollregion=sidebar_canvas.bbox("all"))
@@ -1610,7 +1623,7 @@ class Sims4ModSorterApp(tk.Tk):
         )
         self._loadout_apply_btn.pack(fill="x", pady=(10, 0))
 
-        if self._plugin_toolbar_buttons:
+        if sidebar_buttons:
             plugin_section = ttk.LabelFrame(
                 sidebar_frame,
                 text="Plugin Buttons",
@@ -1620,7 +1633,7 @@ class Sims4ModSorterApp(tk.Tk):
             plugin_section.pack(fill="x", pady=(0, 10))
             plugin_container = ttk.Frame(plugin_section, style="Sidebar.TFrame")
             plugin_container.pack(fill="x")
-            self._build_plugin_toolbar_buttons(plugin_container)
+            self._build_plugin_toolbar_buttons(plugin_container, sidebar_buttons, placement="sidebar")
 
         bottom = ttk.Frame(root_container)
         bottom.pack(fill="x", padx=12, pady=8)
@@ -1665,10 +1678,19 @@ class Sims4ModSorterApp(tk.Tk):
         pady: int = 0,
     ) -> None:
         target = None
+        parent = widget.master
         if insert_before:
             target = self._toolbar_widgets.get(insert_before)
-            if target is not None and not target.winfo_exists():
-                target = None
+            if target is not None:
+                if not target.winfo_exists():
+                    target = None
+                else:
+                    try:
+                        target_parent = target.nametowidget(target.winfo_parent())
+                    except Exception:
+                        target_parent = getattr(target, "master", None)
+                    if target_parent is not parent:
+                        target = None
         pack_kwargs = {"side": side, "padx": padx}
         if fill:
             pack_kwargs["fill"] = fill
@@ -1676,17 +1698,34 @@ class Sims4ModSorterApp(tk.Tk):
             pack_kwargs["pady"] = pady
         if target is not None:
             pack_kwargs["before"] = target
-        widget.pack(**pack_kwargs)
+        try:
+            widget.pack(**pack_kwargs)
+        except tk.TclError:
+            # Retry without relative placement if Tk rejects the request.
+            pack_kwargs.pop("before", None)
+            widget.pack(**pack_kwargs)
         if button_id:
             self._toolbar_widgets[button_id] = widget
 
-    def _build_plugin_toolbar_buttons(self, parent: ttk.Frame) -> None:
-        if not self._plugin_toolbar_buttons:
+    def _build_plugin_toolbar_buttons(
+        self,
+        parent: tk.Widget,
+        entries: Sequence[PluginToolbarButton],
+        *,
+        placement: str,
+    ) -> None:
+        if not entries:
             return
         manager = self.plugin_manager
         if manager is None:
             return
-        for entry in self._plugin_toolbar_buttons:
+        placement = placement.lower()
+        sidebar_mode = placement not in {"left", "right"}
+        side = "top" if sidebar_mode else placement
+        fill = "x" if sidebar_mode else None
+        pady = 4 if sidebar_mode else 0
+        style = "Sidebar.TButton" if sidebar_mode else None
+        for entry in entries:
             try:
                 text = entry.text or entry.button_id
             except Exception:
@@ -1695,16 +1734,16 @@ class Sims4ModSorterApp(tk.Tk):
                 parent,
                 text=text,
                 command=lambda e=entry: self._invoke_plugin_toolbar_button(e),
-                style="Sidebar.TButton",
+                style=style,
             )
-            side = entry.side if entry.side in {"top", "bottom"} else "top"
+            padx = entry.padx if not sidebar_mode else 0
             self._pack_toolbar_button(
                 button,
                 button_id=entry.button_id,
                 side=side,
-                padx=0,
-                pady=4,
-                fill="x",
+                padx=padx,
+                pady=pady,
+                fill=fill,
                 insert_before=entry.insert_before,
             )
 
