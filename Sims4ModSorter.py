@@ -35,6 +35,7 @@ import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from launch_utils import UpdateResult, check_for_update
+from command_center import CommandCenter
 from plugin_api import scan_metrics
 from scanner import (
     ARCHIVE_EXTS,
@@ -206,6 +207,14 @@ class PluginToolbarButton:
     tooltip: Optional[str] = None
 
 
+@dataclass(slots=True)
+class CommandCenterPanel:
+    panel_id: str
+    title: str
+    builder: Callable[["Sims4ModSorterApp", ttk.Frame, "PluginAPI"], None]
+    priority: int = 100
+
+
 def _extract_plugin_version(manifest: Dict[str, object], module_path: Path) -> str:
     version = manifest.get("version")
     if isinstance(version, str) and version.strip():
@@ -336,6 +345,32 @@ class PluginAPI:
             tooltip=tooltip,
         )
 
+    def register_command_center_panel(
+        self,
+        panel_id: str,
+        title: str,
+        builder: Callable[["Sims4ModSorterApp", ttk.Frame, "PluginAPI"], None],
+        *,
+        priority: int = 100,
+    ) -> None:
+        self._manager.register_command_center_panel(
+            panel_id,
+            title,
+            builder,
+            priority=priority,
+        )
+
+    def refresh_command_center(self) -> None:
+        app = self.app
+        if app is None:
+            return
+        refresher = getattr(app, "command_center", None)
+        if refresher is None:
+            return
+        refresh = getattr(refresher, "refresh", None)
+        if callable(refresh):
+            refresh()
+
 
 class PluginManager:
     def __init__(self, plugins_dir: Path, message_bus: Optional[PluginMessageBus] = None) -> None:
@@ -351,6 +386,8 @@ class PluginManager:
         self.statuses: List[PluginStatus] = []
         self.toolbar_buttons: Dict[str, PluginToolbarButton] = {}
         self.toolbar_order: List[str] = []
+        self.command_center_panels: Dict[str, CommandCenterPanel] = {}
+        self.command_center_order: List[str] = []
         self.reserved_extras: Set[str] = {FINGERPRINT_EXTRA_KEY, DUPLICATE_EXTRA_KEY}
         self.reserved_columns: Set[str] = {DUPLICATE_EXTRA_KEY}
 
@@ -522,6 +559,52 @@ class PluginManager:
             for button_id in self.toolbar_order
             if button_id in self.toolbar_buttons
         ]
+
+    def register_command_center_panel(
+        self,
+        panel_id: str,
+        title: str,
+        builder: Callable[["Sims4ModSorterApp", ttk.Frame, PluginAPI], None],
+        *,
+        priority: int = 100,
+    ) -> None:
+        normalized = panel_id.strip() if panel_id else ""
+        if not normalized or not callable(builder):
+            self.message_bus.post(
+                "boot",
+                "warn",
+                f"Command center panel registration skipped for '{panel_id or '?'}'",
+            )
+            return
+        if normalized in self.command_center_panels:
+            self.message_bus.post(
+                "boot",
+                "warn",
+                f"Command center panel '{normalized}' already registered; ignoring duplicate",
+            )
+            return
+        try:
+            priority_value = int(priority)
+        except Exception:
+            priority_value = 100
+        entry = CommandCenterPanel(
+            panel_id=normalized,
+            title=title or normalized.title(),
+            builder=builder,
+            priority=priority_value,
+        )
+        self.command_center_panels[normalized] = entry
+        self.command_center_order.append(normalized)
+
+    def get_command_center_panels(self) -> List[CommandCenterPanel]:
+        ordered: List[CommandCenterPanel] = []
+        order_index = {panel_id: idx for idx, panel_id in enumerate(self.command_center_order)}
+        for panel_id in self.command_center_order:
+            entry = self.command_center_panels.get(panel_id)
+            if entry is not None:
+                ordered.append(entry)
+        ordered.sort(key=lambda item: (item.priority, order_index.get(item.panel_id, 0)))
+        return ordered
 
 
 def load_user_plugins() -> PluginManager:
@@ -834,6 +917,7 @@ class Sims4ModSorterApp(tk.Tk):
         self.scan_archive_var = tk.BooleanVar(value=True)
         self.scan_misc_var = tk.BooleanVar(value=True)
         self.theme_name = tk.StringVar(value="Dark Mode")
+        self.show_command_center_var = tk.BooleanVar(value=True)
         self.mods_root = tk.StringVar(value=get_default_mods_path())
         self._version_display_var = tk.StringVar(value=f"App Version: {APP_VERSION}")
 
@@ -856,6 +940,7 @@ class Sims4ModSorterApp(tk.Tk):
 
         self._ui_queue: "queue.Queue[Callable[[], None]]" = queue.Queue()
         self._theme_cache: Dict[str, str] = {}
+        self._recent_mods_dirs: List[str] = []
         self._column_order: List[str] = []
         self._tooltip_payload: Dict[str, Dict[str, str]] = {}
         self._tooltip_window: Optional[tk.Toplevel] = None
@@ -932,11 +1017,55 @@ class Sims4ModSorterApp(tk.Tk):
         self._build_style()
         self._build_ui()
         self._build_settings_overlay()
+        self.command_center = CommandCenter(self)
         self.mods_root.trace_add("write", lambda *_: self._on_mods_root_change())
+        self._remember_mods_directory(self.mods_root.get())
         self.after(16, self._pump_ui_queue)
         self._report_mod_boot_messages()
         self.after(1000, self._check_updates_on_launch)
         self.after(0, lambda: center_window(self))
+        self.after(120, self._maybe_show_command_center)
+
+    # ------------------------------------------------------------------
+    # Launch helpers
+    # ------------------------------------------------------------------
+    def _maybe_show_command_center(self) -> None:
+        show = False
+        try:
+            show = bool(self.show_command_center_var.get())
+        except Exception:
+            show = False
+        dashboard = getattr(self, "command_center", None)
+        if dashboard is None:
+            return
+        if show:
+            dashboard.show()
+        else:
+            dashboard.hide()
+
+    def _remember_mods_directory(self, value: Optional[str]) -> None:
+        text = (value or "").strip()
+        if not text:
+            return
+        try:
+            normalized = str(Path(text).expanduser())
+        except Exception:
+            normalized = text
+        if normalized in self._recent_mods_dirs:
+            self._recent_mods_dirs.remove(normalized)
+        self._recent_mods_dirs.insert(0, normalized)
+        del self._recent_mods_dirs[5:]
+        dashboard = getattr(self, "command_center", None)
+        if dashboard is not None:
+            dashboard.refresh()
+
+    def get_recent_mods_dirs(self) -> List[str]:
+        return list(self._recent_mods_dirs)
+
+    def open_command_center(self) -> None:
+        dashboard = getattr(self, "command_center", None)
+        if dashboard is not None:
+            dashboard.show(modal=False)
 
     # ------------------------------------------------------------------
     # Compatibility shims
@@ -951,6 +1080,7 @@ class Sims4ModSorterApp(tk.Tk):
     # Loadout management
     # ------------------------------------------------------------------
     def _on_mods_root_change(self) -> None:
+        self._remember_mods_directory(self.mods_root.get())
         try:
             self._schedule_folder_menu_refresh()  # type: ignore[attr-defined]
         except AttributeError:
@@ -1023,6 +1153,9 @@ class Sims4ModSorterApp(tk.Tk):
         apply_btn = getattr(self, "_loadout_apply_btn", None)
         if apply_btn is not None and apply_btn.winfo_exists():
             apply_btn.configure(state="normal" if names else "disabled")
+        dashboard = getattr(self, "command_center", None)
+        if dashboard is not None:
+            dashboard.refresh()
 
     def _save_loadouts_to_disk(self) -> None:
         path = self._resolve_loadouts_path()
@@ -1343,6 +1476,9 @@ class Sims4ModSorterApp(tk.Tk):
         export_btn = ttk.Button(top, text="Export Plan", command=self.on_export)
         export_btn.pack(side="left", padx=4)
         self._toolbar_widgets["export_plan"] = export_btn
+        command_center_btn = ttk.Button(top, text="Command Center", command=self.open_command_center)
+        command_center_btn.pack(side="left", padx=4)
+        self._toolbar_widgets["command_center"] = command_center_btn
 
         sidebar_buttons: List[PluginToolbarButton] = list(self._plugin_toolbar_buttons)
 
@@ -1845,6 +1981,17 @@ class Sims4ModSorterApp(tk.Tk):
         for column in range(max(1, min(2, len(THEMES)))):
             self.theme_preview_container.columnconfigure(column, weight=1)
         self._build_theme_preview_widgets()
+        row += 1
+
+        launch_section = ttk.Frame(container)
+        launch_section.grid(row=row, column=0, sticky="ew", pady=(18, 0))
+        launch_section.columnconfigure(0, weight=1)
+        ttk.Label(launch_section, text="Launch", font=("TkDefaultFont", 10, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(
+            launch_section,
+            text="Show Command Center on launch",
+            variable=self.show_command_center_var,
+        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
         row += 1
 
         scan_section = ttk.Frame(container)
@@ -3534,6 +3681,9 @@ for _ in range(10):
             scrim.configure(bg=_scrim_color(palette.get("bg", "#111316")))
         self._refresh_update_overlay_theme()
         self._update_theme_preview_highlight()
+        dashboard = getattr(self, "command_center", None)
+        if dashboard is not None:
+            dashboard.refresh_theme()
         self.log(f"Theme applied: {self.theme_name.get()}")
     # ------------------------------------------------------------------
     # Actions
@@ -3542,6 +3692,14 @@ for _ in range(10):
         path = filedialog.askdirectory(initialdir=self.mods_root.get(), title="Select Mods folder")
         if path:
             self.mods_root.set(path)
+
+    def open_plugin_manager_ui(self) -> None:
+        script = Path(__file__).resolve().with_name("plugin_manager.py")
+        try:
+            subprocess.Popen([sys.executable, str(script)])
+        except Exception as exc:
+            messagebox.showerror("Plugin Manager", f"Unable to launch Plugin Manager: {exc}", parent=self)
+            self.log(f"Plugin Manager launch failed: {exc}", level="error")
 
     def on_scan(self) -> None:
         mods_path = Path(self.mods_root.get())

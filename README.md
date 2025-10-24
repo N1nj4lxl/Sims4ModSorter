@@ -22,6 +22,17 @@ Sort Sims 4 mods with Modly – a single-file desktop assistant that scans, clas
 
 The main window lets you browse to your *Mods* directory, start a scan, and review suggested destinations for every package or script. Use the right-hand inspector to change a file’s category, toggle whether it will be moved, or batch-assign categories based on a keyword. When you are happy with the plan, click **Complete Sorting** to move the selected items into their target folders. The move log is saved in `.sims4_modsorter_moves.json`, enabling the **Undo Last** button to roll back the previous batch.
 
+### Command Center dashboard
+
+On launch a modal **Command Center** appears with quick shortcuts for common tasks:
+
+* Start a scan immediately, open the inline settings overlay, or jump straight to the plugin manager.
+* Switch between recently used Mods directories without re-opening the folder chooser.
+* Apply loadout presets with a single click.
+* Review plugin-provided launch panels—by default the bundled dependency tracker highlights missing frameworks and links directly to its overlay.
+
+Prefer to jump straight to the grid? Disable the modal from **Settings → Launch**. The toolbar’s new **Command Center** button keeps the dashboard close at hand even after you dismiss it.
+
 ### Loadouts
 
 The toolbar’s **Loadout** selector lets you switch between saved include/exclude profiles. Create, rename, or delete loadouts from the inspector panel; each profile captures the `✔` state of every file and is persisted to `.sims4_modsorter_loadouts.json` inside the Mods directory. Applying a loadout updates the entire plan immediately so you can prepare different sets of mods (for example, “Family Friendly” or “Challenge Run”) without rescanning. Exported plans now bundle loadout metadata and the active selection, and importing a plan can restore both the file choices and any shared loadout definitions.
