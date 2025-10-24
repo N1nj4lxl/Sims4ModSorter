@@ -4193,7 +4193,7 @@ for _ in range(10):
 
     def _refresh_tree(self, preserve_selection: bool = False) -> None:
         selected = set(self.tree.selection()) if preserve_selection else set()
-        self.tree.delete(*self.tree.get_children())
+        self._clear_tree_items()
         self._tooltip_payload.clear()
         self.items_by_path = {str(item.path): item for item in self.items}
         duplicate_count = sum(
@@ -4293,6 +4293,33 @@ for _ in range(10):
                 self.summary_var.set("No plan yet")
         self._schedule_auto_size_columns()
 
+    def _clear_tree_items(self) -> None:
+        tree = getattr(self, "tree", None)
+        if not tree or not tree.winfo_exists():
+            return
+        try:
+            children = list(tree.get_children())
+        except tk.TclError:
+            return
+        if not children:
+            return
+        try:
+            tree.delete(*children)
+            return
+        except tk.TclError:
+            pass
+        batch_size = 500
+        for index in range(0, len(children), batch_size):
+            batch = children[index : index + batch_size]
+            try:
+                tree.delete(*batch)
+            except tk.TclError:
+                for iid in batch:
+                    try:
+                        tree.delete(iid)
+                    except tk.TclError:
+                        continue
+
     def _schedule_auto_size_columns(self) -> None:
         if self._auto_size_pending:
             return
@@ -4339,10 +4366,17 @@ for _ in range(10):
         widths: Dict[str, int] = {}
         column_indices = {column: index for index, column in enumerate(self._column_order)}
         for column in target_columns:
-            heading = tree.heading(column).get("text", column)
+            try:
+                heading_info = tree.heading(column)
+            except tk.TclError:
+                continue
+            heading = heading_info.get("text", column)
             widths[column] = heading_font.measure(str(heading)) + padding
         for iid in tree.get_children(""):
-            values = tree.item(iid, "values")
+            try:
+                values = tree.item(iid, "values")
+            except tk.TclError:
+                continue
             for column in target_columns:
                 index = column_indices.get(column)
                 if index is None or index >= len(values):
@@ -4353,7 +4387,10 @@ for _ in range(10):
         for column in target_columns:
             width = widths.get(column, 0)
             minimum = 36 if column in {"inc", "linked", DUPLICATE_EXTRA_KEY} else 60
-            tree.column(column, width=max(minimum, int(width)), stretch=False)
+            try:
+                tree.column(column, width=max(minimum, int(width)), stretch=False)
+            except tk.TclError:
+                continue
 
     # ------------------------------------------------------------------
     # Tooltip helpers
