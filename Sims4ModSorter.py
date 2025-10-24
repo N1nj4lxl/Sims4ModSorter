@@ -1439,7 +1439,8 @@ class Sims4ModSorterApp(tk.Tk):
         tree_frame.grid_rowconfigure(0, weight=1)
 
         right_container = ttk.Frame(mid)
-        right_container.pack(side="left", fill="both", padx=(10, 0))
+        right_container.pack(side="right", fill="y", padx=(10, 0))
+        right_container.pack_propagate(False)
         palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
         sidebar_canvas = tk.Canvas(
             right_container,
@@ -1452,6 +1453,7 @@ class Sims4ModSorterApp(tk.Tk):
         sidebar_canvas.pack(side="left", fill="both", expand=True)
         sidebar_scrollbar = ttk.Scrollbar(right_container, orient="vertical", command=sidebar_canvas.yview)
         sidebar_scrollbar.pack(side="right", fill="y")
+        right_container.configure(width=260 + sidebar_scrollbar.winfo_reqwidth())
         sidebar_canvas.configure(yscrollcommand=sidebar_scrollbar.set)
         sidebar_frame = ttk.Frame(sidebar_canvas, style="Sidebar.TFrame")
         sidebar_window = sidebar_canvas.create_window((0, 0), window=sidebar_frame, anchor="nw")
