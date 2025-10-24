@@ -78,6 +78,56 @@ class CheckForUpdateTests(TestCase):
         self.assertEqual(result.asset_content_type, "application/zip")
         self.assertEqual(result.latest_version, "2.0.0")
 
+    def test_platform_heuristic_prefers_windows_asset(self) -> None:
+        payload = {
+            "tag_name": "v3.1.0",
+            "name": "v3.1.0",
+            "html_url": "https://github.com/example/Example/releases/tag/v3.1.0",
+            "assets": [
+                {
+                    "browser_download_url": "https://github.com/example/Example/releases/download/v3/Example-linux.AppImage",
+                    "name": "Example-linux.AppImage",
+                    "size": 8192,
+                    "content_type": "application/octet-stream",
+                },
+                {
+                    "browser_download_url": "https://github.com/example/Example/releases/download/v3/Example-mac.zip",
+                    "name": "Example-mac.zip",
+                    "size": 16384,
+                    "content_type": "application/zip",
+                },
+                {
+                    "browser_download_url": "https://github.com/example/Example/releases/download/v3/Example-win.exe",
+                    "name": "Example-win.exe",
+                    "size": 4096,
+                    "content_type": "application/x-msdownload",
+                },
+            ],
+        }
+        payload_bytes = json.dumps(payload).encode("utf-8")
+
+        with mock.patch("launch_utils._load_update_config") as mock_config, mock.patch(
+            "launch_utils.urllib.request.urlopen"
+        ) as mock_urlopen, mock.patch("launch_utils.sys.platform", "win32"):
+            mock_config.return_value = {
+                "repo_owner": "example",
+                "repo_name": "Example",
+                "release_api_url": "https://api.github.com/repos/example/Example/releases/latest",
+            }
+            mock_urlopen.return_value = _DummyResponse(payload_bytes)
+
+            result = check_for_update("app", "3.0.0", timeout=0.1)
+
+        self.assertIsInstance(result, UpdateResult)
+        self.assertEqual(
+            result.download_url,
+            "https://github.com/example/Example/releases/download/v3/Example-win.exe",
+        )
+        self.assertEqual(result.asset_name, "Example-win.exe")
+        self.assertEqual(result.asset_size, 4096)
+        self.assertEqual(result.asset_content_type, "application/x-msdownload")
+        self.assertEqual(result.latest_version, "3.1.0")
+
 
 class _ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
