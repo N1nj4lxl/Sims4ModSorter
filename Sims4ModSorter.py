@@ -4280,7 +4280,8 @@ for _ in range(10):
         if not selection:
             return
         new_type = self.type_cb.get() or "Unknown"
-        new_target = self.target_entry.get().strip() or self.folder_map.get(new_type, "Unsorted")
+        unknown_default = DEFAULT_FOLDER_MAP.get("Unknown", "Mods/NeedsReview")
+        new_target = self.target_entry.get().strip() or self.folder_map.get(new_type, unknown_default)
         for iid in selection:
             item = self.items_by_path.get(iid)
             if not item:
@@ -4309,18 +4310,20 @@ for _ in range(10):
         if not keyword:
             return
         new_type = self.type_cb.get() or "Unknown"
+        unknown_default = DEFAULT_FOLDER_MAP.get("Unknown", "Mods/NeedsReview")
         count = 0
         for item in self.items:
             if keyword in item.name.lower():
                 item.guess_type = new_type
-                item.target_folder = self.folder_map.get(new_type, "Unsorted")
+                item.target_folder = self.folder_map.get(new_type, unknown_default)
                 count += 1
         self._refresh_tree()
         self.log(f"Assigned {new_type} to {count} file(s) containing '{keyword}'.")
 
     def on_recalc_targets(self) -> None:
+        unknown_default = DEFAULT_FOLDER_MAP.get("Unknown", "Mods/NeedsReview")
         for item in self.items:
-            item.target_folder = self.folder_map.get(item.guess_type, "Unsorted")
+            item.target_folder = self.folder_map.get(item.guess_type, unknown_default)
         bundle_scripts_and_packages(self.items, self.folder_map)
         self._refresh_tree(preserve_selection=True)
     def on_complete(self) -> None:

@@ -94,7 +94,40 @@
     "watersports",
     "water sports"
   ],
-  "script": ["mc_command_center", "mccc", "pyinject", "ts4script"],
-  "cas": ["hair", "eyebrow", "skintone", "preset", "tattoo"],
-  "buildbuy": ["sofa", "clutter", "counter", "chair", "window"]
+  "script": [
+    "mc_command_center",
+    "mccc",
+    "pyinject",
+    "ts4script",
+    "python",
+    "injector",
+    "scriptmod"
+  ],
+  "cas": [
+    "hair",
+    "eyebrow",
+    "skintone",
+    "preset",
+    "tattoo",
+    "makeup",
+    "eyeliner",
+    "lipstick",
+    "freckles",
+    "overlay",
+    "lashes"
+  ],
+  "buildbuy": [
+    "sofa",
+    "clutter",
+    "counter",
+    "chair",
+    "window",
+    "table",
+    "bed",
+    "door",
+    "lamp",
+    "rug",
+    "appliance",
+    "decor"
+  ]
 }

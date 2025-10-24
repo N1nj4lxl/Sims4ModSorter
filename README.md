@@ -39,21 +39,21 @@ The toolbar’s **Loadout** selector lets you switch between saved include/exclu
 
 ### Default target layout
 
-Mods are mapped to a concise folder tree that keeps everything to a single level of nesting. The default destinations are:
+Mods are mapped to a concise folder tree rooted at `Mods/…` so that every category has a dedicated destination without mixing
+sorted and review-needed content. The default destinations are:
 
 | Category | Target folder |
 | --- | --- |
-| Adult Script, Gameplay, Animation, Pose, CAS, BuildBuy, Override, Other | `Adult/…` (e.g. `Adult/Scripts`, `Adult/Gameplay`)
-| Script Mod, Gameplay Tuning | `Gameplay/Scripts`, `Gameplay/Tuning`
-| CAS Hair, Clothing, Makeup, Skin, Eyes, Accessories, Sliders | `CAS/…`
-| BuildBuy Object, Recolour | `BuildBuy/Objects`, `BuildBuy/Recolours`
-| Animation, Pose, Preset | `Visuals/Animations`, `Visuals/Poses`, `Visuals/Presets`
-| World | `World`
-| Override | `Overrides`
-| Utility Tool | `Utilities`
-| Archive | `Archives`
-| Other | `Misc`
-| Unknown | `Unsorted`
+| Script Mod | `Mods/ScriptMods` |
+| Adult | `Mods/Adult` |
+| CAS | `Mods/CAS` |
+| BuildBuy | `Mods/BuildBuy` |
+| Tuning | `Mods/Tuning` |
+| Mixed | `Mods/Mixed` |
+| Resources | `Mods/Resources` |
+| Archive | `Mods/Archives` |
+| Other | `Mods/Other` |
+| Unknown | `Mods/NeedsReview` |
 
 You can still change any destination in the results grid before finalising a sort, but the rebuilt defaults keep related content together without creating deeply nested folder trees.
 
