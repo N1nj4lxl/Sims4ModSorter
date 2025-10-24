@@ -21,11 +21,11 @@
     "_recolors": {"bias": "CAS:Recolor", "boost": 0.15}
   },
   "routing": {
-    "CAS": "Sorted/CAS",
-    "BuildBuy": "Sorted/BuildBuy",
-    "Script Mod": "Sorted/ScriptMods",
-    "Adult": "Sorted/Adult",
-    "Mixed": "Sorted/Mixed",
-    "Resources": "Sorted/Resources"
+    "CAS": "Mods/CAS",
+    "BuildBuy": "Mods/BuildBuy",
+    "Script Mod": "Mods/ScriptMods",
+    "Adult": "Mods/Adult",
+    "Mixed": "Mods/Mixed",
+    "Resources": "Mods/Resources"
   }
 }

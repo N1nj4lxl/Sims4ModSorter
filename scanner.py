@@ -63,6 +63,7 @@ __all__ = [
 
 FINGERPRINT_EXTRA_KEY = "fingerprint"
 DUPLICATE_EXTRA_KEY = "duplicate"
+UNKNOWN_DEFAULT_FOLDER = "Mods/NeedsReview"
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +82,7 @@ class FileItem:
     confidence: float
     notes: str
     include: bool = True
-    target_folder: str = "Unsorted"
+    target_folder: str = UNKNOWN_DEFAULT_FOLDER
     bundle: str = ""
     meta_tags: str = ""
     dependency_status: str = ""
@@ -156,16 +157,16 @@ CATEGORY_ORDER: List[str] = [
 CATEGORY_INDEX: Dict[str, int] = {name: idx for idx, name in enumerate(CATEGORY_ORDER)}
 
 DEFAULT_FOLDER_MAP: Dict[str, str] = {
-    "Script Mod": "Sorted/ScriptMods",
-    "Adult": "Sorted/Adult",
-    "CAS": "Sorted/CAS",
-    "BuildBuy": "Sorted/BuildBuy",
-    "Tuning": "Sorted/Tuning",
-    "Mixed": "Sorted/Mixed",
-    "Resources": "Sorted/Resources",
-    "Archive": "Sorted/Archives",
-    "Other": "Sorted/Other",
-    "Unknown": "Unsorted",
+    "Script Mod": "Mods/ScriptMods",
+    "Adult": "Mods/Adult",
+    "CAS": "Mods/CAS",
+    "BuildBuy": "Mods/BuildBuy",
+    "Tuning": "Mods/Tuning",
+    "Mixed": "Mods/Mixed",
+    "Resources": "Mods/Resources",
+    "Archive": "Mods/Archives",
+    "Other": "Mods/Other",
+    "Unknown": UNKNOWN_DEFAULT_FOLDER,
 }
 
 PACKAGE_EXTS = {".package"}
@@ -489,7 +490,7 @@ class ScanFinding:
             confidence=float(payload["confidence"]),
             notes=str(payload.get("notes", "")),
             tags=tuple(str(tag) for tag in payload.get("tags", [])),
-            target=str(payload.get("target", "Unsorted")),
+            target=str(payload.get("target", UNKNOWN_DEFAULT_FOLDER)),
             needs_enrich=bool(payload.get("needs_enrich", False)),
             disabled=bool(payload.get("disabled", False)),
             extras={str(k): str(v) for k, v in dict(payload.get("extras", {})).items()},
@@ -1170,7 +1171,7 @@ class Classifier:
 
         needs_enrich = confidence < float(thresholds.get("high_conf", 0.8))
         notes_text = "; ".join(_shorten_note(note) for note in notes if note)
-        target = "Unsorted"
+        target = UNKNOWN_DEFAULT_FOLDER
 
         finding = ScanFinding(
             path=path,
@@ -1195,7 +1196,7 @@ class Router:
         routing = dict(rules.get("routing", {}))
         category = finding.category
         base = category.split(":", 1)[0] if category else "Unknown"
-        dest = routing.get(base, DEFAULT_FOLDER_MAP.get(base, "Unsorted"))
+        dest = routing.get(base, DEFAULT_FOLDER_MAP.get(base, UNKNOWN_DEFAULT_FOLDER))
         if ":" in category:
             fam = category.split(":", 1)[1]
             if fam:
@@ -1344,7 +1345,7 @@ def classify_from_types(
 
 def map_type_to_folder(cat: str, folder_map: Dict[str, str]) -> str:
     base = cat.split(":", 1)[0] if cat else "Unknown"
-    return folder_map.get(base, folder_map.get("Unknown", "Unsorted"))
+    return folder_map.get(base, folder_map.get("Unknown", UNKNOWN_DEFAULT_FOLDER))
 
 
 # Placeholder for removed adult scan behaviour
@@ -1629,7 +1630,7 @@ def bundle_scripts_and_packages(items: Sequence[FileItem], folder_map: Dict[str,
         bundle_key = f"bundle:{key}"
         item.bundle = bundle_key
         script_item.bundle = bundle_key
-        if item.target_folder == folder_map.get("Unknown", "Unsorted"):
+        if item.target_folder == folder_map.get("Unknown", UNKNOWN_DEFAULT_FOLDER):
             item.target_folder = folder_map.get(script_item.guess_type.split(":", 1)[0], item.target_folder)
         linked += 1
     return {"linked": linked, "scripts": len(script_lookup)}
