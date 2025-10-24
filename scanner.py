@@ -8,7 +8,7 @@ import sqlite3
 import threading
 import zipfile
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
@@ -1256,9 +1256,19 @@ def scan_light(path: Path, st: os.stat_result, ctx: ScanContext) -> ScanFinding:
     fingerprint = Deduper.make_short_fingerprint(path, st)
     cached = ctx.seen.get(fingerprint)
     if cached:
-        _ensure_fingerprint_extra(cached, fingerprint)
-        ctx.cache.upsert(cached, st, fingerprint)
-        return cached
+        ext, disabled = _effective_extension(path)
+        extras = dict(cached.extras) if isinstance(cached.extras, dict) else {}
+        finding = replace(
+            cached,
+            path=path,
+            ext=ext,
+            size=int(st.st_size),
+            disabled=disabled,
+            extras=extras,
+        )
+        _ensure_fingerprint_extra(finding, fingerprint)
+        ctx.cache.upsert(finding, st, fingerprint)
+        return finding
 
     name_sig = NameHeuristics.guess(path, ctx.rules)
     head_sig = HeaderProbe.run(path, ctx)
