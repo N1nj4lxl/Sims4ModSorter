@@ -2782,6 +2782,15 @@ class Sims4ModSorterApp(tk.Tk):
                 raise ValueError("Downloaded file was empty")
             if not zipfile.is_zipfile(target_path):
                 raise zipfile.BadZipFile("Downloaded file is not a valid ZIP archive")
+            try:
+                with zipfile.ZipFile(target_path, "r") as archive:
+                    has_members = any(not info.is_dir() for info in archive.infolist())
+            except zipfile.BadZipFile:
+                raise
+            except Exception as exc:  # pragma: no cover - defensive guard for unexpected IO issues
+                raise ValueError(f"Unable to inspect downloaded archive: {exc}") from exc
+            if not has_members:
+                raise ValueError("Downloaded update archive did not contain any files")
         except Exception as exc:
             if target_path.exists():
                 try:
