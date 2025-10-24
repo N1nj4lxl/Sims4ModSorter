@@ -4399,6 +4399,8 @@ for _ in range(10):
             target_columns = list(self._column_order)
         else:
             target_columns = [column for column in self._column_order if column in display_columns]
+        exempt_columns = {"meta", "notes"}
+        target_columns = [column for column in target_columns if column not in exempt_columns]
         if not target_columns:
             return
         padding = 24
