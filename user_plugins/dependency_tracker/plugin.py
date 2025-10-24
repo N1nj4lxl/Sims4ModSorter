@@ -573,6 +573,7 @@ class DependencyPlugin:
         self.last_items: List[object] = []
         self.last_results: List[DependencyResult] = []
         self._check_var: Optional[tk.BooleanVar] = None
+        self._command_center_labels: List[ttk.Label] = []
 
     # ------------------------------------------------------------------
     def register(self) -> None:
@@ -585,6 +586,12 @@ class DependencyPlugin:
 
         self.api.register_column(COLUMN_ID, "Deps", width=64, anchor="center")
         self.api.register_settings_section("Dependency Tracker", self._build_settings)
+        self.api.register_command_center_panel(
+            "dependency-alerts",
+            "Dependency alerts",
+            self._build_command_center_panel,
+            priority=40,
+        )
 
         if self.feature_flags[FEATURE_OVERLAY]:
             self.api.register_toolbar_button(
@@ -641,6 +648,8 @@ class DependencyPlugin:
             self.analyser.clear_items(self.last_items)
             self.last_results.clear()
             self.overlay.sync(self.last_results)
+            self._refresh_command_center_summary()
+            self.api.refresh_command_center()
             return
         scan_metrics.start("Dependency Tracker")
         start = time.perf_counter()
@@ -658,6 +667,8 @@ class DependencyPlugin:
         )
         self.last_results = list(results)
         self.overlay.sync(self.last_results)
+        self._refresh_command_center_summary()
+        self.api.refresh_command_center()
         warnings = self._log_summary(results, duration, len(self.last_items), track_metrics=True)
         if warnings:
             detail = ", ".join(sorted({result.detail for result in results if result.missing}))
@@ -679,6 +690,8 @@ class DependencyPlugin:
                 self.analyser.clear_items(items)
                 self.last_results.clear()
                 self.overlay.sync(self.last_results)
+                self._refresh_command_center_summary()
+                self.api.refresh_command_center()
                 self.api.request_refresh()
                 return
             start = time.perf_counter()
@@ -690,6 +703,8 @@ class DependencyPlugin:
             if reason:
                 self.api.log(f"[Dependency Tracker] {reason}")
             self._log_summary(results, duration, len(items), track_metrics=False)
+            self._refresh_command_center_summary()
+            self.api.refresh_command_center()
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -727,6 +742,48 @@ class DependencyPlugin:
                 f"Dependency analysis complete in {duration:.2f}s", plugin="Dependency Tracker"
             )
         return missing_count
+
+    def _build_command_center_panel(self, app: tk.Tk, frame: ttk.Frame, _api) -> None:
+        frame.columnconfigure(0, weight=1)
+        summary = ttk.Label(frame, text="", wraplength=360, justify="left")
+        summary.grid(row=0, column=0, sticky="w")
+        ttk.Button(frame, text="Open dependency overlay", command=self.overlay.show).grid(
+            row=1, column=0, sticky="w", pady=(8, 0)
+        )
+        self._command_center_labels.append(summary)
+        self._refresh_command_center_summary()
+
+        def _cleanup(_event: tk.Event) -> None:
+            if summary in self._command_center_labels:
+                self._command_center_labels.remove(summary)
+
+        frame.bind("<Destroy>", _cleanup, add="+")
+
+    def _refresh_command_center_summary(self) -> None:
+        if not self._command_center_labels:
+            return
+        if not self.last_results:
+            message = "Run a scan to audit dependencies."
+        else:
+            missing = {
+                requirement.dependency
+                for result in self.last_results
+                for requirement in result.requirements
+                if requirement.missing
+            }
+            if missing:
+                names = ", ".join(sorted(missing))
+                message = f"Missing dependencies detected: {names}"
+            else:
+                message = "All tracked dependencies are satisfied."
+        for label in list(self._command_center_labels):
+            if not label.winfo_exists():
+                try:
+                    self._command_center_labels.remove(label)
+                except ValueError:
+                    pass
+                continue
+            label.configure(text=message)
 
 
 PLUGIN: Optional[DependencyPlugin] = None
