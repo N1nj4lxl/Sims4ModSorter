@@ -1,0 +1,14 @@
+{
+  "Script Mod": "Mods/Scripts/",
+  "CAS": "Mods/CAS/",
+  "BuildBuy": "Mods/Build Mode/",
+  "Pose or Animation": "Mods/Animations/",
+  "Tuning": "Mods/Gameplay/",
+  "Adult": "Mods/Adult/",
+  "Resources": "Mods/Resources/",
+  "Archive": "Mods/Archives/",
+  "Mixed": "Mods/NeedsReview/",
+  "Unknown": "Mods/NeedsReview/",
+  "Other": "Mods/NeedsReview/",
+  "Disabled": "Mods/NeedsReview/"
+}

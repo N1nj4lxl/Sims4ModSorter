@@ -1,38 +1,15 @@
 {
-  "authors": {
-    "deaderpool": {"bias": "Script Mod:MCCC", "boost": 0.25},
-    "turbodriver": {"bias": "Adult:WickedWhims", "boost": 0.3},
-    "onizu": {"bias": "Adult", "boost": 0.3},
-    "amozidan22": {"bias": "Adult", "boost": 0.3},
-    "oll": {"bias": "Adult", "boost": 0.3},
-    "nisak": {"bias": "Adult", "boost": 0.3},
-    "cherrypie": {"bias": "Adult", "boost": 0.3},
-    "chingyu": {"bias": "Adult", "boost": 0.3},
-    "khlas": {"bias": "Adult", "boost": 0.3},
-    "lychee": {"bias": "Adult", "boost": 0.3},
-    "alchemist": {"bias": "Adult", "boost": 0.3},
-    "falsehope": {"bias": "Adult", "boost": 0.3}
-  },
-  "packs": {
-    "mc_command_center": {"bias": "Script Mod:MCCC"},
-    "deviousdesires": {"bias": "Adult:DeviousDesires"}
-  },
-  "folders": {
-    "_recolors": {"bias": "CAS:Recolor", "boost": 0.15}
-  },
-  "path_bias": [
-    {"category": "CAS", "score": 2, "patterns": ["cas", "create a sim", "makeup", "hair"]},
-    {"category": "BuildBuy", "score": 2, "patterns": ["build", "build mode", "object", "furniture"]},
-    {"category": "Pose or Animation", "score": 3, "patterns": ["pose", "animation"]}
+  "adult_strong": ["wickedwhims","basemental","deviousdesires","turbodriver","dd"],
+  "adult_soft_authors": ["nisak","wildguy","onizu","amozidan22","oll","khlas","lychee","falsehope","cherrypie","chingyu","alchemist"],
+  "pose_tokens": ["pose","a2o","a2a","clip","animation"],
+  "buildbuy_tokens": ["sofa","chair","bed","wardrobe","lamp","window","door","table","desk","sink","shower","tub","toilet","mirror","rug","curtain","plant","painting","light","fence","stair","floor","tile"],
+  "cas_tokens": ["hair","skin","preset","slider","brow","lash","eyeliner","lipstick","blush","nails","tattoo","accessory","outfit","top","bottom","dress","shoes","swatch"],
+  "tuning_tokens": ["tuning","itun","loot","trait","autonomy","interaction","sxml"],
+  "dependency_rules": [
+    { "key": "mc_command_center", "requires": [] },
+    { "key": "ui_cheats_extension", "requires": [] },
+    { "key": "xmlinjector", "requires": [] }
   ],
-  "dependencies": {
-    "ui_cheats_extension_scripts": {
-      "requires": [],
-      "aliases": ["ui_cheats_extension"],
-      "label": "UI Cheats Extension"
-    },
-    "xmlinjector": {
-      "requires": []
-    }
-  }
+  "whitelist_paths": [],
+  "blacklist_paths": []
 }
