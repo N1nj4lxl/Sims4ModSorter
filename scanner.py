@@ -260,7 +260,7 @@ CATEGORY_INDEX: Dict[str, int] = {name: idx for idx, name in enumerate(CATEGORY_
 
 DEFAULT_FOLDER_MAP_V2: Dict[str, str] = {
     "Script Mod": "Mods/Scripts/",
-    "Adult": "Mods/NeedsReview/Adult/",
+    "Adult": "Mods/Adult/",
     "CAS": "Mods/CAS/",
     "BuildBuy": "Mods/Build Mode/",
     "Pose or Animation": "Mods/Animations/",
@@ -1092,6 +1092,9 @@ class NameHeuristics:
             base_scores.setdefault(category, amount)
             scores.setdefault(category, 0)
 
+        def is_adult_bias(category_str: Optional[str]) -> bool:
+            return bool(category_str) and category_str.startswith("Adult")
+
         def record_adult_hits(source: str, hits: AdultHitSummary) -> None:
             if not hits.any_hits():
                 return
@@ -1151,11 +1154,26 @@ class NameHeuristics:
                 base_category, local_family = bias_category.split(":", 1)
             boost = float(bias.get("boost", 0.2))
             if base_category:
-                bump(base_category, max(3, int(round(10 * boost))), f"author:{token}")
-                tags.add(f"author:{token}")
-                if local_family:
-                    family = local_family or family
-                notes.append(f"Author bias: {token}")
+                if is_adult_bias(bias_category):
+                    if adult_summary.count("strong") or adult_summary.count("medium"):
+                        bump(
+                            base_category,
+                            max(3, int(round(10 * boost))),
+                            f"author:{token}",
+                        )
+                        tags.add(f"author:{token}")
+                        if local_family:
+                            family = local_family or family
+                        notes.append(f"Author bias: {token}")
+                        notes.append("Adult bias accepted: evidence present")
+                    else:
+                        notes.append("Adult bias suppressed: no adult evidence")
+                else:
+                    bump(base_category, max(3, int(round(10 * boost))), f"author:{token}")
+                    tags.add(f"author:{token}")
+                    if local_family:
+                        family = local_family or family
+                    notes.append(f"Author bias: {token}")
 
         pack_rules = dict(rules.get("packs", {}))
         for token in token_set:
@@ -1168,11 +1186,22 @@ class NameHeuristics:
             if ":" in bias_category:
                 base_category, local_family = bias_category.split(":", 1)
             if base_category:
-                bump(base_category, 6, f"pack:{token}")
-                tags.add(f"pack:{token}")
-                if local_family:
-                    family = local_family or family
-                notes.append(f"Pack bias: {token}")
+                if is_adult_bias(bias_category):
+                    if adult_summary.count("strong") or adult_summary.count("medium"):
+                        bump(base_category, 6, f"pack:{token}")
+                        tags.add(f"pack:{token}")
+                        if local_family:
+                            family = local_family or family
+                        notes.append(f"Pack bias: {token}")
+                        notes.append("Adult bias accepted: evidence present")
+                    else:
+                        notes.append("Adult bias suppressed: no adult evidence")
+                else:
+                    bump(base_category, 6, f"pack:{token}")
+                    tags.add(f"pack:{token}")
+                    if local_family:
+                        family = local_family or family
+                    notes.append(f"Pack bias: {token}")
 
         folder_rules = dict(rules.get("folders", {}))
         for token in folder_token_set:
