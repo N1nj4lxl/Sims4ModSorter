@@ -137,6 +137,44 @@ class AdultEvidence:
         return "Adult evidence - " + " | ".join(parts)
 
 
+@dataclass(slots=True)
+class AdultHitSummary:
+    strong: set[str] = field(default_factory=set)
+    medium: set[str] = field(default_factory=set)
+    weak: set[str] = field(default_factory=set)
+
+    def add(self, strength: str, hits: Iterable[str]) -> None:
+        if strength == "strong":
+            target = self.strong
+        elif strength == "medium":
+            target = self.medium
+        elif strength == "weak":
+            target = self.weak
+        else:
+            return
+        for hit in hits:
+            if not hit:
+                continue
+            target.add(str(hit))
+
+    def merge(self, other: "AdultHitSummary") -> None:
+        self.add("strong", other.strong)
+        self.add("medium", other.medium)
+        self.add("weak", other.weak)
+
+    def count(self, strength: str) -> int:
+        if strength == "strong":
+            return len(self.strong)
+        if strength == "medium":
+            return len(self.medium)
+        if strength == "weak":
+            return len(self.weak)
+        return 0
+
+    def any_hits(self) -> bool:
+        return bool(self.strong or self.medium or self.weak)
+
+
 # ---------------------------------------------------------------------------
 # Feature flags and metrics
 # ---------------------------------------------------------------------------
@@ -186,6 +224,19 @@ class PathBiasRule:
     patterns: Tuple[str, ...]
 
 
+@dataclass(slots=True)
+class DependencyRule:
+    key: str
+    requires: Tuple[Tuple[str, str], ...]
+    aliases: Tuple[str, ...] = ()
+    label: str = ""
+
+    def matches(self, identifier: str) -> bool:
+        candidate = normalize_key(identifier)
+        if not candidate:
+            return False
+        return candidate == self.key or candidate in self.aliases
+
 # ---------------------------------------------------------------------------
 # Classification constants
 # ---------------------------------------------------------------------------
@@ -211,9 +262,9 @@ DEFAULT_FOLDER_MAP_V2: Dict[str, str] = {
     "Script Mod": "Mods/Scripts/",
     "Adult": "Mods/NeedsReview/Adult/",
     "CAS": "Mods/CAS/",
-    "BuildBuy": "Mods/BuildBuy/",
+    "BuildBuy": "Mods/Build Mode/",
     "Pose or Animation": "Mods/Animations/",
-    "Tuning": "Mods/Tuning/",
+    "Tuning": "Mods/Gameplay/",
     "Mixed": "Mods/NeedsReview/",
     "Resources": "Mods/NeedsReview/",
     "Archive": "Mods/NeedsReview/",
@@ -268,26 +319,6 @@ def normalize_extension(ext: str) -> Tuple[str, bool]:
     return lowered, False
 
 
-ADULT_CATEGORY_PROMOTIONS: Dict[str, str] = {
-    "Script Mod": "Adult",
-    "CAS": "Adult",
-    "BuildBuy": "Adult",
-    "Tuning": "Adult",
-    "Mixed": "Adult",
-    "Resources": "Adult",
-    "Archive": "Adult",
-    "Other": "Adult",
-    "Unknown": "Adult",
-}
-
-ADULT_CATEGORY_DEMOTIONS: Dict[str, str] = {
-    "Adult": "Other",
-}
-
-ADULT_SCAN_MAX_BYTES = 2 * 1024 * 1024
-ADULT_SCAN_CHUNK_SIZE = 65_536
-ADULT_SCAN_MAX_ARCHIVE_ENTRIES = 40
-ADULT_SCAN_MAX_SOURCES = 5
 ARCHIVE_SUMMARY_MAX_ENTRIES = 200
 
 TYPE_IDS: Dict[int, str] = {
@@ -312,56 +343,79 @@ TYPE_IDS: Dict[int, str] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Adult vocabulary (offline)
-# ---------------------------------------------------------------------------
+def _normalize_keyword(value: str) -> str:
+    return re.sub(r"[\s_]+", " ", value.strip().lower())
 
 
-ADULT_WORDS_BASE: Tuple[str, ...] = (
-    "wickedwhims",
-    "turbodriver",
-    "basemental",
-    "nisa",
-    "wild_guy",
-    "wildguy",
-    "nsfw",
-    "porn",
-    "sex",
-    "sexual",
-    "kinky",
-    "nude",
-    "naked",
-    "strip",
-    "lapdance",
-    "prostitution",
-    "genital",
-    "penis",
-    "vagina",
-    "condom",
-    "condoms",
-    "sheath",
-    "dildo",
-    "vibrator",
-    "plug",
-    "buttplug",
-    "cum",
-    "orgasm",
-    "bdsm",
-    "fetish",
-    "bondage",
-    "dominatrix",
-    "orgy",
-    "hentai",
-    "lewd",
-    "xxx",
-    "xrated",
-    "x-rated",
-    "taboo",
-    "sensual",
-    "seduce",
-)
+def _keyword_to_pattern(value: str) -> str:
+    pieces: List[str] = []
+    last_space = False
+    for char in value.strip():
+        if char.isspace():
+            if not last_space:
+                pieces.append(r"\s+")
+                last_space = True
+            continue
+        last_space = False
+        pieces.append(re.escape(char))
+    return "".join(pieces)
 
-ADULT_WORDS = set(token.lower() for token in ADULT_WORDS_BASE)
+
+def _compile_keyword_group(values: Iterable[str]) -> Tuple[Optional[re.Pattern[str]], Dict[str, set[str]]]:
+    tokens: List[str] = []
+    mapping: Dict[str, set[str]] = {}
+    for raw in values:
+        if not raw:
+            continue
+        pattern = _keyword_to_pattern(str(raw))
+        if not pattern:
+            continue
+        tokens.append(pattern)
+        normalised = _normalize_keyword(str(raw))
+        mapping.setdefault(normalised, set()).add(str(raw))
+    if not tokens:
+        return None, {}
+    tokens.sort(key=len, reverse=True)
+    combined = r"\b(?:" + "|".join(tokens) + r")\b"
+    return re.compile(combined, re.IGNORECASE), mapping
+
+
+def _normalize_hit(value: str) -> str:
+    return re.sub(r"[\s_]+", " ", value.strip().lower())
+
+
+RESOURCE_NAME_TO_ID: Dict[str, int] = {}
+for _type_id, _name in TYPE_IDS.items():
+    RESOURCE_NAME_TO_ID[_name.upper()] = _type_id
+    if "/" in _name:
+        for part in _name.split("/"):
+            RESOURCE_NAME_TO_ID[part.upper()] = _type_id
+# Common Sims 4 tuning/resource identifiers not present in TYPE_IDS
+RESOURCE_NAME_TO_ID.setdefault("XML", 0x545AC67A)
+RESOURCE_NAME_TO_ID.setdefault("ANIM", 0xEA5118B1)
+
+
+@dataclass(slots=True)
+class PackageManifest:
+    type_counts: Dict[int, int]
+
+    def has_any(self, names: Iterable[str]) -> bool:
+        for name in names:
+            key = RESOURCE_NAME_TO_ID.get(str(name).upper())
+            if key is None:
+                continue
+            if self.type_counts.get(key):
+                return True
+        return False
+
+    def iter_named_types(self) -> Iterator[Tuple[str, int]]:
+        for type_id, count in sorted(self.type_counts.items()):
+            yield TYPE_IDS.get(type_id, hex(type_id)), count
+
+
+def read_sims4pkg_manifest(path: Path, limit: int = 64) -> PackageManifest:
+    types = dbpf_scan_types(path, limit=limit)
+    return PackageManifest(type_counts=types)
 
 
 # ---------------------------------------------------------------------------
@@ -527,6 +581,7 @@ class NameSignal:
     score: int = 0
     signals: Tuple[str, ...] = field(default_factory=tuple)
     score_map: Dict[str, int] = field(default_factory=dict)
+    adult_hits: AdultHitSummary = field(default_factory=AdultHitSummary)
 
 
 @dataclass(slots=True)
@@ -639,8 +694,6 @@ class ScanCache:
 
     def _ensure_schema(self) -> None:
         with self._conn:
-            self._conn.execute("DROP TABLE IF EXISTS entries")
-            self._conn.execute("DROP TABLE IF EXISTS fingerprints")
             self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS files (
@@ -793,25 +846,43 @@ class ScanContext:
     path_bias: Tuple[PathBiasRule, ...]
     metrics: ScanMetrics
     rules_version: int
+    dependencies: Tuple[DependencyRule, ...]
 
 
 class KeywordAutomaton:
     def __init__(self, groups: Dict[str, Iterable[str]]) -> None:
-        self._groups: Dict[str, Tuple[str, ...]] = {
-            key: tuple(sorted({token.lower() for token in values if token}))
-            for key, values in groups.items()
-        }
+        self._patterns: Dict[str, Optional[re.Pattern[str]]] = {}
+        self._lookups: Dict[str, Dict[str, set[str]]] = {}
+        self._group_names: Tuple[str, ...] = tuple(groups.keys())
+        for key, values in groups.items():
+            pattern, mapping = _compile_keyword_group(values)
+            self._patterns[key] = pattern
+            self._lookups[key] = mapping
 
-    def search(self, data: bytes) -> Dict[str, set[str]]:
-        try:
-            text = data.decode("utf-8", errors="ignore").lower()
-        except Exception:
-            text = ""
-        hits: Dict[str, set[str]] = {key: set() for key in self._groups}
-        for key, patterns in self._groups.items():
-            for pattern in patterns:
-                if pattern and pattern in text:
-                    hits[key].add(pattern)
+    def search(self, data: bytes | str) -> Dict[str, set[str]]:
+        if isinstance(data, bytes):
+            try:
+                text = data.decode("utf-8", errors="ignore")
+            except Exception:
+                text = ""
+        else:
+            text = str(data)
+        hits: Dict[str, set[str]] = {key: set() for key in self._group_names}
+        if not text:
+            return hits
+        for key in self._group_names:
+            pattern = self._patterns.get(key)
+            if not pattern:
+                continue
+            lookup = self._lookups.get(key, {})
+            for match in pattern.finditer(text):
+                matched = match.group(0)
+                normalised = _normalize_hit(matched)
+                tokens = lookup.get(normalised)
+                if tokens:
+                    hits[key].update(tokens)
+                else:
+                    hits[key].add(normalised)
         return hits
 
 
@@ -842,7 +913,15 @@ def load_keywords(path: str) -> Dict[str, List[str]]:
     try:
         return json.loads(Path(path).read_text(encoding="utf-8"))
     except Exception:
-        return {"adult": [], "script": [], "cas": [], "buildbuy": []}
+        return {
+            "adult_strong": [],
+            "adult_medium": [],
+            "adult_weak": [],
+            "script": [],
+            "cas": [],
+            "buildbuy": [],
+            "name_tokens": {},
+        }
 
 
 def load_feature_flags(base_dir: Path) -> Tuple[FeatureFlags, int]:
@@ -872,11 +951,52 @@ def load_feature_flags(base_dir: Path) -> Tuple[FeatureFlags, int]:
     return features, rules_version
 
 
+def _parse_dependency_rules(raw: object) -> Tuple[DependencyRule, ...]:
+    rules: List[DependencyRule] = []
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            primary = normalize_key(str(key))
+            if not primary:
+                continue
+            aliases: List[str] = []
+            requires: List[Tuple[str, str]] = []
+            label = str(key)
+            if isinstance(value, dict):
+                requires_raw = value.get("requires", [])
+                aliases_raw = value.get("aliases", [])
+                label = str(value.get("label", label))
+            else:
+                requires_raw = value
+                aliases_raw = []
+            if isinstance(aliases_raw, (list, tuple)):
+                for alias in aliases_raw:
+                    norm = normalize_key(str(alias))
+                    if norm:
+                        aliases.append(norm)
+            if isinstance(requires_raw, (list, tuple)):
+                for dep in requires_raw:
+                    display = str(dep).strip()
+                    norm = normalize_key(display)
+                    if norm:
+                        requires.append((norm, display or norm))
+            rules.append(
+                DependencyRule(
+                    key=primary,
+                    requires=tuple(requires),
+                    aliases=tuple(aliases),
+                    label=label.strip() or key,
+                )
+            )
+    return tuple(rules)
+
+
 class NameHeuristics:
     _name_token_map: Dict[str, Tuple[set[str], int]] = {}
     _cas_tokens: set[str] = set()
     _script_tokens: set[str] = set()
-    _adult_tokens: set[str] = set()
+    _adult_patterns: Dict[str, Optional[re.Pattern[str]]] = {}
+    _adult_lookup: Dict[str, Dict[str, set[str]]] = {}
+    _adult_raw: Dict[str, set[str]] = {}
     _generic_tokens: set[str] = set()
     _features: FeatureFlags = FeatureFlags()
     _path_bias: Tuple[PathBiasRule, ...] = tuple()
@@ -902,13 +1022,44 @@ class NameHeuristics:
         cls._cas_tokens = cas_tokens
         cls._generic_tokens = {token.lower() for token in name_tokens.get("generic", [])}
         cls._script_tokens = {token.lower() for token in keywords.get("script", [])}
-        cls._adult_tokens = {token.lower() for token in keywords.get("adult", [])}
+        adult_groups = {
+            "strong": [str(token) for token in keywords.get("adult_strong", []) if isinstance(token, str)],
+            "medium": [str(token) for token in keywords.get("adult_medium", []) if isinstance(token, str)],
+            "weak": [str(token) for token in keywords.get("adult_weak", []) if isinstance(token, str)],
+        }
+        cls._adult_patterns = {}
+        cls._adult_lookup = {}
+        cls._adult_raw = {}
+        for strength, values in adult_groups.items():
+            pattern, mapping = _compile_keyword_group(values)
+            cls._adult_patterns[strength] = pattern
+            cls._adult_lookup[strength] = mapping
+            cls._adult_raw[strength] = set(values)
         cls._path_bias = path_bias
         cls._features = features
 
     @classmethod
     def cas_tokens(cls) -> set[str]:
         return set(cls._cas_tokens)
+
+    @classmethod
+    def _scan_adult_text(cls, text: str) -> AdultHitSummary:
+        summary = AdultHitSummary()
+        if not text:
+            return summary
+        for strength, pattern in cls._adult_patterns.items():
+            if not pattern:
+                continue
+            lookup = cls._adult_lookup.get(strength, {})
+            for match in pattern.finditer(text):
+                matched = match.group(0)
+                normalised = _normalize_hit(matched)
+                tokens = lookup.get(normalised)
+                if tokens:
+                    summary.add(strength, tokens)
+                else:
+                    summary.add(strength, {normalised})
+        return summary
 
     @classmethod
     def guess(cls, path: Path, rules: Dict[str, object]) -> NameSignal:
@@ -925,7 +1076,7 @@ class NameHeuristics:
         scores: Dict[str, int] = {}
         base_scores: Dict[str, int] = {}
         adult_risk = "low"
-        adult_hits: set[str] = set()
+        adult_summary = AdultHitSummary()
         family: Optional[str] = None
 
         def bump(category: str, amount: int, signal: Optional[str] = None) -> None:
@@ -941,6 +1092,21 @@ class NameHeuristics:
             base_scores.setdefault(category, amount)
             scores.setdefault(category, 0)
 
+        def record_adult_hits(source: str, hits: AdultHitSummary) -> None:
+            if not hits.any_hits():
+                return
+            adult_summary.merge(hits)
+            tags.add(f"{source}:adult")
+            combined = sorted(set(hits.strong) | set(hits.medium) | set(hits.weak))
+            if combined:
+                notes.append(f"Adult keywords in {source}: " + ", ".join(combined))
+            else:
+                notes.append(f"Adult keywords in {source}")
+            for strength in ("strong", "medium", "weak"):
+                entries = getattr(hits, strength)
+                for hit in sorted(entries):
+                    signals.append(f"{source}:adult:{strength}:{hit}")
+
         if ext in SCRIPT_EXTS:
             base("Script Mod", 10)
             bump("Script Mod", 10, "name:ext:ts4script")
@@ -953,6 +1119,8 @@ class NameHeuristics:
             base("Other", 3)
 
         seen_token_hits: Dict[Tuple[str, str], bool] = {}
+        record_adult_hits("name", cls._scan_adult_text(name))
+        record_adult_hits("folder", cls._scan_adult_text(" ".join(path.parent.parts)))
         for token in token_set:
             for category, (token_pool, amount) in cls._name_token_map.items():
                 if token in token_pool and (category, token) not in seen_token_hits:
@@ -963,15 +1131,6 @@ class NameHeuristics:
             if token in cls._script_tokens:
                 bump("Script Mod", 4, f"name:{token}")
                 tags.add("name:script")
-            if token in cls._adult_tokens:
-                adult_risk = "high"
-                adult_hits.add(token)
-                tags.add("name:adult")
-
-        if adult_risk == "low" and cls._adult_tokens & folder_token_set:
-            adult_risk = "medium"
-            tags.add("folder:adult")
-
         for token in folder_token_set:
             if token in cls._script_tokens:
                 bump("Script Mod", 3, f"folder:{token}")
@@ -1065,8 +1224,10 @@ class NameHeuristics:
             base_confidence = 0.35
         confidence = min(1.0, base_confidence + max(0, total_score - base_amount) * 0.05)
 
-        if adult_hits:
-            notes.append("Adult keywords in name")
+        if adult_summary.count("strong"):
+            adult_risk = "high"
+        elif adult_summary.count("medium"):
+            adult_risk = "medium"
 
         signals = tuple(dict.fromkeys(signals))
         notes.append(f"Tokens: {', '.join(tokens[:6])}" if tokens else "No tokens")
@@ -1082,6 +1243,7 @@ class NameHeuristics:
             score=total_score,
             signals=signals,
             score_map=dict(scores),
+            adult_hits=adult_summary,
         )
 
 
@@ -1110,8 +1272,8 @@ class HeaderProbe:
 class DbpfProbe:
     @staticmethod
     def inspect(path: Path) -> HeaderSignal:
-        types = dbpf_scan_types(path, limit=10)
-        if not types:
+        manifest = read_sims4pkg_manifest(path)
+        if not manifest.type_counts:
             return HeaderSignal(
                 category=None,
                 confidence=0.0,
@@ -1121,47 +1283,70 @@ class DbpfProbe:
                 score=0,
                 signals=tuple(),
             )
-        tags = {TYPE_IDS.get(key, hex(key)) for key in types}
+
+        tags = {TYPE_IDS.get(key, hex(key)) for key in manifest.type_counts}
         notes = [
             "DBPF types: "
-            + ", ".join(f"{TYPE_IDS.get(key, hex(key))}:{count}" for key, count in sorted(types.items()))
+            + ", ".join(f"{name}:{count}" for name, count in manifest.iter_named_types())
         ]
-        score_map, raw_signals, decisive, decisive_type = _score_dbpf_types(types)
-        supported = {category for category, score in score_map.items() if score > 0}
-        if decisive and decisive_type:
-            notes.append(f"Decisive header: {decisive_type}")
-        if not score_map:
+        signals = [f"manifest:{name}" for name, _ in manifest.iter_named_types()]
+
+        has_animation = manifest.has_any(["CLIP", "ANIM", "JAZZ", "AFS", "IGR"])
+        has_tuning = manifest.has_any(["XML", "SXML", "ITUN", "STBL"])
+        has_cas = manifest.has_any(["CASP", "TONE", "BGEO", "GEOM", "MODL", "MLOD", "RLE2"])
+        has_build = manifest.has_any(["COBJ", "OBJD", "FTPT", "SLOT", "RSLT"])
+
+        supported: set[str] = set()
+        if has_animation:
+            supported.add("Pose or Animation")
+        if has_tuning:
+            supported.add("Tuning")
+        if has_cas:
+            supported.add("CAS")
+        if has_build:
+            supported.add("BuildBuy")
+
+        category: Optional[str] = None
+        score = 0
+        if has_animation:
+            category = "Pose or Animation"
+            score = 4
+        elif has_tuning:
+            category = "Tuning"
+            score = 3
+        elif has_cas:
+            category = "CAS"
+            score = 6
+        elif has_build:
+            category = "BuildBuy"
+            score = 6
+
+        if not category:
             return HeaderSignal(
                 category=None,
-                confidence=0.5,
+                confidence=0.55,
                 decisive=False,
                 tags=tags,
                 notes=notes,
-                supported=set(),
+                supported=supported,
                 handler="dbpf",
                 score=0,
-                signals=tuple(),
+                signals=tuple(dict.fromkeys(signals)),
             )
-        best_category = max(
-            score_map.items(),
-            key=lambda kv: (kv[1], -CATEGORY_INDEX.get(kv[0].split(":", 1)[0], len(CATEGORY_ORDER))),
-        )[0]
-        score_value = score_map.get(best_category, 0)
-        confidence = 0.55 + 0.04 * score_value
-        if decisive:
-            confidence = max(confidence, 0.92)
-        confidence = min(0.99, confidence)
+
+        confidence = 0.9 if category == "Pose or Animation" else 0.85
+        decisive = category in {"CAS", "BuildBuy"}
         return HeaderSignal(
-            category=best_category,
-            confidence=confidence,
+            category=category,
+            confidence=min(0.99, confidence),
             decisive=decisive,
             tags=tags,
             notes=notes,
             supported=supported,
             handler="dbpf",
-            score=score_value,
-            signals=tuple(dict.fromkeys(raw_signals)),
-            decisive_type=decisive_type,
+            score=score,
+            signals=tuple(dict.fromkeys(signals)),
+            decisive_type=category,
         )
 
 
@@ -1279,8 +1464,8 @@ class Ts4ScriptProbe:
     KNOWN_FAMILIES = {
         "mccc": "Script Mod:MCCC",
         "mc_command_center": "Script Mod:MCCC",
-        "wickedwhims": "Adult:WickedWhims",
-        "deviousdesires": "Adult:DeviousDesires",
+        "wickedwhims": "Script Mod:WickedWhims",
+        "deviousdesires": "Script Mod:DeviousDesires",
     }
 
     @classmethod
@@ -1314,7 +1499,7 @@ class Ts4ScriptProbe:
                 if ":" in bias:
                     base, fam = bias.split(":", 1)
                     return HeaderSignal(
-                        category=base,
+                        category=base or "Script Mod",
                         confidence=0.95,
                         decisive=True,
                         tags={"module:" + module},
@@ -1326,18 +1511,19 @@ class Ts4ScriptProbe:
                         decisive_type=f"module:{module}",
                     )
                 family = bias
-        score = 8 if modules else 4
+        score = 12 if modules else 8
+        notes = ["Modules: " + ", ".join(sorted(modules))] if modules else ["No python modules"]
         return HeaderSignal(
             category="Script Mod",
-            confidence=0.8 if modules else 0.6,
-            decisive=bool(modules),
-            tags={"module:" + mod for mod in modules},
-            notes=["Modules: " + ", ".join(sorted(modules))] if modules else ["No python modules"],
+            confidence=0.95,
+            decisive=True,
+            tags={"module:" + mod for mod in modules} if modules else set(),
+            notes=notes,
             family=family,
             handler="ts4script",
             score=score,
             signals=tuple(f"module:{mod}" for mod in sorted(modules)),
-            decisive_type=None,
+            decisive_type="module" if modules else None,
         )
 
 
@@ -1425,151 +1611,133 @@ class Classifier:
         features: FeatureFlags,
         thresholds: Dict[str, float],
     ) -> ScanFinding:
-        notes: List[str] = []
-        tags: set[str] = set()
-        tags.update(name_sig.tags)
+        tags: set[str] = set(name_sig.tags)
         tags.update(head_sig.tags)
-        notes.extend(name_sig.notes)
+        notes: List[str] = list(name_sig.notes)
         notes.extend(head_sig.notes)
+        signals: List[str] = list(name_sig.signals)
+        signals.extend(head_sig.signals)
 
-        score_board: Dict[str, int] = {}
-        signals: List[str] = []
-        adult_hits: set[str] = set()
+        category_scores: Dict[str, int] = {}
+        base_thresholds = {"Script Mod": 4, "Pose or Animation": 4, "Tuning": 3, "CAS": 3, "BuildBuy": 3}
+        base_defaults = {"Script Mod": 8, "Pose or Animation": 4, "Tuning": 3, "CAS": 3, "BuildBuy": 3}
 
-        for category, value in name_sig.score_map.items():
-            if category:
-                score_board[category] = score_board.get(category, 0) + max(0, value)
-        signals.extend(name_sig.signals)
+        def add_score(category: Optional[str], value: int) -> None:
+            if not category or value <= 0:
+                return
+            base = category.split(":", 1)[0]
+            if not base:
+                return
+            category_scores[base] = max(category_scores.get(base, 0), value)
 
         if head_sig.category:
-            score_board[head_sig.category] = score_board.get(head_sig.category, 0) + max(0, head_sig.score)
-        for supported in head_sig.supported:
-            score_board.setdefault(supported, 0)
-        signals.extend(head_sig.signals)
+            base = head_sig.category.split(":", 1)[0]
+            default_score = base_defaults.get(base, max(head_sig.score, 3))
+            content_score = head_sig.score if head_sig.score > 0 else default_score
+            add_score(head_sig.category, content_score)
+            for supported in head_sig.supported:
+                sup_base = supported.split(":", 1)[0]
+                add_score(supported, base_defaults.get(sup_base, 1))
+
+        if not head_sig.decisive:
+            for category, value in name_sig.score_map.items():
+                add_score(category, max(0, value))
+            if name_sig.category:
+                add_score(name_sig.category, max(0, name_sig.score))
+
+        if not category_scores:
+            category_scores["Unknown"] = 0
+
+        def priority_key(base: str) -> int:
+            return CATEGORY_INDEX.get(base, len(CATEGORY_ORDER))
+
+        if head_sig.decisive and head_sig.category:
+            base_type = head_sig.category.split(":", 1)[0]
+        else:
+            base_type, best_score_candidate = max(
+                category_scores.items(),
+                key=lambda kv: (kv[1], -priority_key(kv[0])),
+            )
+        best_score = category_scores.get(base_type, 0)
+
+        threshold = base_thresholds.get(base_type, 0)
+        if best_score < threshold:
+            base_type = "Unknown"
+            best_score = category_scores.get(base_type, 0)
+
+        family = head_sig.family or name_sig.family
+
+        adult_summary = AdultHitSummary()
+        adult_summary.merge(name_sig.adult_hits)
 
         if peek_sig:
             for group, hits in peek_sig.hits.items():
                 if not hits:
                     continue
                 tags.add(f"peek:{group}")
-                note_hits = ", ".join(sorted(hits))
-                notes.append(f"Content hits {group}: {note_hits}")
-                if group == "adult":
-                    adult_hits.update(hits)
-                category_map = {
-                    "adult": "Adult",
-                    "script": "Script Mod",
-                    "cas": "CAS",
-                    "buildbuy": "BuildBuy",
-                    "pose": "Pose or Animation",
-                    "tuning": "Tuning",
-                }
-                mapped = category_map.get(group)
-                if mapped:
-                    score_board[mapped] = score_board.get(mapped, 0) + 2 * len(hits)
-                for hit in sorted(hits):
+                sorted_hits = sorted(hits)
+                notes.append(f"Peek hits {group}: " + ", ".join(sorted_hits))
+                for hit in sorted_hits:
                     signals.append(f"peek:{group}:{hit}")
+                if group.startswith("adult_"):
+                    strength = group.split("_", 1)[1]
+                    if strength in {"strong", "medium", "weak"}:
+                        adult_summary.add(strength, hits)
 
-        if not score_board:
-            score_board["Unknown"] = 0
-
-        base_category = name_sig.category or "Unknown"
-        if head_sig.category:
-            base_category = head_sig.category
-
+        base_confidence = max(name_sig.confidence, head_sig.confidence)
+        base_confidence = max(base_confidence, 0.4 + 0.05 * max(0, best_score))
         if head_sig.decisive and head_sig.category:
-            best_category = head_sig.category
-            best_score = max(score_board.get(best_category, 0), head_sig.score)
-        else:
-            best_category, best_score = max(
-                score_board.items(),
-                key=lambda kv: (kv[1], -CATEGORY_INDEX.get(kv[0].split(":", 1)[0], len(CATEGORY_ORDER))),
-            )
-            tied = [cat for cat, score in score_board.items() if score == best_score]
-            if len(tied) > 1:
-                supported = [cat for cat in tied if head_sig.supports(cat)]
-                if supported:
-                    tied = supported
-                elif head_sig.category in tied:
-                    tied = [head_sig.category]
-                if len(tied) > 1 and {"BuildBuy", "CAS"} <= set(tied):
-                    build_has_objd = any(
-                        signal.startswith("header:COBJ/OBJD")
-                        or signal.startswith("header:SLOT")
-                        or signal.startswith("header:FTPT")
-                        for signal in head_sig.signals
-                    )
-                    if build_has_objd:
-                        tied = ["BuildBuy"]
-                    else:
-                        tied = ["CAS"]
-                if len(tied) > 1:
-                    tied.sort(key=lambda cat: CATEGORY_INDEX.get(cat.split(":", 1)[0], len(CATEGORY_ORDER)))
-                best_category = tied[0]
-                best_score = score_board.get(best_category, best_score)
+            base_confidence = max(base_confidence, float(thresholds.get("high_conf", 0.8)))
+        confidence = min(0.99, base_confidence)
 
-        if (
-            features.treat_package_as_nonfinal
-            and best_category in {"Package", "Unknown"}
-            and name_sig.score_map
-            and any(cat not in {"Package", "Unknown"} for cat in name_sig.score_map)
-        ):
-            alternatives = sorted(
-                ((cat, score) for cat, score in score_board.items() if cat not in {"Package", "Unknown"}),
-                key=lambda kv: (kv[1], -CATEGORY_INDEX.get(kv[0].split(":", 1)[0], len(CATEGORY_ORDER))),
-                reverse=True,
-            )
-            for candidate, value in alternatives:
-                if value >= 5:
-                    best_category = candidate
-                    best_score = value
-                    break
+        all_adult_hits = sorted(set(adult_summary.strong) | set(adult_summary.medium) | set(adult_summary.weak))
+        if all_adult_hits:
+            tags.update(f"adult:{hit}" for hit in all_adult_hits)
 
-        family = head_sig.family or name_sig.family
-        adult_flag = name_sig.adult_risk == "high" or bool(adult_hits)
-        if head_sig.category == "Adult":
+        strong_count = adult_summary.count("strong")
+        medium_count = adult_summary.count("medium")
+        weak_count = adult_summary.count("weak")
+
+        adult_score = strong_count * 3 + min(medium_count, 3)
+        if base_type == "Pose or Animation" and adult_summary.any_hits():
+            adult_score += 2
+        if base_type in {"Script Mod", "CAS", "BuildBuy"} and strong_count == 0:
+            adult_score -= 3
+
+        adult_flag = False
+        if strong_count >= 1:
+            adult_flag = True
+        elif medium_count >= 2 and base_type in {"Pose or Animation", "Tuning"}:
+            adult_flag = True
+        elif adult_score >= 4:
             adult_flag = True
 
-        category = best_category
-        if adult_flag and not category.startswith("Adult"):
-            base = category
-            category = "Adult" if not base else f"Adult:{base}"
-            signals.append("adult:promotion")
-
-        if family and not category.startswith("Adult"):
-            category = f"{best_category}:{family}" if best_category else family
-        elif family and category.startswith("Adult") and ":" not in category:
-            category = f"Adult:{family}"
-
-        if adult_hits:
-            tags.update(f"adult:{hit}" for hit in adult_hits)
-
-        combined_confidence = max(
-            name_sig.confidence,
-            head_sig.confidence,
-            0.4 + 0.05 * max(0, best_score),
-        )
-        if head_sig.decisive:
-            combined_confidence = max(combined_confidence, float(thresholds.get("high_conf", 0.8)))
-        if adult_flag:
-            combined_confidence = max(combined_confidence, 0.75 if adult_hits else 0.7)
-        combined_confidence = min(0.99, combined_confidence)
-
-        notes_text = "; ".join(_shorten_note(note) for note in notes if note)
-        needs_enrich = combined_confidence < float(thresholds.get("high_conf", 0.8))
         extras: Dict[str, str] = {}
-        if adult_hits:
-            extras["adult_hits"] = ", ".join(sorted(adult_hits))
         extras["confidence_score"] = str(best_score)
         extras["signals"] = ", ".join(dict.fromkeys(signals))
+        extras["adult_strong_count"] = str(strong_count)
+        extras["adult_medium_count"] = str(medium_count)
+        extras["adult_weak_count"] = str(weak_count)
+        extras["adult_score"] = str(adult_score)
+        if all_adult_hits:
+            extras["adult_hits"] = ", ".join(all_adult_hits)
+        if adult_flag:
+            extras["is_adult"] = "true"
+
+        final_category = base_type or "Unknown"
+        if family and final_category != "Unknown":
+            final_category = f"{final_category}:{family}"
+
+        combined_notes = "; ".join(_shorten_note(note) for note in notes if note)
+        needs_enrich = confidence < float(thresholds.get("high_conf", 0.8))
 
         finding = ScanFinding(
             path=path,
             ext=ext,
             size=int(st.st_size),
-            category=category or "Unknown",
-            confidence=combined_confidence,
-            notes=notes_text,
+            category=final_category,
+            confidence=confidence,
+            notes=combined_notes,
             tags=tuple(sorted(tags)),
             target=UNKNOWN_DEFAULT_FOLDER,
             needs_enrich=needs_enrich,
@@ -1592,17 +1760,31 @@ class Router:
         routing = dict(rules.get("routing", {})) if features.use_legacy_routing else {}
         category = finding.category
         base = category.split(":", 1)[0] if category else "Unknown"
+        extras = finding.extras if isinstance(finding.extras, dict) else {}
+        is_adult = str(extras.get("is_adult", "")).lower() == "true"
+        try:
+            strong_count = int(extras.get("adult_strong_count", "0"))
+        except (TypeError, ValueError):
+            strong_count = 0
+
         dest = routing.get(base)
         if not dest:
             dest = folder_map.get(base, folder_map.get("Unknown", UNKNOWN_DEFAULT_FOLDER))
+        adult_dest = folder_map.get("Adult", folder_map.get("Unknown", UNKNOWN_DEFAULT_FOLDER))
+        if is_adult and (base in {"Pose or Animation", "Tuning"} or strong_count > 0):
+            dest = adult_dest
+
+        fam = ""
         if ":" in category:
             fam = category.split(":", 1)[1]
-            if fam:
-                dest = f"{dest}{'' if dest.endswith('/') else '/'}{fam}"
+        if fam:
+            dest = f"{dest.rstrip('/')}/{fam}"
         if finding.disabled:
             if not dest.endswith("/"):
                 dest = dest + "/"
             dest = f"{dest}Disabled/"
+        elif not dest.endswith("/"):
+            dest = dest + "/"
         finding.target = dest
         return finding
 
@@ -1718,12 +1900,24 @@ def scan_light(path: Path, st: os.stat_result, ctx: ScanContext) -> ScanFinding:
     preliminary = Classifier.merge(path, st, ext, disabled, name_sig, head_sig, None, ctx.features, ctx.thresholds)
 
     need_peek = False
+    base_category = (preliminary.category or "Unknown").split(":", 1)[0]
     if ctx.features.fast_mode and not head_sig.decisive:
-        base_category = (preliminary.category or "Unknown").split(":", 1)[0]
         if base_category in {"Package", "Unknown"}:
             need_peek = True
     if not need_peek and should_escalate(name_sig, head_sig, ctx.thresholds):
         need_peek = True
+    if not need_peek and base_category in {"Pose or Animation", "Tuning"}:
+        extras = preliminary.extras if isinstance(preliminary.extras, dict) else {}
+        try:
+            strong_hits = int(extras.get("adult_strong_count", "0"))
+        except (TypeError, ValueError):
+            strong_hits = 0
+        try:
+            medium_hits = int(extras.get("adult_medium_count", "0"))
+        except (TypeError, ValueError):
+            medium_hits = 0
+        if strong_hits == 0 and medium_hits < 2:
+            need_peek = True
 
     peek_sig: Optional[PeekSignal] = None
     finding = preliminary
@@ -1755,37 +1949,86 @@ def classify_from_types(
     adult_hint: bool,
 ) -> Tuple[str, float, str, Tuple[str, ...]]:
     if not types:
-        category = "Adult" if adult_hint else "Unknown"
-        return category, 0.5, "No DBPF index", tuple()
-    header_types = {TYPE_IDS.get(key, hex(key)) for key in types}
-    notes = "DBPF types: " + ", ".join(
-        f"{TYPE_IDS.get(key, hex(key))}:{count}" for key, count in sorted(types.items())
-    )
-    score_map, _, decisive, decisive_type = _score_dbpf_types(types)
-    if not score_map:
-        category = "Adult" if adult_hint else "Unknown"
-        confidence = 0.6 if category != "Unknown" else 0.5
-        return category, confidence, notes, tuple(sorted(header_types))
-    category = max(
-        score_map.items(),
-        key=lambda kv: (kv[1], -CATEGORY_INDEX.get(kv[0].split(":", 1)[0], len(CATEGORY_ORDER))),
-    )[0]
-    score_value = score_map.get(category, 0)
-    confidence = min(0.99, 0.55 + 0.04 * score_value)
-    if decisive:
-        confidence = max(confidence, 0.9)
-        if decisive_type:
-            notes += f"; decisive {decisive_type}"
-    if adult_hint and not category.startswith("Adult"):
-        category = f"Adult:{category}"
-        confidence = max(confidence, 0.8)
-    tags = tuple(sorted(header_types))
-    return category, confidence, notes, tags
+        return "Unknown", 0.5, "No DBPF index", tuple()
+    manifest = PackageManifest(type_counts=types)
+    tags = tuple(sorted(TYPE_IDS.get(key, hex(key)) for key in types))
+    notes = "DBPF types: " + ", ".join(f"{name}:{count}" for name, count in manifest.iter_named_types())
+
+    has_animation = manifest.has_any(["CLIP", "ANIM", "JAZZ", "AFS", "IGR"])
+    has_tuning = manifest.has_any(["XML", "SXML", "ITUN", "STBL"])
+    has_cas = manifest.has_any(["CASP", "TONE", "BGEO", "GEOM", "MODL", "MLOD", "RLE2"])
+    has_build = manifest.has_any(["COBJ", "OBJD", "FTPT", "SLOT", "RSLT"])
+
+    if has_animation:
+        return "Pose or Animation", 0.9, notes, tags
+    if has_tuning:
+        return "Tuning", 0.85, notes, tags
+    if has_cas:
+        return "CAS", 0.8, notes, tags
+    if has_build:
+        return "BuildBuy", 0.8, notes, tags
+    return "Unknown", 0.6, notes, tags
 
 
 def map_type_to_folder(cat: str, folder_map: Dict[str, str]) -> str:
     base = cat.split(":", 1)[0] if cat else "Unknown"
     return folder_map.get(base, folder_map.get("Unknown", UNKNOWN_DEFAULT_FOLDER))
+
+
+def _collect_identifiers(item: FileItem) -> set[str]:
+    identifiers: set[str] = set()
+    stem = normalize_key(Path(item.name).stem)
+    if stem:
+        identifiers.add(stem)
+    extras = item.extras if isinstance(item.extras, dict) else {}
+    signals_text = str(extras.get("signals", ""))
+    for raw in signals_text.split(","):
+        token = raw.strip()
+        if token.startswith("module:"):
+            module_name = token.split(":", 1)[1]
+            norm = normalize_key(module_name)
+            if norm:
+                identifiers.add(norm)
+    return identifiers
+
+
+def apply_dependency_rules(
+    items: Sequence[FileItem],
+    disabled: Sequence[FileItem],
+    rules: Tuple[DependencyRule, ...],
+) -> None:
+    if not rules:
+        return
+    all_items = list(items) + list(disabled)
+    seen: set[str] = set()
+    for item in all_items:
+        seen.update(_collect_identifiers(item))
+    seen.discard("")
+
+    for item in items:
+        identifiers = _collect_identifiers(item)
+        matched: Optional[DependencyRule] = None
+        for rule in rules:
+            if any(rule.matches(identifier) for identifier in identifiers):
+                matched = rule
+                break
+        if not matched:
+            continue
+        if not matched.requires:
+            item.dependency_status = "ok"
+            item.dependency_detail = "No additional dependencies"
+            continue
+        missing: List[str] = []
+        for norm, display in matched.requires:
+            if norm not in seen:
+                missing.append(display)
+        if missing:
+            item.dependency_status = "missing"
+            item.dependency_detail = "Missing: " + ", ".join(sorted(missing))
+        else:
+            item.dependency_status = "ok"
+            required_names = ", ".join(display for _, display in matched.requires)
+            item.dependency_detail = f"Requires: {required_names}"
 
 
 # Placeholder for removed adult scan behaviour
@@ -1934,7 +2177,9 @@ def scan_folder(
         ext = finding.ext
         size_mb = human_mb(finding.size)
         include = not finding.disabled
-        if not include_adult and finding.category.startswith("Adult"):
+        extras_dict = finding.extras if isinstance(finding.extras, dict) else {}
+        is_adult_flagged = str(extras_dict.get("is_adult", "")).lower() == "true"
+        if not include_adult and is_adult_flagged:
             continue
         item = FileItem(
             path=finding.path,
@@ -1956,6 +2201,8 @@ def scan_folder(
             disabled_items.append(item)
         else:
             items.append(item)
+
+    apply_dependency_rules(items, disabled_items, ctx.dependencies)
 
     duplicate_groups: Dict[str, List[FileItem]] = {}
     for item in items:
@@ -2055,6 +2302,7 @@ def _build_context() -> ScanContext:
     thresholds = load_thresholds(str(base_dir / "thresholds.json"))
     keywords = load_keywords(str(base_dir / "keywords.json"))
     features, rules_version = load_feature_flags(base_dir)
+    dependencies = _parse_dependency_rules(rules.get("dependencies", {}))
 
     path_bias_raw = rules.get("path_bias", [])
     path_bias_rules: List[PathBiasRule] = []
@@ -2106,6 +2354,7 @@ def _build_context() -> ScanContext:
         path_bias=tuple(path_bias_rules),
         metrics=metrics,
         rules_version=rules_version,
+        dependencies=dependencies,
     )
     return ctx
 
