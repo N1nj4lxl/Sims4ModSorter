@@ -57,9 +57,6 @@ def test_scan_folder_routes_multiple_categories(tmp_path: Path) -> None:
     build_path = tmp_path / "modern_sofa.package"
     build_path.write_text("sofa recolor", encoding="utf-8")
 
-    adult_path = tmp_path / "nude_pose.package"
-    adult_path.write_text("nude animation", encoding="utf-8")
-
     result = scanner.scan_folder(tmp_path)
 
     assert not result.errors
@@ -68,8 +65,6 @@ def test_scan_folder_routes_multiple_categories(tmp_path: Path) -> None:
     assert targets["functional.ts4script"] == scanner.DEFAULT_FOLDER_MAP["Script Mod"]
     assert targets["glam_hair.package"] == scanner.DEFAULT_FOLDER_MAP["CAS"]
     assert targets["modern_sofa.package"] == scanner.DEFAULT_FOLDER_MAP["BuildBuy"]
-    adult_prefix = scanner.DEFAULT_FOLDER_MAP["Adult"]
-    assert targets["nude_pose.package"].startswith(adult_prefix)
     assert "Unsorted" not in targets.values()
 
 

@@ -24,5 +24,15 @@
     {"category": "CAS", "score": 2, "patterns": ["cas", "create a sim", "makeup", "hair"]},
     {"category": "BuildBuy", "score": 2, "patterns": ["build", "build mode", "object", "furniture"]},
     {"category": "Pose or Animation", "score": 3, "patterns": ["pose", "animation"]}
-  ]
+  ],
+  "dependencies": {
+    "ui_cheats_extension_scripts": {
+      "requires": [],
+      "aliases": ["ui_cheats_extension"],
+      "label": "UI Cheats Extension"
+    },
+    "xmlinjector": {
+      "requires": []
+    }
+  }
 }
