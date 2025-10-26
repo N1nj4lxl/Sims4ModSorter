@@ -975,6 +975,7 @@ class Sims4ModSorterApp(tk.Tk):
         self._update_release_page_url: Optional[str] = None
         self._update_download_filename: Optional[str] = None
         self._update_available: bool = False
+        self._update_release_notes: Optional[str] = None
         self._update_overlay: Optional[tk.Toplevel] = None
         self._update_overlay_message = tk.StringVar(value="")
         self._update_overlay_headline = tk.StringVar(value="Sims4 Mod Sorter Update")
@@ -4018,6 +4019,15 @@ class Sims4ModSorterApp(tk.Tk):
         except Exception:
             pass
 
+    def _format_update_changelog(self) -> str:
+        notes = getattr(self, "_update_release_notes", None)
+        if not notes:
+            return ""
+        cleaned = notes.replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not cleaned:
+            return ""
+        return f"New features detected:\n{cleaned}"
+
     def _show_update_overlay(
         self,
         message: str,
@@ -4919,31 +4929,48 @@ class Sims4ModSorterApp(tk.Tk):
     def _handle_update_download_success(
         self, target_path: Path, mode: Literal["auto-install", "manual-download"]
     ) -> None:
-        self._hide_update_overlay()
         self.log(f"Update downloaded to {target_path}")
         if mode == "manual-download":
+            self._hide_update_overlay()
             self._show_info_overlay(
                 "Update Downloaded",
-                "The update package was downloaded successfully.\n"
+                "The update package was downloaded successfully.\n",
                 f"Saved to: {target_path}",
             )
             return
+
+        self._show_update_overlay(
+            "Installing update…",
+            headline="Installing update",
+            progress=True,
+            enable_download=False,
+            enable_skip=False,
+            enable_details=False,
+            enable_manual=False,
+            progress_title="Installation status",
+            progress_subtext="Copying files into the new installation…",
+            status_icon="🛠️",
+        )
+
         selected_entries: Optional[Set[PurePosixPath]] = None
         if self._update_download_mode.get() == "advanced":
             selection = self._prompt_advanced_file_selection(target_path)
             if selection is None:
+                self._hide_update_overlay()
                 self._show_info_overlay(
                     "Update Cancelled",
                     "The update installation was cancelled before copying any files.",
                 )
                 return
             if not selection:
+                self._hide_update_overlay()
                 self._show_info_overlay(
                     "Update Cancelled",
                     "No files were selected for installation. The update was not applied.",
                 )
                 return
             selected_entries = selection
+
         try:
             expected_version = self._latest_version if self._update_available else None
             new_install_path, copied = self._install_update_package(
@@ -4951,6 +4978,7 @@ class Sims4ModSorterApp(tk.Tk):
             )
         except zipfile.BadZipFile as exc:
             self.log(f"Downloaded update is not a valid ZIP archive: {exc}", level="error")
+            self._hide_update_overlay()
             self._show_error_overlay(
                 "Update Installation Failed",
                 "The downloaded update could not be installed because it is not a valid ZIP archive.",
@@ -4958,6 +4986,7 @@ class Sims4ModSorterApp(tk.Tk):
             return
         except Exception as exc:
             self.log(f"Failed to install downloaded update: {exc}", level="error")
+            self._hide_update_overlay()
             self._show_error_overlay(
                 "Update Installation Failed",
                 f"Unable to install the downloaded update: {exc}",
@@ -4969,7 +4998,17 @@ class Sims4ModSorterApp(tk.Tk):
             f"Copied {copied} file{'s' if copied != 1 else ''} into the new installation.\n"
             "The new version will launch automatically and this window will close."
         )
-        self._show_info_overlay("Update Installed", summary)
+        self._show_update_overlay(
+            summary,
+            headline="Update installed",
+            progress=False,
+            enable_download=False,
+            enable_skip=False,
+            enable_details=bool(self._update_release_page_url),
+            enable_manual=False,
+            status_icon="✅",
+            changelog=self._format_update_changelog(),
+        )
 
         if self._launch_new_installation(new_install_path):
             self._schedule_update_cleanup(Path(__file__).resolve().parent, new_install_path)
@@ -4977,7 +5016,7 @@ class Sims4ModSorterApp(tk.Tk):
         else:
             self._show_warning_overlay(
                 "Update Installed",
-                "The update was installed but the new version could not be launched automatically.\n"
+                "The update was installed but the new version could not be launched automatically.\n",
                 "Please start the new installation manually.",
             )
 
@@ -5528,6 +5567,8 @@ for _ in range(10):
         if button and button.winfo_exists():
             button.configure(state="normal")
 
+        self._update_release_notes = None
+
         if error_message:
             self._update_download_url = None
             self._update_release_page_url = None
@@ -5583,6 +5624,9 @@ for _ in range(10):
 
         update_available = bool(result.is_newer and result.latest_version)
         self._update_available = update_available
+        if update_available:
+            notes = result.release_notes or ""
+            self._update_release_notes = notes if notes.strip() else None
         if result.latest_version:
             self._latest_version = result.latest_version
         elif not update_available:
@@ -5623,6 +5667,7 @@ for _ in range(10):
                     enable_manual=download_available or release_available,
                     status_icon=status_icon,
                     origin="settings",
+                    changelog=self._format_update_changelog(),
                 )
             elif manual:
                 if download_available:
@@ -5662,6 +5707,7 @@ for _ in range(10):
                     enable_manual=download_available or release_available,
                     status_icon=status_icon,
                     origin="general",
+                    changelog=self._format_update_changelog(),
                 )
         else:
             self._update_download_url = None

@@ -125,6 +125,7 @@ class UpdateResult:
     asset_name: Optional[str] = None
     asset_size: Optional[int] = None
     asset_content_type: Optional[str] = None
+    release_notes: Optional[str] = None
 
 
 def log_launch_event(component: str, event: str, details: Optional[Dict[str, object]] = None) -> None:
@@ -294,6 +295,7 @@ def check_for_update(component: str, current_version: str, timeout: float = 5.0)
     asset_name: Optional[str] = None
     asset_size: Optional[int] = None
     asset_content_type: Optional[str] = None
+    release_notes: Optional[str] = None
 
     asset_name_preference = _clean_str(component_cfg.get("download_asset_name"))
     if not asset_name_preference and isinstance(config.get("download_asset_name"), str):
@@ -319,14 +321,15 @@ def check_for_update(component: str, current_version: str, timeout: float = 5.0)
 
     if not release_api_url and not version_url:
         return UpdateResult(
-            None,
-            False,
-            resolved_download,
-            "Update source not configured.",
-            release_page_url,
-            asset_name,
-            asset_size,
-            asset_content_type,
+            latest_version=None,
+            is_newer=False,
+            download_url=resolved_download,
+            message="Update source not configured.",
+            release_page_url=release_page_url,
+            asset_name=asset_name,
+            asset_size=asset_size,
+            asset_content_type=asset_content_type,
+            release_notes=release_notes,
         )
 
     if release_api_url:
@@ -368,6 +371,10 @@ def check_for_update(component: str, current_version: str, timeout: float = 5.0)
                                 repo = html_repo
                     if _is_official_release_page(html_url, owner, repo):
                         release_page_url = html_url
+                body_text = data.get("body")
+                if isinstance(body_text, str) and body_text.strip():
+                    release_notes = body_text.strip()
+
                 assets = data.get("assets")
                 if isinstance(assets, list):
                     best_score: tuple[int, int, int, int] | None = None
@@ -445,24 +452,26 @@ def check_for_update(component: str, current_version: str, timeout: float = 5.0)
     if not remote_version:
         if failure_message:
             return UpdateResult(
-                None,
-                False,
-                resolved_download,
-                failure_message,
-                release_page_url,
-                asset_name,
-                asset_size,
-                asset_content_type,
+                latest_version=None,
+                is_newer=False,
+                download_url=resolved_download,
+                message=failure_message,
+                release_page_url=release_page_url,
+                asset_name=asset_name,
+                asset_size=asset_size,
+                asset_content_type=asset_content_type,
+                release_notes=release_notes,
             )
         return UpdateResult(
-            None,
-            False,
-            resolved_download,
-            "Update check returned an empty version string.",
-            release_page_url,
-            asset_name,
-            asset_size,
-            asset_content_type,
+            latest_version=None,
+            is_newer=False,
+            download_url=resolved_download,
+            message="Update check returned an empty version string.",
+            release_page_url=release_page_url,
+            asset_name=asset_name,
+            asset_size=asset_size,
+            asset_content_type=asset_content_type,
+            release_notes=release_notes,
         )
 
     try:
@@ -470,14 +479,15 @@ def check_for_update(component: str, current_version: str, timeout: float = 5.0)
         current_tuple = _parse_version(current_version)
     except Exception:
         return UpdateResult(
-            remote_version,
-            False,
-            resolved_download,
-            "Unable to compare version strings.",
-            release_page_url,
-            asset_name,
-            asset_size,
-            asset_content_type,
+            latest_version=remote_version,
+            is_newer=False,
+            download_url=resolved_download,
+            message="Unable to compare version strings.",
+            release_page_url=release_page_url,
+            asset_name=asset_name,
+            asset_size=asset_size,
+            asset_content_type=asset_content_type,
+            release_notes=release_notes,
         )
 
     is_newer = remote_tuple > current_tuple
@@ -496,13 +506,14 @@ def check_for_update(component: str, current_version: str, timeout: float = 5.0)
         asset_size = None
         asset_content_type = "application/zip"
     return UpdateResult(
-        remote_version,
-        is_newer,
-        resolved_download,
-        None,
-        release_page_url,
-        asset_name,
-        asset_size,
-        asset_content_type,
+        latest_version=remote_version,
+        is_newer=is_newer,
+        download_url=resolved_download,
+        message=None,
+        release_page_url=release_page_url,
+        asset_name=asset_name,
+        asset_size=asset_size,
+        asset_content_type=asset_content_type,
+        release_notes=release_notes,
     )
 
