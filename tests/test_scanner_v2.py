@@ -37,7 +37,7 @@ def test_ts4script_is_script(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     path.write_bytes(b"zipdata")
     item = _classify(path, monkeypatch, manifest=None)
     assert item.guess_type == "Script Mod"
-    assert item.tooltips.get("reason") == "script:ts4script"
+    assert item.tooltips.get("reason") == "name:script"
     assert item.target_folder == scanner.DEFAULT_FOLDER_MAP["Script Mod"].rstrip("/") + "/"
 
 
@@ -109,3 +109,28 @@ def test_archives_routed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     assert seven_item.guess_type == "Archive"
     assert rar_item.target_folder == scanner.DEFAULT_FOLDER_MAP["Archive"].rstrip("/") + "/"
     assert seven_item.target_folder == scanner.DEFAULT_FOLDER_MAP["Archive"].rstrip("/") + "/"
+
+
+def test_script_package_pair_linking(tmp_path: Path) -> None:
+    script_path = tmp_path / "UI_Cheats_Extension.ts4script"
+    package_path = tmp_path / "UI_Cheats_Extension.package"
+    script_path.write_bytes(b"zipdata")
+    package_path.write_bytes(b"\x00" * 4096)
+    result = scanner.scan_folder(tmp_path, recurse=False)
+    assert not result.errors
+    types = {item.name: item for item in result.items + result.disabled_items}
+    script_item = types[script_path.name]
+    package_item = types[package_path.name]
+    assert script_item.guess_type == "Script Mod"
+    assert script_item.tooltips.get("reason") == "name:script"
+    assert package_item.guess_type == "Script Mod"
+    assert package_item.tooltips.get("reason") == "Linked to script mod: UI_Cheats_Extension"
+    assert package_item.notes == "link:script-pair"
+
+
+def test_scan_folder_metrics(tmp_path: Path) -> None:
+    (tmp_path / "Hair_Long_Wave.package").write_bytes(b"\x00" * 2048)
+    result = scanner.scan_folder(tmp_path, recurse=False)
+    assert result.metrics is not None
+    assert result.metrics.total_files == 1
+    assert result.metrics.category_counts.get("CAS", 0) == 1
