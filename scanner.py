@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
@@ -28,21 +29,33 @@ CATEGORY_ORDER: List[str] = [
 ]
 CATEGORY_INDEX: Dict[str, int] = {name: index for index, name in enumerate(CATEGORY_ORDER)}
 
+INCLUDED_EXTENSIONS: List[str] = [
+    ".ts4script",
+    ".package",
+    ".zip",
+    ".rar",
+    ".7z",
+    ".txt",
+    ".cfg",
+    ".ini",
+    ".log",
+    ".rtf",
+    ".png",
+    ".jpg",
+    ".jpeg",
+]
+SOFT_ROUTE_NAMES: List[str] = ["__MACOSX", ".DS_Store", "Thumbs.db"]
+DISABLED_SUFFIXES: List[str] = ["off", "disabled", "bak"]
+SOFT_ROUTE_NAME_SET = {name.lower() for name in SOFT_ROUTE_NAMES}
+
 PACKAGE_EXTS = {".package"}
 SCRIPT_EXTS = {".ts4script"}
 ARCHIVE_EXTS = {".zip", ".rar", ".7z"}
 TEXT_FILE_EXTS = {".txt", ".cfg", ".ini", ".log", ".rtf"}
 IMAGE_FILE_EXTS = {".png", ".jpg", ".jpeg"}
-PRESET_EXTS = {".json"}
-SUPPORTED_EXTS = (
-    PACKAGE_EXTS
-    | SCRIPT_EXTS
-    | ARCHIVE_EXTS
-    | TEXT_FILE_EXTS
-    | IMAGE_FILE_EXTS
-    | PRESET_EXTS
-)
-SUPPORTED_DISABLED_SUFFIXES = {".off", ".disabled", ".bak"}
+RESOURCE_EXTS = {".json"}
+SUPPORTED_EXTS = set(INCLUDED_EXTENSIONS) | RESOURCE_EXTS
+SUPPORTED_DISABLED_SUFFIXES = {f".{suffix}" for suffix in DISABLED_SUFFIXES}
 
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 NORMALISE_KEY_RE = re.compile(r"[^a-z0-9]+")
@@ -77,6 +90,41 @@ class ScanResult:
     total_files: int
     errors: List[str] = field(default_factory=list)
     disabled_items: List[FileItem] = field(default_factory=list)
+    metrics: "Optional[ScanMetrics]" = None
+
+
+@dataclass(slots=True)
+class ScanMetrics:
+    total_files: int
+    elapsed_ms: float
+    avg_ms_per_file: float
+    decisive_headers: int
+    category_counts: Dict[str, int]
+
+
+@dataclass(slots=True)
+class ClassificationDecision:
+    category: str = "Unknown"
+    confidence: float = 0.0
+    reason: str = ""
+
+
+@dataclass(slots=True)
+class PipelineEntry:
+    path: Path
+    ext: str
+    disabled: bool
+    original_ext: str
+    size_bytes: int
+    tokens: Tuple[str, ...]
+    path_tokens: Tuple[str, ...]
+    base_name: str
+    normalized_key: str
+    decision: ClassificationDecision = field(default_factory=ClassificationDecision)
+    header_types: Optional[Dict[int, int]] = None
+    soft_routed: bool = False
+    decided_by_header: bool = False
+    link_target: str = ""
 
 
 ProgressCallback = Callable[[int, int, Path, str], None]
@@ -90,15 +138,14 @@ __all__ = [
     "FINGERPRINT_EXTRA_KEY",
     "FileItem",
     "ProgressCallback",
+    "ScanMetrics",
     "ScanResult",
     "SUPPORTED_EXTS",
     "TEXT_FILE_EXTS",
     "bundle_scripts_and_packages",
     "classify_by_header",
     "classify_from_types",
-    "classify_adult",
     "dbpf_scan_types",
-    "fallback_by_name",
     "get_default_mods_path",
     "guess_type_for_name",
     "human_mb",
@@ -107,6 +154,7 @@ __all__ = [
     "pretty_display_name",
     "read_package_manifest",
     "route_category",
+    "run_classification_pipeline",
     "scan_file",
     "scan_folder",
 ]
@@ -293,81 +341,6 @@ def classify_by_header(types: Dict[int, int]) -> Tuple[str, float, str]:
     return "", 0.0, ""
 
 
-NAME_WEIGHTS = {
-    "CAS": 4,
-    "BuildBuy": 4,
-    "Pose or Animation": 3,
-    "Tuning": 3,
-}
-REASON_PREFIX = {
-    "CAS": "name:cas",
-    "BuildBuy": "name:buildbuy",
-    "Pose or Animation": "name:pose",
-    "Tuning": "name:tuning",
-}
-NAME_TIE_BREAK = [
-    "Script Mod",
-    "CAS",
-    "BuildBuy",
-    "Pose or Animation",
-    "Tuning",
-    "Resources",
-    "Other",
-    "Unknown",
-    "Disabled",
-]
-
-
-def fallback_by_name(tokens: Iterable[str], rules: Dict[str, object]) -> Tuple[str, float, str]:
-    cas_tokens = {token.lower() for token in rules.get("cas_tokens", [])}
-    build_tokens = {token.lower() for token in rules.get("buildbuy_tokens", [])}
-    pose_tokens = {token.lower() for token in rules.get("pose_tokens", [])}
-    tuning_tokens = {token.lower() for token in rules.get("tuning_tokens", [])}
-    scores = {
-        "CAS": 0,
-        "BuildBuy": 0,
-        "Pose or Animation": 0,
-        "Tuning": 0,
-    }
-    for token in tokens:
-        if token in cas_tokens:
-            scores["CAS"] += NAME_WEIGHTS["CAS"]
-        if token in build_tokens:
-            scores["BuildBuy"] += NAME_WEIGHTS["BuildBuy"]
-        if token in pose_tokens:
-            scores["Pose or Animation"] += NAME_WEIGHTS["Pose or Animation"]
-        if token in tuning_tokens:
-            scores["Tuning"] += NAME_WEIGHTS["Tuning"]
-    best_score = max(scores.values())
-    if best_score <= 0:
-        return "Unknown", 0.0, ""
-    candidates = [category for category, value in scores.items() if value == best_score]
-    best_category = next((category for category in NAME_TIE_BREAK if category in candidates), candidates[0])
-    confidence = max(0.70, min(0.85, best_score / 12.0))
-    reason = REASON_PREFIX.get(best_category, "")
-    return best_category, confidence, reason
-
-
-def classify_adult(
-    tokens: Iterable[str],
-    path_tokens: Iterable[str],
-    base_category: str,
-    rules: Dict[str, object],
-) -> Tuple[str, str]:
-    name_tokens = [token.lower() for token in tokens]
-    context_tokens = [token.lower() for token in path_tokens]
-    combined = set(name_tokens) | set(context_tokens)
-    adult_strong = [token.lower() for token in rules.get("adult_strong", [])]
-    for token in adult_strong:
-        if token and token in combined:
-            return "Adult", f"adult:strong:{token}"
-    adult_soft_authors = {token.lower() for token in rules.get("adult_soft_authors", [])}
-    path_token_set = set(context_tokens)
-    if "adult" in path_token_set and adult_soft_authors & path_token_set:
-        return "Adult", "adult:soft+folder"
-    return base_category, ""
-
-
 def route_category(category: str, routing_map: Dict[str, str]) -> str:
     target = routing_map.get(category)
     if not target:
@@ -392,10 +365,123 @@ def _is_image(ext: str) -> bool:
 
 
 def _is_resource_ext(ext: str) -> bool:
-    return ext in PRESET_EXTS
+    return ext in RESOURCE_EXTS
 
 
-CLUTTER_NAMES = {".ds_store", "thumbs.db"}
+NAME_KEYWORD_BUCKETS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    (
+        "Script Mod",
+        (
+            "script",
+            "scripts",
+            "scriptmod",
+            "scriptmods",
+            "mccc",
+            "mccommand",
+            "commandcenter",
+            "xml",
+            "injector",
+            "xmlinjector",
+            "uicheats",
+            "cheats",
+        ),
+    ),
+    (
+        "CAS",
+        (
+            "hair",
+            "skin",
+            "makeup",
+            "tattoo",
+            "preset",
+            "slider",
+            "clothes",
+            "nails",
+            "lash",
+            "brow",
+            "outfit",
+            "dress",
+            "shoes",
+            "top",
+            "bottom",
+        ),
+    ),
+    (
+        "BuildBuy",
+        (
+            "sofa",
+            "couch",
+            "chair",
+            "desk",
+            "wardrobe",
+            "lamp",
+            "bed",
+            "tv",
+            "sink",
+            "shower",
+            "window",
+            "door",
+            "rug",
+            "table",
+            "counter",
+            "cabinet",
+            "plant",
+            "painting",
+            "light",
+        ),
+    ),
+    (
+        "Pose or Animation",
+        (
+            "pose",
+            "poses",
+            "animation",
+            "animations",
+            "a2o",
+            "a2a",
+            "clip",
+        ),
+    ),
+    (
+        "Tuning",
+        (
+            "tuning",
+            "trait",
+            "loot",
+            "autonomy",
+            "interaction",
+        ),
+    ),
+)
+
+NAME_PRIORITY: Tuple[str, ...] = (
+    "Script Mod",
+    "CAS",
+    "BuildBuy",
+    "Pose or Animation",
+    "Tuning",
+)
+
+NAME_REASON_MAP = {
+    "Script Mod": "name:script",
+    "CAS": "name:cas",
+    "BuildBuy": "name:buildbuy",
+    "Pose or Animation": "name:pose",
+    "Tuning": "name:tuning",
+}
+
+SCRIPT_NORMALIZED_IDS = {
+    "mc-command-center",
+    "mc_command_center",
+    "mccc",
+    "xmlinjector",
+    "xml-injector",
+    "ui-cheats-extension",
+    "ui-cheats",
+    "uicheats",
+}
+
+ADULT_STRONG_KEYWORDS = {"wickedwhims", "deviousdesires", "basemental", "turbodriver", "dd"}
 
 
 def scan_file(
@@ -404,80 +490,222 @@ def scan_file(
     routing: Dict[str, str],
     budgets: Dict[str, object],
 ) -> FileItem:
-    ext, disabled = _effective_extension(path)
-    original_ext = "".join(suffix.lower() for suffix in path.suffixes)
-    size_bytes = path.stat().st_size if path.exists() else 0
-    size_mb = human_mb(size_bytes)
-    tokens = _tokenise(path.name)
-    path_tokens = _tokenise_path(path.parent)
+    items, _metrics = run_classification_pipeline([path], routing, budgets)
+    return items[0]
 
-    category = "Unknown"
-    confidence = 0.0
-    reason = ""
 
-    if disabled:
-        category = "Disabled"
-        confidence = 1.0
-        reason = "disabled:ext"
-    elif ext in SCRIPT_EXTS:
-        category = "Script Mod"
-        confidence = 1.0
-        reason = "script:ts4script"
-    elif ext in ARCHIVE_EXTS:
-        category = "Archive"
-        confidence = 0.6
-        reason = "archive"
-    elif ext in PACKAGE_EXTS:
-        if size_bytes and size_bytes < 1024:
-            category = "Other"
-            confidence = 1.0
-            reason = "size:tiny"
+def run_classification_pipeline(
+    paths: Sequence[Path], routing: Dict[str, str], budgets: Dict[str, object]
+) -> Tuple[List[FileItem], ScanMetrics]:
+    start = time.perf_counter()
+    entries = _collect_pipeline_entries(paths)
+    pair_map = _build_pair_map(entries)
+    _apply_name_classification(entries)
+    _apply_pair_enforcement(entries, pair_map)
+    _apply_adult_gating(entries)
+    header_budget = min(int(budgets.get(".package", 131072)), 131072)
+    decisive_headers = _apply_fallback_peek(entries, header_budget)
+    items = [_finalize_entry(entry, routing) for entry in entries]
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    metrics = _build_metrics(entries, elapsed_ms, decisive_headers)
+    return items, metrics
+
+
+def _collect_pipeline_entries(paths: Sequence[Path]) -> List[PipelineEntry]:
+    entries: List[PipelineEntry] = []
+    for path in paths:
+        ext, disabled = _effective_extension(path)
+        original_ext = "".join(suffix.lower() for suffix in path.suffixes)
+        try:
+            size_bytes = path.stat().st_size
+        except OSError:
+            size_bytes = 0
+        base_name = _base_name_for_entry(path, ext, disabled)
+        tokens = _tokenise(base_name)
+        path_tokens = _tokenise_path(path.parent)
+        normalized_key = normalize_key(base_name) or normalize_key(path.stem)
+        soft_routed = _is_soft_routed_entry(path)
+        entries.append(
+            PipelineEntry(
+                path=path,
+                ext=ext,
+                disabled=disabled,
+                original_ext=original_ext,
+                size_bytes=size_bytes,
+                tokens=tokens,
+                path_tokens=path_tokens,
+                base_name=base_name,
+                normalized_key=normalized_key,
+                soft_routed=soft_routed,
+            )
+        )
+    return entries
+
+
+def _base_name_for_entry(path: Path, ext: str, disabled: bool) -> str:
+    name = path.name
+    suffixes = list(path.suffixes)
+    trimmed = name
+    while suffixes:
+        suffix = suffixes.pop()
+        lowered = suffix.lower()
+        if lowered == ext or lowered in SUPPORTED_DISABLED_SUFFIXES:
+            trimmed = trimmed[: -len(suffix)]
+            continue
+        break
+    return trimmed or path.stem
+
+
+def _is_soft_routed_entry(path: Path) -> bool:
+    lowered_name = path.name.lower()
+    if lowered_name in SOFT_ROUTE_NAME_SET:
+        return True
+    return any(part.lower() == "__macosx" for part in path.parts)
+
+
+def _build_pair_map(entries: Sequence[PipelineEntry]) -> Dict[str, Dict[str, List[PipelineEntry]]]:
+    pair_map: Dict[str, Dict[str, List[PipelineEntry]]] = {}
+    for entry in entries:
+        if entry.disabled:
+            continue
+        if entry.ext not in SCRIPT_EXTS and entry.ext not in PACKAGE_EXTS:
+            continue
+        key = entry.normalized_key
+        info = pair_map.setdefault(key, {"scripts": [], "packages": []})
+        if entry.ext in SCRIPT_EXTS:
+            info["scripts"].append(entry)
         else:
-            budget = int(budgets.get(".package", 131072))
-            types = read_package_manifest(path, budget)
-            header_category, header_confidence, header_reason = classify_by_header(types)
-            if header_category:
-                category = header_category
-                confidence = header_confidence
-                reason = header_reason
-            else:
-                if header_reason:
-                    reason = header_reason
-                fallback_category, fallback_confidence, fallback_reason = fallback_by_name(tokens + path_tokens, rules)
-                category = fallback_category
-                confidence = max(confidence, fallback_confidence)
-                if fallback_reason and not reason:
-                    reason = fallback_reason
-                if not category:
-                    category = "Unknown"
-            if not types and not reason:
-                reason = "header:fail"
-    elif _is_text_sidecar(ext) or _is_image(ext) or _is_resource_ext(ext):
-        category = "Resources"
-        confidence = 0.6
-        reason = "resource"
-    elif ext:
-        category = "Other"
-        confidence = 0.5
-        reason = "other"
+            info["packages"].append(entry)
+    return pair_map
 
-    base_category = category
-    if category != "Disabled":
-        adult_category, adult_reason = classify_adult(tokens, path_tokens, category, rules)
-        if adult_reason:
-            category = adult_category
-            reason = adult_reason
+
+def _apply_name_classification(entries: Sequence[PipelineEntry]) -> None:
+    for entry in entries:
+        entry.decision = _classify_entry_by_name(entry)
+
+
+def _classify_entry_by_name(entry: PipelineEntry) -> ClassificationDecision:
+    if entry.disabled:
+        return ClassificationDecision("Disabled", 1.0, "disabled:ext")
+    if entry.soft_routed:
+        return ClassificationDecision("Resources", 0.6, "resource")
+    if entry.ext in SCRIPT_EXTS:
+        return ClassificationDecision("Script Mod", 1.0, NAME_REASON_MAP["Script Mod"])
+    if entry.ext in ARCHIVE_EXTS:
+        return ClassificationDecision("Archive", 0.6, "archive")
+    if entry.ext in TEXT_FILE_EXTS or entry.ext in IMAGE_FILE_EXTS or entry.ext in RESOURCE_EXTS:
+        return ClassificationDecision("Resources", 0.6, "resource")
+    if entry.ext and entry.ext not in SUPPORTED_EXTS:
+        return ClassificationDecision("Other", 0.5, "other")
+    if entry.ext not in PACKAGE_EXTS:
+        return ClassificationDecision("Unknown", 0.0, "")
+
+    tokens = tuple(token.lower() for token in entry.tokens + entry.path_tokens)
+    token_set = set(tokens)
+
+    scores: Dict[str, int] = {}
+    for category, keywords in NAME_KEYWORD_BUCKETS:
+        hits = sum(1 for keyword in keywords if keyword in token_set)
+        scores[category] = hits
+
+    best_category = "Unknown"
+    best_score = 0
+    for category in NAME_PRIORITY:
+        score = scores.get(category, 0)
+        if score > best_score:
+            best_category = category
+            best_score = score
+
+    script_hint = entry.normalized_key in SCRIPT_NORMALIZED_IDS or scores.get("Script Mod", 0) > 0
+    if script_hint:
+        best_category = "Script Mod"
+        best_score = max(best_score, 1)
+
+    if best_score <= 0:
+        return ClassificationDecision("Unknown", 0.0, "")
+
+    confidence = 0.7 + min(0.15, 0.05 * (best_score - 1))
+    if best_category == "Script Mod":
+        confidence = 0.95 if entry.normalized_key in SCRIPT_NORMALIZED_IDS else max(confidence, 0.85)
+    reason = NAME_REASON_MAP.get(best_category, "")
+    return ClassificationDecision(best_category, confidence, reason)
+
+
+def _apply_pair_enforcement(
+    entries: Sequence[PipelineEntry],
+    pair_map: Dict[str, Dict[str, List[PipelineEntry]]],
+) -> None:
+    for key, info in pair_map.items():
+        scripts = info.get("scripts", [])
+        packages = info.get("packages", [])
+        if scripts:
+            for script_entry in scripts:
+                script_entry.decision = ClassificationDecision(
+                    "Script Mod", 1.0, NAME_REASON_MAP["Script Mod"]
+                )
+            for package_entry in packages:
+                package_entry.decision = ClassificationDecision(
+                    "Script Mod", 1.0, "link:script-pair"
+                )
+                package_entry.link_target = package_entry.base_name or script_entry.base_name
+        elif packages and key in SCRIPT_NORMALIZED_IDS:
+            for package_entry in packages:
+                package_entry.decision = ClassificationDecision(
+                    "Script Mod", 0.95, NAME_REASON_MAP["Script Mod"]
+                )
+
+
+def _apply_adult_gating(entries: Sequence[PipelineEntry]) -> None:
+    for entry in entries:
+        decision = entry.decision
+        if decision.category in {"Disabled", "Script Mod"}:
+            continue
+        tokens = {token.lower() for token in entry.tokens + entry.path_tokens}
+        matched = next((token for token in ADULT_STRONG_KEYWORDS if token in tokens), None)
+        if matched:
+            entry.decision = ClassificationDecision("Adult", 1.0, f"adult:strong:{matched}")
+
+
+def _apply_fallback_peek(entries: Sequence[PipelineEntry], budget: int) -> int:
+    decisive = 0
+    for entry in entries:
+        if entry.ext not in PACKAGE_EXTS:
+            continue
+        if entry.decision.category not in {"Unknown", "Mixed"}:
+            continue
+        types = read_package_manifest(entry.path, budget)
+        entry.header_types = types
+        category, confidence, reason = classify_by_header(types)
+        if category:
+            entry.decision = ClassificationDecision(category, confidence, reason)
+            entry.decided_by_header = True
+            if confidence >= 0.9 and reason.startswith("header:"):
+                decisive += 1
+        elif reason:
+            entry.decision.reason = reason
+        elif not types:
+            entry.decision.reason = "header:fail"
+    return decisive
+
+
+def _finalize_entry(entry: PipelineEntry, routing: Dict[str, str]) -> FileItem:
+    decision = entry.decision
+    category = decision.category or "Unknown"
+    confidence = decision.confidence
+    reason = decision.reason
+    if not reason and category == "Unknown" and entry.header_types is None:
+        reason = ""
     target_folder = route_category(category, routing)
     include = category != "Disabled"
     notes = reason
     tooltips = _build_reason(reason)
-    extras: Dict[str, str] = {}
-
-    return FileItem(
-        path=path,
-        name=path.name,
-        ext=ext,
-        size_mb=size_mb,
+    if reason == "link:script-pair":
+        tooltips["reason"] = f"Linked to script mod: {entry.link_target or entry.base_name}"
+    item = FileItem(
+        path=entry.path,
+        name=entry.path.name,
+        ext=entry.ext,
+        size_mb=human_mb(entry.size_bytes),
         relpath="",
         guess_type=category,
         confidence=confidence,
@@ -488,10 +716,29 @@ def scan_file(
         meta_tags="",
         dependency_status="",
         dependency_detail="",
-        extras=extras,
+        extras={},
         tooltips=tooltips,
         disabled=category == "Disabled",
-        original_ext=original_ext,
+        original_ext=entry.original_ext,
+    )
+    return item
+
+
+def _build_metrics(
+    entries: Sequence[PipelineEntry], elapsed_ms: float, decisive_headers: int
+) -> ScanMetrics:
+    total = len(entries)
+    avg_ms = elapsed_ms / total if total else 0.0
+    counts: Dict[str, int] = {}
+    for entry in entries:
+        category = entry.decision.category or "Unknown"
+        counts[category] = counts.get(category, 0) + 1
+    return ScanMetrics(
+        total_files=total,
+        elapsed_ms=elapsed_ms,
+        avg_ms_per_file=avg_ms,
+        decisive_headers=decisive_headers,
+        category_counts=counts,
     )
 
 
@@ -573,10 +820,7 @@ def _fingerprint_file(path: Path) -> str:
 
 
 def _should_ignore(path: Path) -> bool:
-    name = path.name.lower()
-    if name in CLUTTER_NAMES:
-        return True
-    return "__macosx" in (part.lower() for part in path.parts)
+    return False
 
 
 def scan_folder(
@@ -664,27 +908,31 @@ def scan_folder(
     items: List[FileItem] = []
     disabled_items: List[FileItem] = []
     errors: List[str] = []
+    files = sorted(files)
     total = len(files)
-    for index, path in enumerate(sorted(files)):
-        try:
-            item = scan_file(path, rules, routing, budgets)
-            item.relpath = str(path.relative_to(root_path)).replace(os.sep, "/")
-            if not include_adult and item.guess_type == "Adult":
-                continue
-            fingerprint = _fingerprint_file(path)
-            if fingerprint:
-                item.extras[FINGERPRINT_EXTRA_KEY] = fingerprint
-            if item.disabled:
-                item.include = False
-                disabled_items.append(item)
-            else:
-                items.append(item)
+    pipeline_items: List[FileItem] = []
+    metrics: Optional[ScanMetrics] = None
+    if files:
+        pipeline_items, metrics = run_classification_pipeline(files, routing, budgets)
+    else:
+        metrics = ScanMetrics(0, 0.0, 0.0, 0, {})
+
+    for index, (path, item) in enumerate(zip(files, pipeline_items)):
+        item.relpath = str(path.relative_to(root_path)).replace(os.sep, "/")
+        if not include_adult and item.guess_type == "Adult":
             if progress_cb:
                 progress_cb(index + 1, total, path, "scanned")
-        except Exception as exc:
-            errors.append(f"scan failed for {path}: {exc}")
-            if progress_cb:
-                progress_cb(index + 1, total, path, "error")
+            continue
+        fingerprint = _fingerprint_file(path)
+        if fingerprint:
+            item.extras[FINGERPRINT_EXTRA_KEY] = fingerprint
+        if item.disabled:
+            item.include = False
+            disabled_items.append(item)
+        else:
+            items.append(item)
+        if progress_cb:
+            progress_cb(index + 1, total, path, "scanned")
 
     fingerprint_groups: Dict[str, List[FileItem]] = {}
     for item in items:
@@ -712,14 +960,33 @@ def scan_folder(
     )
     disabled_items.sort(key=lambda item: (_natural_key(item.relpath), _natural_key(item.name)))
 
-    return ScanResult(items=items, total_files=total, errors=errors, disabled_items=disabled_items)
+    return ScanResult(
+        items=items,
+        total_files=total,
+        errors=errors,
+        disabled_items=disabled_items,
+        metrics=metrics,
+    )
 
 
 def guess_type_for_name(name: str, ext: str) -> Tuple[str, float, str]:
-    rules = load_rules()
-    tokens = _tokenise(name)
-    category, confidence, reason = fallback_by_name(tokens, rules)
-    return category, confidence, reason
+    norm_ext, disabled = normalize_extension(ext)
+    path_obj = Path(name)
+    base_name = _base_name_for_entry(path_obj, norm_ext, disabled)
+    entry = PipelineEntry(
+        path=path_obj,
+        ext=norm_ext,
+        disabled=disabled,
+        original_ext=norm_ext,
+        size_bytes=0,
+        tokens=_tokenise(base_name),
+        path_tokens=(),
+        base_name=base_name,
+        normalized_key=normalize_key(base_name),
+        soft_routed=_is_soft_routed_entry(path_obj),
+    )
+    decision = _classify_entry_by_name(entry)
+    return decision.category, decision.confidence, decision.reason
 
 
 def classify_from_types(
@@ -728,13 +995,26 @@ def classify_from_types(
     adult_hint: bool = False,
 ) -> Tuple[str, float, str]:
     category, confidence, reason = classify_by_header(types)
-    if not category:
-        rules = load_rules()
-        tokens = _tokenise(filename)
-        category, confidence, name_reason = fallback_by_name(tokens, rules)
-        if name_reason:
-            reason = name_reason
-    return category or "Unknown", confidence, reason
+    if category:
+        return category, confidence, reason
+    path_obj = Path(filename)
+    norm_ext, disabled = normalize_extension(path_obj.suffix)
+    base_name = _base_name_for_entry(path_obj, norm_ext, disabled)
+    entry = PipelineEntry(
+        path=path_obj,
+        ext=norm_ext,
+        disabled=disabled,
+        original_ext=norm_ext,
+        size_bytes=0,
+        tokens=_tokenise(base_name),
+        path_tokens=(),
+        base_name=base_name,
+        normalized_key=normalize_key(base_name),
+        soft_routed=_is_soft_routed_entry(path_obj),
+    )
+    decision = _classify_entry_by_name(entry)
+    reason = decision.reason or reason
+    return decision.category or "Unknown", decision.confidence or confidence, reason
 
 
 TYPE_IDS: Dict[int, str] = {
