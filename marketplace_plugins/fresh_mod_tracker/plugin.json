@@ -1,0 +1,6 @@
+{
+  "name": "Fresh Mod Tracker",
+  "entry": "plugin.py",
+  "version": "1.2.0",
+  "description": "Counts recently updated mods so this week's downloads stand out in the log."
+}

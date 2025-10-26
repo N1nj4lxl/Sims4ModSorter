@@ -1,0 +1,6 @@
+{
+  "name": "Insight Logger",
+  "entry": "plugin.py",
+  "version": "1.0.0",
+  "description": "Summarises each scan in the log so you can see which categories dominated the results."
+}
