@@ -122,6 +122,7 @@ def _scrim_color(bg_hex: str, *, strength: float = 0.45) -> str:
 # ---------------------------------------------------------------------------
 
 USER_PLUGINS_DIR: Path = Path(__file__).resolve().with_name("user_plugins")
+MARKETPLACE_BUNDLE_DIR: Path = Path(__file__).resolve().with_name("marketplace_plugins")
 VERSION_FILE: Path = Path(__file__).resolve().with_name("VERSION")
 
 
@@ -1583,6 +1584,7 @@ class Sims4ModSorterApp(tk.Tk):
                                 "description": str(entry.get("description") or "").strip(),
                                 "version": str(entry.get("version") or "").strip(),
                                 "folder": str(entry.get("folder") or plugin_id),
+                                "bundle": str(entry.get("bundle") or entry.get("package") or plugin_id),
                                 "author": str(entry.get("author") or "Unknown"),
                                 "tags": [str(tag).strip() for tag in entry.get("tags", []) if str(tag).strip()],
                                 "rating": float(entry.get("rating")) if isinstance(entry.get("rating"), (int, float)) else 0.0,
@@ -2413,67 +2415,70 @@ class Sims4ModSorterApp(tk.Tk):
 
             buttons_frame = ttk.Frame(detail, style="Overlay.Body.TFrame")
             buttons_frame.grid(row=6, column=0, sticky="w", pady=(16, 0))
-            install_btn = ttk.Button(buttons_frame, text="Open download")
+            install_btn = ttk.Button(buttons_frame, text="Install")
             install_btn.grid(row=0, column=0, padx=(0, 8))
-            homepage_btn = ttk.Button(buttons_frame, text="Homepage")
-            homepage_btn.grid(row=0, column=1, padx=(0, 8))
+            check_btn = ttk.Button(buttons_frame, text="Check updates")
+            check_btn.grid(row=0, column=1, padx=(0, 8))
             folder_btn = ttk.Button(buttons_frame, text="Open folder")
             folder_btn.grid(row=0, column=2, padx=(0, 8))
             rate_btn = ttk.Button(buttons_frame, text="Save rating")
             rate_btn.grid(row=0, column=3)
 
-            catalog_by_id = {str(entry.get("id")): entry for entry in self.plugin_catalog}
-            catalog_by_folder = {str(entry.get("folder")): entry for entry in self.plugin_catalog}
-            installed_map: Dict[str, PluginStatus] = {}
-            if self.plugin_manager:
-                for status in self.plugin_manager.get_statuses():
-                    installed_map[status.folder] = status
-
             rows: List[Dict[str, object]] = []
-            for entry_id, entry in catalog_by_id.items():
-                folder = str(entry.get("folder"))
-                installed = installed_map.get(folder)
-                installed_version = installed.version if installed else ""
-                catalog_version = str(entry.get("version") or "")
-                if installed and catalog_version:
-                    comparison = _compare_versions(installed_version or "0", catalog_version)
-                    if comparison < 0:
-                        status_text = "Update available"
-                    elif comparison > 0:
-                        status_text = "Ahead of catalog"
-                    else:
-                        status_text = "Up to date"
-                elif installed:
-                    status_text = installed.status.title()
-                else:
-                    status_text = "Not installed"
-                rating = max(float(entry.get("rating", 0.0)), self._user_rating_for(entry_id))
-                rows.append(
-                    {
-                        "id": entry_id,
-                        "name": entry.get("name"),
-                        "status": status_text,
-                        "rating": rating,
-                        "catalog": entry,
-                        "installed": installed,
-                    }
-                )
 
-            for folder, status in installed_map.items():
-                if folder not in catalog_by_folder:
-                    entry_id = f"installed::{folder}"
+            def rebuild_rows() -> None:
+                catalog_by_id = {str(entry.get("id")): entry for entry in self.plugin_catalog}
+                catalog_by_folder = {str(entry.get("folder")): entry for entry in self.plugin_catalog}
+                installed_map: Dict[str, PluginStatus] = {}
+                if self.plugin_manager:
+                    for status in self.plugin_manager.get_statuses():
+                        installed_map[status.folder] = status
+                rows.clear()
+                for entry_id, entry in catalog_by_id.items():
+                    folder = str(entry.get("folder"))
+                    installed = installed_map.get(folder)
+                    installed_version = installed.version if installed else ""
+                    catalog_version = str(entry.get("version") or "")
+                    if installed and catalog_version:
+                        comparison = _compare_versions(installed_version or "0", catalog_version)
+                        if comparison < 0:
+                            status_text = "Update available"
+                        elif comparison > 0:
+                            status_text = "Ahead of catalog"
+                        else:
+                            status_text = "Up to date"
+                    elif installed:
+                        status_text = installed.status.title()
+                    else:
+                        status_text = "Not installed"
+                    rating = max(float(entry.get("rating", 0.0)), self._user_rating_for(entry_id))
                     rows.append(
                         {
                             "id": entry_id,
-                            "name": status.name,
-                            "status": status.status.title(),
-                            "rating": 0.0,
-                            "catalog": None,
-                            "installed": status,
+                            "name": entry.get("name"),
+                            "status": status_text,
+                            "rating": rating,
+                            "catalog": entry,
+                            "installed": installed,
                         }
                     )
+                for folder, status in installed_map.items():
+                    if folder not in catalog_by_folder:
+                        entry_id = f"installed::{folder}"
+                        rows.append(
+                            {
+                                "id": entry_id,
+                                "name": status.name,
+                                "status": status.status.title(),
+                                "rating": 0.0,
+                                "catalog": None,
+                                "installed": status,
+                            }
+                        )
 
-            def refresh_tree(select_id: Optional[str] = None) -> None:
+            def refresh_tree(select_id: Optional[str] = None, *, rebuild: bool = False) -> None:
+                if rebuild:
+                    rebuild_rows()
                 tree.delete(*tree.get_children())
                 for record in rows:
                     tree.insert(
@@ -2499,7 +2504,7 @@ class Sims4ModSorterApp(tk.Tk):
                     version_var.set("")
                     user_rating_var.set("Your rating: –")
                     rating_var.set(0.0)
-                    for widget in (install_btn, homepage_btn, folder_btn, rate_btn):
+                    for widget in (install_btn, check_btn, folder_btn, rate_btn):
                         widget.configure(state="disabled")
                     return
                 catalog = record.get("catalog")
@@ -2527,17 +2532,46 @@ class Sims4ModSorterApp(tk.Tk):
                     user_rating_var.set("Your rating: –")
                 rating_var.set(user_rating or float(record.get("rating", 0.0)))
 
-                download_url = str(catalog.get("download_url") if isinstance(catalog, dict) else "")
-                homepage_url = str(catalog.get("homepage") if isinstance(catalog, dict) else "")
+                bundle_name = str(catalog.get("bundle") if isinstance(catalog, dict) else "")
+                bundle_path = self._resolve_marketplace_bundle(bundle_name) if bundle_name else None
                 folder_name = str(getattr(installed, "folder", ""))
 
+                installed_raw_version = getattr(installed, "version", "") or ""
+                catalog_version_value = str(catalog.get("version") if isinstance(catalog, dict) else "")
+                comparison = 0
+                if installed_raw_version and catalog_version_value:
+                    comparison = _compare_versions(installed_raw_version or "0", catalog_version_value)
+
+                if installed and comparison < 0:
+                    install_label = "Update"
+                elif installed:
+                    install_label = "Reinstall"
+                else:
+                    install_label = "Install"
+
+                def perform_install() -> None:
+                    if not isinstance(catalog, dict):
+                        return
+                    if self._install_marketplace_plugin(catalog):
+                        refresh_tree(entry_id, rebuild=True)
+                        update_detail(entry_id)
+
+                def perform_check() -> None:
+                    if not isinstance(catalog, dict):
+                        self._show_info_overlay("Plugin Updates", "This plugin is not in the marketplace catalog.")
+                        return
+                    if self._check_marketplace_plugin_update(catalog, installed):
+                        refresh_tree(entry_id, rebuild=True)
+                        update_detail(entry_id)
+
                 install_btn.configure(
-                    state="normal" if download_url else "disabled",
-                    command=(lambda url=download_url: webbrowser.open(url) if url else None),
+                    text=install_label,
+                    state="normal" if bundle_path else "disabled",
+                    command=perform_install,
                 )
-                homepage_btn.configure(
-                    state="normal" if homepage_url else "disabled",
-                    command=(lambda url=homepage_url: webbrowser.open(url) if url else None),
+                check_btn.configure(
+                    state="normal" if (bundle_path or installed) else "disabled",
+                    command=perform_check,
                 )
                 folder_btn.configure(
                     state="normal" if folder_name else "disabled",
@@ -2571,10 +2605,151 @@ class Sims4ModSorterApp(tk.Tk):
                 side="right"
             )
 
-            refresh_tree()
+            refresh_tree(rebuild=True)
             update_detail(self._plugin_marketplace_selection)
 
         self._show_overlay_panel("plugin_marketplace", "Plugin Marketplace", builder, width=920, height=580)
+
+    def _resolve_marketplace_bundle(self, bundle_name: str) -> Optional[Path]:
+        if not bundle_name:
+            return None
+        root = MARKETPLACE_BUNDLE_DIR.resolve()
+        normalized = Path(bundle_name.replace("\\", "/"))
+        safe_parts = [part for part in normalized.parts if part not in {"", ".", ".."}]
+        if not safe_parts:
+            safe_parts = [normalized.name] if normalized.name else []
+        if not safe_parts:
+            return None
+        candidate = (root / Path(*safe_parts)).resolve()
+        try:
+            candidate.relative_to(root)
+        except Exception:
+            return None
+        if candidate.exists():
+            return candidate
+        return None
+
+    def _marketplace_bundle_manifest(self, bundle_path: Path) -> Dict[str, object]:
+        manifest_path = bundle_path / "plugin.json"
+        if not manifest_path.exists():
+            return {}
+        try:
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        if isinstance(data, dict):
+            return data
+        return {}
+
+    def _marketplace_bundle_version(self, bundle_path: Path) -> str:
+        manifest = self._marketplace_bundle_manifest(bundle_path)
+        version = manifest.get("version")
+        if isinstance(version, str) and version.strip():
+            return version.strip()
+        return ""
+
+    def _reload_plugin_manager(self) -> None:
+        manager = load_user_plugins()
+        self.plugin_manager = manager
+        if manager:
+            manager.attach_app(self)
+            self._plugin_columns = manager.get_columns()
+            self._plugin_toolbar_buttons = manager.get_toolbar_buttons()
+        else:
+            self._plugin_columns = []
+            self._plugin_toolbar_buttons = []
+        overlay = getattr(self, "_mod_status_overlay", None)
+        if overlay and overlay.winfo_exists():
+            self._populate_mod_status_popup()
+
+    def _install_marketplace_plugin(
+        self, catalog_entry: Dict[str, object], *, silent: bool = False
+    ) -> bool:
+        bundle_name = str(catalog_entry.get("bundle") or catalog_entry.get("folder") or catalog_entry.get("id") or "")
+        bundle_path = self._resolve_marketplace_bundle(bundle_name)
+        if not bundle_path:
+            self._show_error_overlay(
+                "Install Plugin",
+                f"The bundle for '{catalog_entry.get('name', bundle_name) or 'plugin'}' is not available.",
+            )
+            return False
+        folder_name = str(catalog_entry.get("folder") or catalog_entry.get("id") or "").strip()
+        if not folder_name:
+            self._show_error_overlay("Install Plugin", "The plugin does not declare a valid folder name.")
+            return False
+        target_dir = USER_PLUGINS_DIR / folder_name
+        try:
+            if target_dir.exists():
+                shutil.rmtree(target_dir)
+            if bundle_path.is_dir():
+                shutil.copytree(bundle_path, target_dir)
+            elif bundle_path.is_file() and bundle_path.suffix.lower() == ".zip":
+                with zipfile.ZipFile(bundle_path, "r") as archive:
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    archive.extractall(target_dir)
+            else:
+                target_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(bundle_path, target_dir / bundle_path.name)
+        except Exception as exc:
+            self._show_error_overlay(
+                "Install Plugin",
+                f"Unable to install '{catalog_entry.get('name', folder_name)}': {exc}",
+            )
+            return False
+        self._reload_plugin_manager()
+        if not silent:
+            version = str(catalog_entry.get("version") or self._marketplace_bundle_version(bundle_path) or "")
+            version_text = f" v{version}" if version else ""
+            self._show_info_overlay(
+                "Plugin Installed",
+                f"'{catalog_entry.get('name', folder_name)}'{version_text} is ready to use.",
+            )
+        return True
+
+    def _check_marketplace_plugin_update(
+        self, catalog_entry: Dict[str, object], installed: Optional[PluginStatus]
+    ) -> bool:
+        name = str(catalog_entry.get("name") or catalog_entry.get("id") or "Plugin")
+        bundle_name = str(catalog_entry.get("bundle") or catalog_entry.get("folder") or catalog_entry.get("id") or "")
+        bundle_path = self._resolve_marketplace_bundle(bundle_name)
+        if not bundle_path or not bundle_path.exists():
+            self._show_warning_overlay(
+                "Plugin Updates",
+                f"Bundle for '{name}' is not available.",
+            )
+            return False
+        bundle_version = str(catalog_entry.get("version") or self._marketplace_bundle_version(bundle_path) or "")
+        installed_version = installed.version if installed and installed.version else ""
+        if not installed:
+            self._show_info_overlay("Plugin Updates", f"'{name}' is not installed yet.")
+            return False
+        if not bundle_version:
+            self._show_info_overlay(
+                "Plugin Updates",
+                f"'{name}' bundle does not report a version. Reinstall if you need the latest files.",
+            )
+            return False
+        comparison = _compare_versions(installed_version or "0", bundle_version)
+        if comparison < 0:
+            if self._ask_yes_no_overlay(
+                "Update Plugin",
+                f"Update '{name}' to version {bundle_version}?\nCurrent version: {installed_version or 'Unknown'}.",
+            ):
+                if self._install_marketplace_plugin(catalog_entry, silent=True):
+                    self._show_info_overlay(
+                        "Plugin Updated",
+                        f"'{name}' updated to version {bundle_version}.",
+                    )
+                    return True
+            return False
+        if comparison > 0:
+            self._show_info_overlay(
+                "Plugin Updates",
+                f"'{name}' ({installed_version or 'Unknown'}) is newer than the bundled version ({bundle_version}).",
+            )
+            return False
+        self._show_info_overlay("Plugin Updates", f"'{name}' is already up to date.")
+        return False
 
     def _ensure_loadout_defaults(self, active_name: Optional[str] = None) -> None:
         if not self.loadouts:
@@ -5320,6 +5495,9 @@ class Sims4ModSorterApp(tk.Tk):
             relative = path.relative_to(source)
             relative_posix = PurePosixPath(relative.as_posix())
             if allowed is not None and path.is_file() and relative_posix not in allowed:
+                continue
+            if path.is_file() and relative_posix == PurePosixPath(PLUGIN_MARKETPLACE_FILENAME):
+                # Marketplace metadata is managed by plugins themselves.
                 continue
             target = destination / relative
             if path.is_dir():
