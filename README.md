@@ -22,6 +22,8 @@ Sort Sims 4 mods with Modly – a single-file desktop assistant that scans, clas
 
 The main window lets you browse to your *Mods* directory, start a scan, and review suggested destinations for every package or script. Use the right-hand inspector to change a file’s category, toggle whether it will be moved, or batch-assign categories based on a keyword. When you are happy with the plan, click **Complete Sorting** to move the selected items into their target folders. The move log is saved in `.sims4_modsorter_moves.json`, enabling the **Undo Last** button to roll back the previous batch.
 
+Looking for a deeper dive? Explore the [project wiki](docs/wiki/index.md) for guided walkthroughs, UI tours, plugin tips, and troubleshooting checklists.
+
 ### Command Center dashboard
 
 On launch a modal **Command Center** appears with quick shortcuts for common tasks:
