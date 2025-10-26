@@ -318,6 +318,7 @@ class UpdateOverlayWorkflowTests(TestCase):
         app._refresh_version_display = mock.Mock()
         app.log = mock.Mock()
         app._show_update_overlay = mock.Mock()
+        app._show_info_overlay = mock.Mock()
         app._hide_update_overlay = mock.Mock()
         app._update_release_notes = None
         app.settings_sidebar = mock.Mock()
@@ -352,6 +353,34 @@ class UpdateOverlayWorkflowTests(TestCase):
         self.assertEqual(app.check_updates_button.state, "normal")
         self.assertEqual(app._update_release_notes, "Fixed bugs\nAdded UI improvements")
         self.assertEqual(kwargs["changelog"], app._format_update_changelog())
+
+    def test_manual_settings_check_displays_current_release_notes(self) -> None:
+        app = self._make_app()
+        app._update_release_notes = None
+
+        result = UpdateResult(
+            latest_version="1.2.3",
+            is_newer=False,
+            download_url=None,
+            message=None,
+            release_page_url="https://example.com/release",
+            asset_name=None,
+            release_notes="Bug fixes\nPerformance improvements",
+        )
+
+        app._complete_update_check(result, manual=True, error_message=None, from_settings=True)
+
+        app._show_info_overlay.assert_not_called()
+        app._show_update_overlay.assert_called_once()
+        args, kwargs = app._show_update_overlay.call_args
+        self.assertIn("You are using the latest version", args[0])
+        self.assertFalse(kwargs["enable_download"])
+        self.assertTrue(kwargs["enable_skip"])
+        self.assertEqual(kwargs["origin"], "settings")
+        self.assertEqual(kwargs["status_icon"], "✅")
+        self.assertEqual(kwargs["skip_label"], "Close")
+        self.assertEqual(kwargs["changelog"], app._format_update_changelog())
+        self.assertEqual(app._update_release_notes, "Bug fixes\nPerformance improvements")
 
     def test_overlay_buttons_dispatch_modes(self) -> None:
         app = Sims4ModSorterApp.__new__(Sims4ModSorterApp)

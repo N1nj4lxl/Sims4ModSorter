@@ -4026,7 +4026,12 @@ class Sims4ModSorterApp(tk.Tk):
         cleaned = notes.replace("\r\n", "\n").replace("\r", "\n").strip()
         if not cleaned:
             return ""
-        return f"New features detected:\n{cleaned}"
+        version = getattr(self, "_latest_version", None) or APP_VERSION
+        if getattr(self, "_update_available", False):
+            header = "New features detected"
+        else:
+            header = f"What's new in version {version}"
+        return f"{header}:\n{cleaned}"
 
     def _show_update_overlay(
         self,
@@ -4043,6 +4048,7 @@ class Sims4ModSorterApp(tk.Tk):
         changelog: Optional[str] = None,
         status_icon: Optional[str] = None,
         origin: str = "general",
+        skip_label: Optional[str] = None,
     ) -> None:
         overlay = self._ensure_update_overlay()
         self._update_overlay_origin = origin
@@ -4119,7 +4125,8 @@ class Sims4ModSorterApp(tk.Tk):
             self._update_overlay_details_btn.configure(state=state)
         if self._update_overlay_skip_btn:
             state = "normal" if enable_skip else "disabled"
-            self._update_overlay_skip_btn.configure(state=state)
+            text = skip_label if skip_label else "Skip for Now"
+            self._update_overlay_skip_btn.configure(state=state, text=text)
         mode_state = "normal" if enable_download else "disabled"
         if self._update_mode_simple_radio:
             self._update_mode_simple_radio.configure(state=mode_state)
@@ -4186,7 +4193,7 @@ class Sims4ModSorterApp(tk.Tk):
         if self._update_overlay_manual_btn:
             self._update_overlay_manual_btn.configure(state="disabled")
         if self._update_overlay_skip_btn:
-            self._update_overlay_skip_btn.configure(state="disabled")
+            self._update_overlay_skip_btn.configure(state="disabled", text="Skip for Now")
         if self._update_mode_simple_radio:
             self._update_mode_simple_radio.configure(state="disabled")
         if self._update_mode_advanced_radio:
@@ -5568,6 +5575,9 @@ for _ in range(10):
             button.configure(state="normal")
 
         self._update_release_notes = None
+        self._update_download_url = None
+        self._update_release_page_url = None
+        self._update_download_filename = None
 
         if error_message:
             self._update_download_url = None
@@ -5589,17 +5599,11 @@ for _ in range(10):
             return
 
         if not result:
-            self._update_download_url = None
-            self._update_release_page_url = None
-            self._update_download_filename = None
             if not manual:
                 self._hide_update_overlay()
             return
 
         if result.message:
-            self._update_download_url = None
-            self._update_release_page_url = None
-            self._update_download_filename = None
             if manual:
                 self._show_error_overlay("Update Check", result.message)
             else:
@@ -5615,18 +5619,17 @@ for _ in range(10):
                 )
             return
 
+        notes = result.release_notes or ""
+        cleaned_notes = notes.strip()
+        if cleaned_notes:
+            self._update_release_notes = notes
         if result.download_url:
             self._update_download_url = result.download_url
-        else:
-            self._update_download_url = None
         self._update_release_page_url = result.release_page_url
         self._update_download_filename = result.asset_name
 
         update_available = bool(result.is_newer and result.latest_version)
         self._update_available = update_available
-        if update_available:
-            notes = result.release_notes or ""
-            self._update_release_notes = notes if notes.strip() else None
         if result.latest_version:
             self._latest_version = result.latest_version
         elif not update_available:
@@ -5711,9 +5714,25 @@ for _ in range(10):
                 )
         else:
             self._update_download_url = None
-            self._update_release_page_url = None
             self._update_download_filename = None
-            if manual:
+            if manual and from_settings and self._update_release_notes:
+                current_version = self._latest_version or APP_VERSION
+                message = f"You are using the latest version ({APP_VERSION})."
+                release_available = bool(self._update_release_page_url)
+                self._show_update_overlay(
+                    message,
+                    headline=f"Version {current_version} is current",
+                    progress=False,
+                    enable_download=False,
+                    enable_skip=True,
+                    enable_details=release_available,
+                    enable_manual=False,
+                    status_icon="✅",
+                    origin="settings",
+                    changelog=self._format_update_changelog(),
+                    skip_label="Close",
+                )
+            elif manual:
                 self._show_info_overlay(
                     "Update Check",
                     f"You are using the latest version ({APP_VERSION}).",
