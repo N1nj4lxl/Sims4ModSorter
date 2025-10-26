@@ -58,6 +58,9 @@ class CommandCenter:
         self.window: tk.Frame | None = None
         self._shell: ttk.Frame | None = None
         self._content: ttk.Frame | None = None
+        self._canvas: tk.Canvas | None = None
+        self._scrollbar: ttk.Scrollbar | None = None
+        self._mousewheel_bound: bool = False
         self._modal: bool = True
 
     # ------------------------------------------------------------------
@@ -89,9 +92,12 @@ class CommandCenter:
                 pass
             self.window.place_forget()
             self.window.destroy()
+        self._unbind_mousewheel()
         self.window = None
         self._shell = None
         self._content = None
+        self._canvas = None
+        self._scrollbar = None
 
     def refresh(self) -> None:
         if (
@@ -106,6 +112,12 @@ class CommandCenter:
             child.destroy()
         self._populate_content(self._content)
         self.window.update_idletasks()
+        self._update_scrollregion()
+        if self._canvas is not None:
+            try:
+                self._canvas.yview_moveto(0)
+            except tk.TclError:
+                pass
 
     def refresh_theme(self) -> None:
         if self.window is None or not self.window.winfo_exists():
@@ -135,10 +147,7 @@ class CommandCenter:
         overlay.grid_rowconfigure(0, weight=1)
         overlay.grid_columnconfigure(0, weight=1)
         overlay.bind("<Escape>", lambda _e: self.hide())
-        overlay.bind(
-            "<Button-1>",
-            lambda event: self.hide() if event.widget is overlay else None,
-        )
+        overlay.bind("<Button-1>", lambda _event: overlay.focus_set())
 
         shell = ttk.Frame(
             overlay,
@@ -147,22 +156,111 @@ class CommandCenter:
         )
         shell.grid(row=0, column=0, padx=32, pady=32)
         shell.columnconfigure(0, weight=1)
+        shell.columnconfigure(1, weight=0)
         shell.rowconfigure(0, weight=1)
         shell.bind("<Escape>", lambda _e: self.hide())
 
-        content = ttk.Frame(
+        canvas = tk.Canvas(
             shell,
+            highlightthickness=0,
+            bd=0,
+            relief="flat",
+        )
+        canvas.grid(row=0, column=0, sticky="nsew")
+
+        scrollbar = ttk.Scrollbar(
+            shell,
+            orient="vertical",
+            command=canvas.yview,
+            style="CommandCenter.Vertical.TScrollbar",
+        )
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        content = ttk.Frame(
+            canvas,
             padding=(24, 26, 24, 24),
             style="CommandCenter.Container.TFrame",
         )
-        content.grid(row=0, column=0, sticky="nsew")
         content.columnconfigure(0, weight=1)
         content.bind("<Escape>", lambda _e: self.hide())
+
+        content_window = canvas.create_window((0, 0), window=content, anchor="nw")
+
+        def _sync_scrollregion(_event: tk.Event) -> None:
+            self._update_scrollregion()
+
+        def _resize_canvas(event: tk.Event) -> None:
+            canvas.itemconfigure(content_window, width=event.width)
+            self._update_scrollregion()
+
+        content.bind("<Configure>", _sync_scrollregion)
+        canvas.bind("<Configure>", _resize_canvas)
 
         self.window = overlay
         self._shell = shell
         self._content = content
+        self._canvas = canvas
+        self._scrollbar = scrollbar
         self._apply_theme()
+        self._bind_mousewheel()
+
+    def _bind_mousewheel(self) -> None:
+        if self._canvas is None or self._mousewheel_bound:
+            return
+        try:
+            self._canvas.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
+            self._canvas.bind_all("<Button-4>", self._on_mousewheel, add="+")
+            self._canvas.bind_all("<Button-5>", self._on_mousewheel, add="+")
+        except tk.TclError:
+            return
+        self._mousewheel_bound = True
+
+    def _unbind_mousewheel(self) -> None:
+        if not self._mousewheel_bound:
+            return
+        if self._canvas is not None:
+            try:
+                self._canvas.unbind_all("<MouseWheel>")
+                self._canvas.unbind_all("<Button-4>")
+                self._canvas.unbind_all("<Button-5>")
+            except tk.TclError:
+                pass
+        self._mousewheel_bound = False
+
+    def _on_mousewheel(self, event: tk.Event) -> None:  # pragma: no cover - UI event
+        if self._canvas is None:
+            return
+        try:
+            if getattr(event, "num", None) == 4:  # Linux scroll up
+                delta = -1
+            elif getattr(event, "num", None) == 5:  # Linux scroll down
+                delta = 1
+            else:
+                raw_delta = getattr(event, "delta", 0)
+                if raw_delta > 0:
+                    delta = -max(1, int(abs(raw_delta) / 120))
+                elif raw_delta < 0:
+                    delta = max(1, int(abs(raw_delta) / 120))
+                else:
+                    delta = 0
+        except Exception:
+            delta = 0
+        if delta != 0:
+            try:
+                self._canvas.yview_scroll(delta, "units")
+            except tk.TclError:
+                pass
+
+    def _update_scrollregion(self) -> None:
+        if self._canvas is None:
+            return
+        try:
+            region = self._canvas.bbox("all")
+            if region is not None:
+                self._canvas.configure(scrollregion=region)
+        except tk.TclError:
+            pass
 
     def _populate_content(self, container: ttk.Frame) -> None:
         row = 0
@@ -565,6 +663,20 @@ class CommandCenter:
             "CommandCenter.Checkbutton.TCheckbutton",
             foreground=[("disabled", muted)],
         )
+        try:
+            style.configure(
+                "CommandCenter.Vertical.TScrollbar",
+                background=sel,
+                troughcolor=alt,
+                bordercolor=sel,
+                arrowcolor=fg,
+            )
+        except tk.TclError:
+            style.configure("CommandCenter.Vertical.TScrollbar", background=sel)
+        style.map(
+            "CommandCenter.Vertical.TScrollbar",
+            background=[("active", hover_accent), ("pressed", hover_accent)],
+        )
 
         self.window.configure(bg=_scrim_color(bg))
         if self._shell is not None and self._shell.winfo_exists():
@@ -575,6 +687,16 @@ class CommandCenter:
         if self._content is not None and self._content.winfo_exists():
             try:
                 self._content.configure(style="CommandCenter.Container.TFrame")
+            except tk.TclError:
+                pass
+        if self._canvas is not None and self._canvas.winfo_exists():
+            try:
+                self._canvas.configure(background=bg)
+            except tk.TclError:
+                pass
+        if self._scrollbar is not None and self._scrollbar.winfo_exists():
+            try:
+                self._scrollbar.configure(style="CommandCenter.Vertical.TScrollbar")
             except tk.TclError:
                 pass
 
