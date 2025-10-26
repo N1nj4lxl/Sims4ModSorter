@@ -1036,6 +1036,7 @@ class Sims4ModSorterApp(tk.Tk):
         self.plugin_catalog: List[Dict[str, object]] = []
         self.plugin_ratings: Dict[str, Dict[str, object]] = {}
         self._plugin_marketplace_selection: Optional[str] = None
+        self._plugin_gallery_selection: Optional[str] = None
 
         self._duplicate_groups: Dict[str, List[FileItem]] = {}
         self.move_favorites: Set[str] = set()
@@ -2131,9 +2132,211 @@ class Sims4ModSorterApp(tk.Tk):
             )
 
             refresh_tree()
-        update_detail(self._gallery_selection)
+            update_detail(self._gallery_selection)
 
         self._show_overlay_panel("loadout_gallery", "Community Loadout Gallery", builder, width=880, height=560)
+
+    def show_plugin_gallery(self) -> None:
+        def builder(body: ttk.Frame, footer: ttk.Frame) -> None:
+            if body is None or footer is None:
+                return
+            body.grid_columnconfigure(0, weight=1)
+            body.grid_columnconfigure(1, weight=2)
+            body.grid_rowconfigure(0, weight=1)
+
+            tree_frame = ttk.Frame(body, style="Overlay.Body.TFrame")
+            tree_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+            tree_frame.grid_columnconfigure(0, weight=1)
+            tree_frame.grid_rowconfigure(0, weight=1)
+
+            tree = ttk.Treeview(
+                tree_frame,
+                columns=("name", "tags", "rating"),
+                show="headings",
+                selectmode="browse",
+                height=12,
+            )
+            tree.heading("name", text="Plugin")
+            tree.heading("tags", text="Tags")
+            tree.heading("rating", text="Rating")
+            tree.column("name", width=220, anchor="w")
+            tree.column("tags", width=150, anchor="w")
+            tree.column("rating", width=80, anchor="center")
+            tree.grid(row=0, column=0, sticky="nsew")
+
+            scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+            tree.configure(yscrollcommand=scroll.set)
+            scroll.grid(row=0, column=1, sticky="ns")
+
+            detail = ttk.Frame(body, style="Overlay.Body.TFrame")
+            detail.grid(row=0, column=1, sticky="nsew")
+            detail.grid_columnconfigure(0, weight=1)
+
+            title_var = tk.StringVar(value="Select a plugin")
+            desc_var = tk.StringVar(value="Browse curated extensions and discover new tools.")
+            meta_var = tk.StringVar(value="")
+            tags_var = tk.StringVar(value="")
+            version_var = tk.StringVar(value="")
+            status_var = tk.StringVar(value="")
+            rating_var = tk.StringVar(value="")
+            user_rating_var = tk.StringVar(value="Your rating: –")
+            requires_var = tk.StringVar(value="")
+
+            ttk.Label(detail, textvariable=title_var, style="Overlay.Title.TLabel").grid(
+                row=0, column=0, sticky="w"
+            )
+            ttk.Label(detail, textvariable=desc_var, style="Overlay.Subtitle.TLabel", wraplength=380).grid(
+                row=1, column=0, sticky="w", pady=(6, 0)
+            )
+            ttk.Label(detail, textvariable=meta_var, style="Overlay.Subtitle.TLabel").grid(
+                row=2, column=0, sticky="w", pady=(4, 0)
+            )
+            ttk.Label(detail, textvariable=tags_var, style="Overlay.Subtitle.TLabel").grid(
+                row=3, column=0, sticky="w", pady=(4, 0)
+            )
+            ttk.Label(detail, textvariable=version_var, style="Overlay.Subtitle.TLabel").grid(
+                row=4, column=0, sticky="w", pady=(4, 0)
+            )
+            ttk.Label(detail, textvariable=status_var, style="Overlay.Subtitle.TLabel").grid(
+                row=5, column=0, sticky="w", pady=(4, 0)
+            )
+            ttk.Label(detail, textvariable=rating_var, style="Overlay.Subtitle.TLabel").grid(
+                row=6, column=0, sticky="w", pady=(4, 0)
+            )
+            ttk.Label(detail, textvariable=user_rating_var, style="Overlay.Subtitle.TLabel").grid(
+                row=7, column=0, sticky="w", pady=(4, 0)
+            )
+            ttk.Label(detail, textvariable=requires_var, style="Overlay.Subtitle.TLabel").grid(
+                row=8, column=0, sticky="w", pady=(4, 0)
+            )
+
+            buttons_frame = ttk.Frame(detail, style="Overlay.Body.TFrame")
+            buttons_frame.grid(row=9, column=0, sticky="w", pady=(16, 0))
+            download_btn = ttk.Button(buttons_frame, text="Open download")
+            download_btn.grid(row=0, column=0, padx=(0, 8))
+            homepage_btn = ttk.Button(buttons_frame, text="Homepage")
+            homepage_btn.grid(row=0, column=1, padx=(0, 8))
+            folder_btn = ttk.Button(buttons_frame, text="Open folder")
+            folder_btn.grid(row=0, column=2, padx=(0, 8))
+
+            installed_map: Dict[str, PluginStatus] = {}
+            if self.plugin_manager:
+                for status in self.plugin_manager.get_statuses():
+                    installed_map[status.folder] = status
+
+            def refresh_tree(select_id: Optional[str] = None) -> None:
+                tree.delete(*tree.get_children())
+                for entry in self.plugin_catalog:
+                    entry_id = str(entry.get("id"))
+                    if not entry_id:
+                        continue
+                    tags_display = ", ".join(entry.get("tags", [])[:3])
+                    rating_value = max(
+                        float(entry.get("rating", 0.0)),
+                        self._user_rating_for(entry_id),
+                    )
+                    tree.insert(
+                        "",
+                        "end",
+                        iid=entry_id,
+                        values=(entry.get("name"), tags_display, f"{rating_value:.1f}"),
+                    )
+                target = select_id or self._plugin_gallery_selection
+                if target:
+                    try:
+                        tree.selection_set(target)
+                        tree.focus(target)
+                    except tk.TclError:
+                        pass
+
+            def update_detail(entry_id: Optional[str]) -> None:
+                entry = next((item for item in self.plugin_catalog if str(item.get("id")) == entry_id), None)
+                if not entry:
+                    title_var.set("Select a plugin")
+                    desc_var.set("Browse curated extensions and discover new tools.")
+                    meta_var.set("")
+                    tags_var.set("")
+                    version_var.set("")
+                    status_var.set("")
+                    rating_var.set("")
+                    user_rating_var.set("Your rating: –")
+                    requires_var.set("")
+                    for widget in (download_btn, homepage_btn, folder_btn):
+                        widget.configure(state="disabled", command=lambda: None)
+                    return
+
+                entry_id_str = str(entry.get("id"))
+                title_var.set(entry.get("name", "Unknown plugin"))
+                desc = entry.get("description", "") or "No description provided."
+                desc_var.set(desc)
+                author = entry.get("author", "Unknown")
+                folder_name = str(entry.get("folder") or entry_id_str)
+                meta_var.set(f"Author: {author} | Folder: {folder_name}")
+                tags = entry.get("tags", [])
+                tags_var.set("Tags: " + (", ".join(tags) if tags else "None"))
+                catalog_version = str(entry.get("version") or "Unknown")
+                version_var.set(f"Catalog version: {catalog_version}")
+
+                installed = installed_map.get(folder_name)
+                if installed:
+                    installed_version = installed.version or "Unknown"
+                    status_text = installed.status.title() if installed.status else "Installed"
+                    status_var.set(f"Installed: {installed_version} ({status_text})")
+                else:
+                    status_var.set("Installed: Not installed")
+
+                community_rating = float(entry.get("rating", 0.0))
+                user_rating = self._user_rating_for(entry_id_str)
+                rating_var.set(f"Community rating: {max(community_rating, user_rating):.1f}/5")
+                if user_rating:
+                    user_rating_var.set(f"Your rating: {user_rating:.1f}/5")
+                else:
+                    user_rating_var.set("Your rating: –")
+
+                requires = [str(item).strip() for item in entry.get("requires", []) if str(item).strip()]
+                requires_var.set("Requires: " + (", ".join(requires) if requires else "None"))
+
+                download_url = str(entry.get("download_url") or "")
+                homepage_url = str(entry.get("homepage") or "")
+                folder_exists = bool(folder_name) and (USER_PLUGINS_DIR / folder_name).exists()
+
+                download_btn.configure(
+                    state="normal" if download_url else "disabled",
+                    command=(lambda url=download_url: webbrowser.open(url) if url else None),
+                )
+                homepage_btn.configure(
+                    state="normal" if homepage_url else "disabled",
+                    command=(lambda url=homepage_url: webbrowser.open(url) if url else None),
+                )
+                folder_btn.configure(
+                    state="normal" if folder_exists else "disabled",
+                    command=(
+                        lambda name=folder_name: self._open_plugin_folder(name)
+                        if name and folder_exists
+                        else None
+                    ),
+                )
+
+            def on_select(_event=None) -> None:
+                selection = tree.selection()
+                if selection:
+                    self._plugin_gallery_selection = selection[0]
+                else:
+                    self._plugin_gallery_selection = None
+                update_detail(self._plugin_gallery_selection)
+
+            tree.bind("<<TreeviewSelect>>", on_select)
+
+            ttk.Button(
+                footer,
+                text="Close",
+                command=lambda: self._hide_overlay_panel("plugin_gallery"),
+            ).pack(side="right")
+
+            refresh_tree()
+            update_detail(self._plugin_gallery_selection)
+
+        self._show_overlay_panel("plugin_gallery", "Plugin Gallery", builder, width=880, height=560)
 
     def show_plugin_marketplace(self) -> None:
         def builder(body: ttk.Frame, footer: ttk.Frame) -> None:
@@ -3062,6 +3265,26 @@ class Sims4ModSorterApp(tk.Tk):
             loadout_section,
             text="Loadout Gallery…",
             command=self.show_loadout_gallery,
+            style="Sidebar.TButton",
+        ).pack(fill="x", pady=(6, 0))
+
+        plugin_gallery_section = ttk.LabelFrame(
+            sidebar_frame,
+            text="Plugins",
+            padding=(12, 10),
+            style="Sidebar.TLabelframe",
+        )
+        plugin_gallery_section.pack(fill="x", pady=(0, 10))
+        ttk.Button(
+            plugin_gallery_section,
+            text="Plugin Gallery…",
+            command=self.show_plugin_gallery,
+            style="Sidebar.TButton",
+        ).pack(fill="x")
+        ttk.Button(
+            plugin_gallery_section,
+            text="Plugin Marketplace…",
+            command=self.show_plugin_marketplace,
             style="Sidebar.TButton",
         ).pack(fill="x", pady=(6, 0))
 
