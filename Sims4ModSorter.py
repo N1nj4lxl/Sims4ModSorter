@@ -32,7 +32,7 @@ from typing import Callable, Dict, Iterable, Iterator, List, Literal, Optional, 
 
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import filedialog, simpledialog, ttk
+from tkinter import filedialog, scrolledtext, simpledialog, ttk
 
 from launch_utils import UpdateResult, check_for_update
 from command_center import CommandCenter
@@ -982,7 +982,7 @@ class Sims4ModSorterApp(tk.Tk):
         self._update_overlay_status_icon = tk.StringVar(value="⬆️")
         self._update_overlay_progress_title = tk.StringVar(value="")
         self._update_overlay_progress_detail = tk.StringVar(value="")
-        self._update_overlay_changelog = tk.StringVar(value="")
+        self._update_overlay_changelog_content = ""
         self._update_overlay_progress: Optional[ttk.Progressbar] = None
         self._update_overlay_download_btn: Optional[ttk.Button] = None
         self._update_overlay_skip_btn: Optional[ttk.Button] = None
@@ -992,11 +992,17 @@ class Sims4ModSorterApp(tk.Tk):
         self._update_overlay_progress_frame: Optional[ttk.Frame] = None
         self._update_overlay_progress_title_label: Optional[ttk.Label] = None
         self._update_overlay_progress_detail_label: Optional[ttk.Label] = None
-        self._update_overlay_changelog_label: Optional[ttk.Label] = None
+        self._update_overlay_changelog_widget: Optional[scrolledtext.ScrolledText] = None
         self._update_overlay_headline_label: Optional[ttk.Label] = None
         self._update_overlay_body_label: Optional[ttk.Label] = None
         self._update_overlay_headline_font: Optional[tkfont.Font] = None
         self._update_overlay_icon_font: Optional[tkfont.Font] = None
+        self._update_changelog_body_font: Optional[tkfont.Font] = None
+        self._update_changelog_bold_font: Optional[tkfont.Font] = None
+        self._update_changelog_italic_font: Optional[tkfont.Font] = None
+        self._update_changelog_bold_italic_font: Optional[tkfont.Font] = None
+        self._update_changelog_heading_fonts: Dict[int, tkfont.Font] = {}
+        self._update_changelog_code_font: Optional[tkfont.Font] = None
         self._update_overlay_visible: bool = False
         self._update_overlay_origin: str = "general"
         self._update_overlay_container: Optional[ttk.Frame] = None
@@ -2829,7 +2835,6 @@ class Sims4ModSorterApp(tk.Tk):
         style.configure("UpdateOverlayProgress.TFrame", background=palette["alt"])
         style.configure("UpdateOverlayProgressTitle.TLabel", background=palette["alt"], foreground=palette["fg"], font=("", 10, "bold"))
         style.configure("UpdateOverlayProgressDetail.TLabel", background=palette["alt"], foreground=palette["fg"])
-        style.configure("UpdateOverlayChangelog.TLabel", background=palette["alt"], foreground=palette["fg"])
         style.configure(
             "UpdateOverlay.Horizontal.TProgressbar",
             background=palette["accent"],
@@ -3859,15 +3864,20 @@ class Sims4ModSorterApp(tk.Tk):
         )
         progress.pack(fill="x", pady=(12, 0))
 
-        changelog_label = ttk.Label(
+        changelog_widget = scrolledtext.ScrolledText(
             progress_frame,
-            textvariable=self._update_overlay_changelog,
-            style="UpdateOverlayChangelog.TLabel",
-            wraplength=460,
-            justify="left",
+            wrap="word",
+            height=14,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
         )
-        changelog_label.pack(fill="x", pady=(12, 0))
-        self._update_overlay_changelog_label = changelog_label
+        changelog_widget.pack(fill="both", expand=True, pady=(12, 0))
+        changelog_widget.configure(state="disabled", cursor="arrow", takefocus=False)
+        changelog_widget.bind("<Key>", lambda _event: "break")
+        self._update_overlay_changelog_widget = changelog_widget
+        self._initialize_update_changelog_widget(changelog_widget)
+        self._update_overlay_set_changelog("")
 
         mode_frame = ttk.LabelFrame(container, text="Download Mode")
         mode_frame.grid(row=2, column=0, sticky="we", pady=(24, 0))
@@ -3944,8 +3954,8 @@ class Sims4ModSorterApp(tk.Tk):
             self._update_overlay_progress_detail_label.pack_forget()
         if progress.winfo_manager():
             progress.pack_forget()
-        if self._update_overlay_changelog_label:
-            self._update_overlay_changelog_label.pack_forget()
+        if self._update_overlay_changelog_widget and self._update_overlay_changelog_widget.winfo_manager():
+            self._update_overlay_changelog_widget.pack_forget()
         if self._update_overlay_progress_frame:
             self._update_overlay_progress_frame.grid_remove()
 
@@ -3974,7 +3984,6 @@ class Sims4ModSorterApp(tk.Tk):
             style.configure("UpdateOverlayProgress.TFrame", background=palette["alt"])
             style.configure("UpdateOverlayProgressTitle.TLabel", background=palette["alt"], foreground=palette["fg"])
             style.configure("UpdateOverlayProgressDetail.TLabel", background=palette["alt"], foreground=palette["fg"])
-            style.configure("UpdateOverlayChangelog.TLabel", background=palette["alt"], foreground=palette["fg"])
             style.configure("Accent.TButton", background=palette["accent"], foreground=palette["fg"], padding=(12, 8))
             style.map(
                 "Accent.TButton",
@@ -3998,8 +4007,7 @@ class Sims4ModSorterApp(tk.Tk):
                 self._update_overlay_progress_title_label.configure(style="UpdateOverlayProgressTitle.TLabel")
             if self._update_overlay_progress_detail_label:
                 self._update_overlay_progress_detail_label.configure(style="UpdateOverlayProgressDetail.TLabel")
-            if self._update_overlay_changelog_label:
-                self._update_overlay_changelog_label.configure(style="UpdateOverlayChangelog.TLabel")
+            self._apply_update_changelog_theme()
             if self._update_mode_frame:
                 try:
                     self._update_mode_frame.configure(style="TLabelframe")
@@ -4031,15 +4039,214 @@ class Sims4ModSorterApp(tk.Tk):
         notes = getattr(self, "_update_release_notes", None)
         if not notes:
             return ""
-        cleaned = notes.replace("\r\n", "\n").replace("\r", "\n").strip()
-        if not cleaned:
-            return ""
-        version = getattr(self, "_latest_version", None) or APP_VERSION
-        if getattr(self, "_update_available", False):
-            header = "New features detected"
-        else:
-            header = f"What's new in version {version}"
-        return f"{header}:\n{cleaned}"
+        cleaned = notes.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+        return cleaned
+
+    def _ensure_update_changelog_fonts(self) -> None:
+        if self._update_changelog_body_font:
+            return
+        try:
+            base_font = tkfont.nametofont("TkDefaultFont")
+        except tk.TclError:
+            base_font = tkfont.Font(size=11)
+        family = base_font.cget("family") or "TkDefaultFont"
+        try:
+            base_size = int(base_font.cget("size"))
+        except (TypeError, ValueError):
+            base_size = 11
+        if base_size == 0:
+            base_size = 11
+        if base_size < 0:
+            base_size = abs(base_size)
+        self._update_changelog_body_font = tkfont.Font(family=family, size=base_size)
+        self._update_changelog_bold_font = tkfont.Font(family=family, size=base_size, weight="bold")
+        self._update_changelog_italic_font = tkfont.Font(family=family, size=base_size, slant="italic")
+        self._update_changelog_bold_italic_font = tkfont.Font(
+            family=family, size=base_size, weight="bold", slant="italic"
+        )
+        heading_offsets = {1: 6, 2: 4, 3: 2, 4: 1, 5: 0, 6: -1}
+        fonts: Dict[int, tkfont.Font] = {}
+        for level, offset in heading_offsets.items():
+            heading_size = max(base_size + offset, 8)
+            fonts[level] = tkfont.Font(family=family, size=heading_size, weight="bold")
+        self._update_changelog_heading_fonts = fonts
+        code_size = max(base_size - 1, 8)
+        self._update_changelog_code_font = tkfont.Font(family="Courier New", size=code_size)
+
+    def _initialize_update_changelog_widget(self, widget: scrolledtext.ScrolledText) -> None:
+        self._ensure_update_changelog_fonts()
+        if self._update_changelog_body_font:
+            widget.configure(font=self._update_changelog_body_font)
+        widget.configure(padx=0, pady=0)
+        widget.tag_configure(
+            "body",
+            font=self._update_changelog_body_font,
+            spacing1=4,
+            spacing3=6,
+        )
+        widget.tag_configure("paragraph", spacing1=4, spacing3=6)
+        widget.tag_configure("bold", font=self._update_changelog_bold_font)
+        widget.tag_configure("italic", font=self._update_changelog_italic_font)
+        widget.tag_configure("bolditalic", font=self._update_changelog_bold_italic_font)
+        widget.tag_configure("code", font=self._update_changelog_code_font)
+        for level, font in self._update_changelog_heading_fonts.items():
+            widget.tag_configure(
+                f"h{level}",
+                font=font,
+                spacing1=12,
+                spacing3=8,
+            )
+        widget.tag_configure("hr", spacing1=12, spacing3=12)
+        for level in range(6):
+            indent = 24 + (level * 20)
+            widget.tag_configure(
+                f"list-{level}",
+                lmargin1=indent,
+                lmargin2=indent + 18,
+                spacing1=2,
+                spacing3=4,
+            )
+        self._apply_update_changelog_theme()
+
+    def _apply_update_changelog_theme(self) -> None:
+        widget = getattr(self, "_update_overlay_changelog_widget", None)
+        if not widget or not widget.winfo_exists():
+            return
+        palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
+        background = palette.get("alt", "#1a1a1a")
+        foreground = palette.get("fg", "#f5f5f5")
+        accent = palette.get("sel", "#2A2F3A")
+        widget.configure(
+            background=background,
+            foreground=foreground,
+            insertbackground=foreground,
+            selectbackground=palette.get("accent", foreground),
+            highlightthickness=1,
+            highlightbackground=palette.get("bg", background),
+        )
+        widget.tag_configure("body", foreground=foreground)
+        widget.tag_configure("paragraph", foreground=foreground)
+        widget.tag_configure("bold", foreground=foreground)
+        widget.tag_configure("italic", foreground=foreground)
+        widget.tag_configure("bolditalic", foreground=foreground)
+        widget.tag_configure("code", foreground=foreground, background=accent)
+        widget.tag_configure("hr", foreground=foreground)
+        for level in range(1, 7):
+            widget.tag_configure(f"h{level}", foreground=foreground)
+            widget.tag_configure(f"list-{level-1}", foreground=foreground)
+
+    def _update_overlay_set_changelog(self, changelog: str) -> None:
+        self._update_overlay_changelog_content = changelog or ""
+        widget = getattr(self, "_update_overlay_changelog_widget", None)
+        if not widget or not widget.winfo_exists():
+            return
+        text = (changelog or "").strip("\n")
+        if not text:
+            widget.configure(state="normal")
+            widget.delete("1.0", "end")
+            widget.configure(state="disabled")
+            if widget.winfo_manager():
+                widget.pack_forget()
+            return
+        if not widget.winfo_manager():
+            widget.pack(fill="both", expand=True, pady=(12, 0))
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        self._render_update_changelog(widget, text)
+        if not text.endswith("\n"):
+            widget.insert("end", "\n")
+        widget.configure(state="disabled")
+
+    def _render_update_changelog(self, widget: tk.Text, markdown_text: str) -> None:
+        normalized = markdown_text.replace("\r\n", "\n").replace("\r", "\n")
+        lines = normalized.split("\n")
+        previous_list_level: Optional[int] = None
+        for raw_line in lines:
+            line = raw_line.rstrip()
+            stripped = line.strip()
+            if not stripped:
+                widget.insert("end", "\n")
+                previous_list_level = None
+                continue
+            heading_match = re.match(r"^(#{1,6})\s+(.*)$", stripped)
+            if heading_match:
+                level = min(len(heading_match.group(1)), 6)
+                content = heading_match.group(2).strip()
+                self._insert_markdown_inline(widget, content, ("body", f"h{level}"))
+                widget.insert("end", "\n")
+                previous_list_level = None
+                continue
+            hr_match = re.match(r"^\s*(?:-{3,}|_{3,}|\*{3,})\s*$", stripped)
+            if hr_match:
+                widget.insert("end", "\u2500" * 40 + "\n", ("body", "hr"))
+                previous_list_level = None
+                continue
+            list_match = re.match(r"^(?P<indent>\s*)(?P<marker>(?:[-*+]|\d+[\.)]))\s+(?P<content>.*)$", raw_line)
+            if list_match:
+                indent_text = list_match.group("indent").expandtabs(4)
+                indent_spaces = len(indent_text)
+                level = min(indent_spaces // 2, 5)
+                marker = list_match.group("marker")
+                content = list_match.group("content").strip()
+                prefix = "\u2022 "
+                if marker[0].isdigit():
+                    prefix = f"{marker} "
+                base_tags = ("body", f"list-{level}")
+                widget.insert("end", prefix, base_tags)
+                self._insert_markdown_inline(widget, content, base_tags)
+                widget.insert("end", "\n")
+                previous_list_level = level
+                continue
+            continuation_match = re.match(r"^\s+(.*)$", raw_line)
+            if continuation_match and previous_list_level is not None:
+                continuation = continuation_match.group(1).strip()
+                base_tags = ("body", f"list-{previous_list_level}")
+                self._insert_markdown_inline(widget, continuation, base_tags)
+                widget.insert("end", "\n")
+                continue
+            self._insert_markdown_inline(widget, stripped, ("body", "paragraph"))
+            widget.insert("end", "\n")
+            previous_list_level = None
+
+    def _insert_markdown_inline(
+        self,
+        widget: tk.Text,
+        text: str,
+        base_tags: Tuple[str, ...],
+    ) -> None:
+        if not text:
+            return
+        code_pattern = re.compile(r"`([^`]+)`")
+        last_index = 0
+        for code_match in code_pattern.finditer(text):
+            start, end = code_match.span()
+            if start > last_index:
+                self._insert_markdown_inline(widget, text[last_index:start], base_tags)
+            code_content = code_match.group(1)
+            widget.insert("end", code_content, base_tags + ("code",))
+            last_index = end
+        if last_index:
+            if last_index < len(text):
+                self._insert_markdown_inline(widget, text[last_index:], base_tags)
+            return
+        pattern = re.compile(r"(\*\*\*|___|\*\*|__|\*|_)(.+?)\1")
+        index = 0
+        for match in pattern.finditer(text):
+            start, end = match.span()
+            if start > index:
+                widget.insert("end", text[index:start], base_tags)
+            token = match.group(1)
+            content = match.group(2)
+            if token in ("***", "___"):
+                tags = base_tags + ("bolditalic",)
+            elif token in ("**", "__"):
+                tags = base_tags + ("bold",)
+            else:
+                tags = base_tags + ("italic",)
+            self._insert_markdown_inline(widget, content, tags)
+            index = end
+        if index < len(text):
+            widget.insert("end", text[index:], base_tags)
 
     def _show_update_overlay(
         self,
@@ -4103,14 +4310,7 @@ class Sims4ModSorterApp(tk.Tk):
             elif self._update_overlay_progress_detail_label.winfo_manager():
                 self._update_overlay_progress_detail_label.pack_forget()
 
-        changelog_text = changelog.strip() if changelog else ""
-        self._update_overlay_changelog.set(changelog_text)
-        if self._update_overlay_changelog_label:
-            if changelog_text:
-                if not self._update_overlay_changelog_label.winfo_manager():
-                    self._update_overlay_changelog_label.pack(fill="x", pady=(12, 0))
-            elif self._update_overlay_changelog_label.winfo_manager():
-                self._update_overlay_changelog_label.pack_forget()
+        self._update_overlay_set_changelog(changelog or "")
 
         if self._update_overlay_progress:
             self._update_overlay_progress.stop()
@@ -4189,13 +4389,13 @@ class Sims4ModSorterApp(tk.Tk):
         self._update_overlay_status_icon.set("⬆️")
         self._update_overlay_progress_title.set("")
         self._update_overlay_progress_detail.set("")
-        self._update_overlay_changelog.set("")
+        self._update_overlay_set_changelog("")
         if self._update_overlay_progress_title_label and self._update_overlay_progress_title_label.winfo_manager():
             self._update_overlay_progress_title_label.pack_forget()
         if self._update_overlay_progress_detail_label and self._update_overlay_progress_detail_label.winfo_manager():
             self._update_overlay_progress_detail_label.pack_forget()
-        if self._update_overlay_changelog_label and self._update_overlay_changelog_label.winfo_manager():
-            self._update_overlay_changelog_label.pack_forget()
+        if self._update_overlay_changelog_widget and self._update_overlay_changelog_widget.winfo_manager():
+            self._update_overlay_changelog_widget.pack_forget()
         if self._update_overlay_progress_frame:
             self._update_overlay_progress_frame.grid_remove()
         if self._update_overlay_download_btn:
