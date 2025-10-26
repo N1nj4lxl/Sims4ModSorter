@@ -227,8 +227,8 @@ def _routing_path() -> Path:
     return _module_dir() / "routing.json"
 
 
-def _thresholds_path() -> Path:
-    return _module_dir() / "thresholds.json"
+def _keywords_path() -> Path:
+    return _module_dir() / "keywords.json"
 
 
 def load_rules() -> Dict[str, object]:
@@ -260,11 +260,214 @@ def load_routing() -> Dict[str, str]:
     return routing
 
 
-def load_thresholds() -> Dict[str, object]:
-    return _load_json(_thresholds_path())
+def load_keywords() -> Dict[str, object]:
+    return _load_json(_keywords_path())
 
 
 DEFAULT_FOLDER_MAP = load_routing()
+
+_KEYWORDS_DATA = load_keywords()
+
+
+def _prepare_keyword_tokens(values: Iterable[object]) -> Tuple[str, ...]:
+    tokens: List[str] = []
+    for value in values or []:
+        text = str(value).strip().lower()
+        if not text:
+            continue
+        collapsed = re.sub(r"[^a-z0-9]+", "", text)
+        if collapsed:
+            tokens.append(collapsed)
+        tokens.extend(TOKEN_RE.findall(text))
+    seen: Dict[str, None] = {}
+    ordered: List[str] = []
+    for token in tokens:
+        if token and token not in seen:
+            seen[token] = None
+            ordered.append(token)
+    return tuple(ordered)
+
+
+def _merge_tokens(*token_sets: Iterable[str]) -> Tuple[str, ...]:
+    seen: Dict[str, None] = {}
+    merged: List[str] = []
+    for token_set in token_sets:
+        for token in token_set:
+            if token and token not in seen:
+                seen[token] = None
+                merged.append(token)
+    return tuple(merged)
+
+
+_DEFAULT_NAME_TOKENS: Dict[str, Tuple[str, ...]] = {
+    "Script Mod": (
+        "script",
+        "scripts",
+        "scriptmod",
+        "scriptmods",
+        "mccc",
+        "mccommand",
+        "commandcenter",
+        "xml",
+        "injector",
+        "xmlinjector",
+        "uicheats",
+        "cheats",
+    ),
+    "CAS": (
+        "hair",
+        "skin",
+        "makeup",
+        "tattoo",
+        "preset",
+        "slider",
+        "clothes",
+        "nails",
+        "lash",
+        "brow",
+        "outfit",
+        "dress",
+        "shoes",
+        "top",
+        "bottom",
+    ),
+    "BuildBuy": (
+        "sofa",
+        "couch",
+        "chair",
+        "desk",
+        "wardrobe",
+        "lamp",
+        "bed",
+        "tv",
+        "sink",
+        "shower",
+        "window",
+        "door",
+        "rug",
+        "table",
+        "counter",
+        "cabinet",
+        "plant",
+        "painting",
+        "light",
+    ),
+    "Pose or Animation": (
+        "pose",
+        "poses",
+        "animation",
+        "animations",
+        "a2o",
+        "a2a",
+        "clip",
+    ),
+    "Tuning": (
+        "tuning",
+        "trait",
+        "loot",
+        "autonomy",
+        "interaction",
+    ),
+}
+
+
+def _resolve_name_tokens(category: str) -> Tuple[str, ...]:
+    fallback_tokens = _prepare_keyword_tokens(_DEFAULT_NAME_TOKENS.get(category, ()))
+    data_tokens: Iterable[object] = ()
+    name_section = _KEYWORDS_DATA.get("name_tokens")
+    if isinstance(name_section, dict):
+        key_map = {
+            "Script Mod": "script",
+            "CAS": "cas",
+            "BuildBuy": "buildbuy",
+            "Pose or Animation": "pose",
+            "Tuning": "tuning",
+        }
+        mapped_key = key_map.get(category)
+        if mapped_key:
+            maybe_tokens = name_section.get(mapped_key, [])
+            if isinstance(maybe_tokens, list):
+                data_tokens = maybe_tokens
+        if category != "Script Mod":
+            generic_tokens = name_section.get("generic", [])
+            if isinstance(generic_tokens, list):
+                data_tokens = list(data_tokens) + list(generic_tokens)
+    if category == "Script Mod":
+        script_tokens = _KEYWORDS_DATA.get("script", [])
+        if isinstance(script_tokens, list):
+            data_tokens = list(data_tokens) + script_tokens
+    resolved = _prepare_keyword_tokens(data_tokens)
+    return _merge_tokens(fallback_tokens, resolved)
+
+
+NAME_KEYWORD_BUCKETS: Tuple[Tuple[str, Tuple[str, ...]], ...] = tuple(
+    (category, _resolve_name_tokens(category))
+    for category in (
+        "Script Mod",
+        "CAS",
+        "BuildBuy",
+        "Pose or Animation",
+        "Tuning",
+    )
+)
+
+
+NAME_PRIORITY: Tuple[str, ...] = (
+    "Script Mod",
+    "CAS",
+    "BuildBuy",
+    "Pose or Animation",
+    "Tuning",
+)
+
+
+NAME_REASON_MAP = {
+    "Script Mod": "name:script",
+    "CAS": "name:cas",
+    "BuildBuy": "name:buildbuy",
+    "Pose or Animation": "name:pose",
+    "Tuning": "name:tuning",
+}
+
+
+def _resolve_script_ids() -> set[str]:
+    fallback = {
+        "mc-command-center",
+        "mc_command_center",
+        "mccc",
+        "xmlinjector",
+        "xml-injector",
+        "ui-cheats-extension",
+        "ui-cheats",
+        "uicheats",
+    }
+    script_tokens = _KEYWORDS_DATA.get("script", [])
+    normalized: set[str] = set()
+    if isinstance(script_tokens, list):
+        for token in script_tokens:
+            norm = normalize_key(str(token))
+            if norm:
+                normalized.add(norm)
+    if not normalized:
+        normalized = {normalize_key(token) for token in fallback if normalize_key(token)}
+    else:
+        normalized.update(normalize_key(token) for token in fallback if normalize_key(token))
+    return normalized
+
+
+SCRIPT_NORMALIZED_IDS = _resolve_script_ids()
+
+
+def _resolve_adult_strong_keywords() -> set[str]:
+    fallback = ("wickedwhims", "deviousdesires", "basemental", "turbodriver", "dd")
+    tokens = set(_prepare_keyword_tokens(fallback))
+    strong_keywords = _KEYWORDS_DATA.get("adult_strong", [])
+    if isinstance(strong_keywords, list):
+        tokens.update(_prepare_keyword_tokens(strong_keywords))
+    return tokens
+
+
+ADULT_STRONG_KEYWORDS = _resolve_adult_strong_keywords()
 
 
 def normalize_extension(ext: str) -> Tuple[str, bool]:
@@ -368,121 +571,6 @@ def _is_resource_ext(ext: str) -> bool:
     return ext in RESOURCE_EXTS
 
 
-NAME_KEYWORD_BUCKETS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
-    (
-        "Script Mod",
-        (
-            "script",
-            "scripts",
-            "scriptmod",
-            "scriptmods",
-            "mccc",
-            "mccommand",
-            "commandcenter",
-            "xml",
-            "injector",
-            "xmlinjector",
-            "uicheats",
-            "cheats",
-        ),
-    ),
-    (
-        "CAS",
-        (
-            "hair",
-            "skin",
-            "makeup",
-            "tattoo",
-            "preset",
-            "slider",
-            "clothes",
-            "nails",
-            "lash",
-            "brow",
-            "outfit",
-            "dress",
-            "shoes",
-            "top",
-            "bottom",
-        ),
-    ),
-    (
-        "BuildBuy",
-        (
-            "sofa",
-            "couch",
-            "chair",
-            "desk",
-            "wardrobe",
-            "lamp",
-            "bed",
-            "tv",
-            "sink",
-            "shower",
-            "window",
-            "door",
-            "rug",
-            "table",
-            "counter",
-            "cabinet",
-            "plant",
-            "painting",
-            "light",
-        ),
-    ),
-    (
-        "Pose or Animation",
-        (
-            "pose",
-            "poses",
-            "animation",
-            "animations",
-            "a2o",
-            "a2a",
-            "clip",
-        ),
-    ),
-    (
-        "Tuning",
-        (
-            "tuning",
-            "trait",
-            "loot",
-            "autonomy",
-            "interaction",
-        ),
-    ),
-)
-
-NAME_PRIORITY: Tuple[str, ...] = (
-    "Script Mod",
-    "CAS",
-    "BuildBuy",
-    "Pose or Animation",
-    "Tuning",
-)
-
-NAME_REASON_MAP = {
-    "Script Mod": "name:script",
-    "CAS": "name:cas",
-    "BuildBuy": "name:buildbuy",
-    "Pose or Animation": "name:pose",
-    "Tuning": "name:tuning",
-}
-
-SCRIPT_NORMALIZED_IDS = {
-    "mc-command-center",
-    "mc_command_center",
-    "mccc",
-    "xmlinjector",
-    "xml-injector",
-    "ui-cheats-extension",
-    "ui-cheats",
-    "uicheats",
-}
-
-ADULT_STRONG_KEYWORDS = {"wickedwhims", "deviousdesires", "basemental", "turbodriver", "dd"}
-
 
 def scan_file(
     path: Path,
@@ -490,19 +578,23 @@ def scan_file(
     routing: Dict[str, str],
     budgets: Dict[str, object],
 ) -> FileItem:
-    items, _metrics = run_classification_pipeline([path], routing, budgets)
+    items, _metrics = run_classification_pipeline([path], routing, budgets, rules)
     return items[0]
 
 
 def run_classification_pipeline(
-    paths: Sequence[Path], routing: Dict[str, str], budgets: Dict[str, object]
+    paths: Sequence[Path],
+    routing: Dict[str, str],
+    budgets: Dict[str, object],
+    rules: Optional[Dict[str, object]] = None,
 ) -> Tuple[List[FileItem], ScanMetrics]:
     start = time.perf_counter()
     entries = _collect_pipeline_entries(paths)
     pair_map = _build_pair_map(entries)
     _apply_name_classification(entries)
     _apply_pair_enforcement(entries, pair_map)
-    _apply_adult_gating(entries)
+    soft_authors = _prepare_keyword_tokens((rules or {}).get("adult_soft_authors", []))
+    _apply_adult_gating(entries, set(soft_authors))
     header_budget = min(int(budgets.get(".package", 131072)), 131072)
     decisive_headers = _apply_fallback_peek(entries, header_budget)
     items = [_finalize_entry(entry, routing) for entry in entries]
@@ -655,15 +747,23 @@ def _apply_pair_enforcement(
                 )
 
 
-def _apply_adult_gating(entries: Sequence[PipelineEntry]) -> None:
+def _apply_adult_gating(
+    entries: Sequence[PipelineEntry], soft_authors: Optional[set[str]] = None
+) -> None:
     for entry in entries:
         decision = entry.decision
-        if decision.category in {"Disabled", "Script Mod"}:
+        if decision.category in {"Disabled", "Script Mod", "Adult"}:
             continue
         tokens = {token.lower() for token in entry.tokens + entry.path_tokens}
         matched = next((token for token in ADULT_STRONG_KEYWORDS if token in tokens), None)
         if matched:
             entry.decision = ClassificationDecision("Adult", 1.0, f"adult:strong:{matched}")
+            continue
+        if not soft_authors or "adult" not in entry.path_tokens:
+            continue
+        soft_match = next((token for token in soft_authors if token in tokens), None)
+        if soft_match:
+            entry.decision = ClassificationDecision("Adult", 0.8, f"adult:soft:{soft_match}")
 
 
 def _apply_fallback_peek(entries: Sequence[PipelineEntry], budget: int) -> int:
@@ -913,7 +1013,7 @@ def scan_folder(
     pipeline_items: List[FileItem] = []
     metrics: Optional[ScanMetrics] = None
     if files:
-        pipeline_items, metrics = run_classification_pipeline(files, routing, budgets)
+        pipeline_items, metrics = run_classification_pipeline(files, routing, budgets, rules)
     else:
         metrics = ScanMetrics(0, 0.0, 0.0, 0, {})
 

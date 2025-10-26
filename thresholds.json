@@ -1,6 +1,0 @@
-{
-  "high_conf": 0.80,
-  "decisive_stop": true,
-  "name_conf_stop": 0.70,
-  "adult_risk_low_skip": true
-}
