@@ -958,7 +958,8 @@ class Sims4ModSorterApp(tk.Tk):
         self._tooltip_after: Optional[str] = None
         self._tooltip_target: Tuple[str, str] = ("", "")
         self._toolbar_widgets: Dict[str, tk.Widget] = {}
-        self._mod_status_window: Optional[tk.Toplevel] = None
+        self._mod_status_overlay: Optional[tk.Frame] = None
+        self._mod_status_container: Optional[ttk.Frame] = None
         self._status_trees: Dict[str, ttk.Treeview] = {}
         self._status_summary_var = tk.StringVar(value="")
         self._update_check_in_progress = False
@@ -1631,6 +1632,24 @@ class Sims4ModSorterApp(tk.Tk):
         style.configure("DialogOverlayHeadline.TLabel", background=palette["alt"], foreground=palette["fg"])
         style.configure("DialogOverlayMessage.TLabel", background=palette["alt"], foreground=palette["fg"])
         style.configure("DialogOverlayButtons.TFrame", background=palette["alt"])
+        style.configure(
+            "PluginStatus.Overlay.TFrame",
+            background=palette["alt"],
+            borderwidth=1,
+            relief="solid",
+        )
+        style.configure("PluginStatus.Header.TFrame", background=palette["alt"])
+        style.configure(
+            "PluginStatus.Title.TLabel",
+            background=palette["alt"],
+            foreground=palette["fg"],
+            font=("TkDefaultFont", 14, "bold"),
+        )
+        style.configure(
+            "PluginStatus.Summary.TLabel",
+            background=palette["alt"],
+            foreground=palette["fg"],
+        )
         sidebar_bg = palette["alt"]
         style.configure("Sidebar.TFrame", background=sidebar_bg)
         style.configure(
@@ -4254,65 +4273,33 @@ for _ in range(10):
         if not self.plugin_manager:
             self._show_info_overlay("Plugin Status", "No plugins loaded.")
             return
-        if self._mod_status_window and self._mod_status_window.winfo_exists():
-            self._populate_mod_status_popup()
-            self._mod_status_window.deiconify()
-            self._mod_status_window.lift()
+        overlay = self._ensure_mod_status_overlay()
+        if overlay is None:
             return
-        palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
-        window = tk.Toplevel(self)
-        window.title("Plugin Status")
-        window.transient(self)
-        window.resizable(False, True)
-        window.configure(bg=palette.get("bg", "#111316"))
-        window.protocol("WM_DELETE_WINDOW", self._close_mod_status_popup)
-        self._mod_status_window = window
-
-        container = ttk.Frame(window, padding=16)
-        container.pack(fill="both", expand=True)
-
-        notebook = ttk.Notebook(container)
-        notebook.pack(fill="both", expand=True)
-
-        loaded_frame = ttk.Frame(notebook)
-        blocked_frame = ttk.Frame(notebook)
-        notebook.add(loaded_frame, text="Loaded")
-        notebook.add(blocked_frame, text="Blocked")
-
-        def create_tree(parent: ttk.Frame) -> ttk.Treeview:
-            frame = ttk.Frame(parent)
-            frame.pack(fill="both", expand=True)
-            tree = ttk.Treeview(frame, columns=("name", "folder", "version", "status", "message"), show="headings", height=8)
-            tree.heading("name", text="Name")
-            tree.heading("folder", text="Folder")
-            tree.heading("version", text="Version")
-            tree.heading("status", text="Status")
-            tree.heading("message", text="Details")
-            tree.column("name", width=220, anchor="w")
-            tree.column("folder", width=120, anchor="w")
-            tree.column("version", width=90, anchor="center")
-            tree.column("status", width=100, anchor="center")
-            tree.column("message", width=260, anchor="w")
-            tree.pack(side="left", fill="both", expand=True)
-            scroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
-            tree.configure(yscrollcommand=scroll.set)
-            scroll.pack(side="right", fill="y")
-            return tree
-
-        loaded_tree = create_tree(loaded_frame)
-        blocked_tree = create_tree(blocked_frame)
-        self._status_trees = {"loaded": loaded_tree, "blocked": blocked_tree}
-
-        summary = ttk.Label(container, textvariable=self._status_summary_var)
-        summary.pack(anchor="w", pady=(12, 0))
-
         self._populate_mod_status_popup()
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        overlay.tkraise()
+        try:
+            overlay.grab_set()
+        except Exception:
+            pass
+        container = getattr(self, "_mod_status_container", None)
+        if container and container.winfo_exists():
+            container.focus_set()
 
     def _close_mod_status_popup(self) -> None:
-        if self._mod_status_window and self._mod_status_window.winfo_exists():
-            self._mod_status_window.destroy()
-        self._mod_status_window = None
+        overlay = getattr(self, "_mod_status_overlay", None)
+        if overlay and overlay.winfo_exists():
+            try:
+                overlay.grab_release()
+            except Exception:
+                pass
+            overlay.place_forget()
+            overlay.destroy()
+        self._mod_status_overlay = None
+        self._mod_status_container = None
         self._status_trees = {}
+        self._status_summary_var.set("")
 
     def _populate_mod_status_popup(self) -> None:
         if not self.plugin_manager:
@@ -4342,6 +4329,111 @@ for _ in range(10):
                 )
         self._status_summary_var.set(f"Loaded: {len(loaded)} | Blocked: {len(blocked)}")
 
+    def _ensure_mod_status_overlay(self) -> tk.Frame | None:
+        overlay = getattr(self, "_mod_status_overlay", None)
+        if overlay and overlay.winfo_exists():
+            self._refresh_mod_status_overlay_theme()
+            return overlay
+
+        palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
+        overlay = tk.Frame(
+            self,
+            bg=_scrim_color(palette.get("bg", "#111316")),
+            highlightthickness=0,
+            bd=0,
+        )
+        overlay.place_forget()
+        overlay.grid_rowconfigure(0, weight=1)
+        overlay.grid_columnconfigure(0, weight=1)
+        overlay.bind("<Escape>", lambda _e: self._close_mod_status_popup())
+        overlay.bind(
+            "<Button-1>",
+            lambda event: self._close_mod_status_popup() if event.widget is overlay else None,
+        )
+
+        container = ttk.Frame(
+            overlay,
+            padding=16,
+            style="PluginStatus.Overlay.TFrame",
+        )
+        container.grid(row=0, column=0, padx=40, pady=40, sticky="nsew")
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(1, weight=1)
+        container.bind("<Escape>", lambda _e: self._close_mod_status_popup())
+
+        header = ttk.Frame(container, style="PluginStatus.Header.TFrame")
+        header.grid(row=0, column=0, sticky="ew")
+        header.columnconfigure(0, weight=1)
+        ttk.Label(header, text="Plugin Status", style="PluginStatus.Title.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Button(header, text="Close", command=self._close_mod_status_popup).grid(
+            row=0, column=1, sticky="e"
+        )
+
+        notebook = ttk.Notebook(container)
+        notebook.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+        notebook.bind("<Escape>", lambda _e: self._close_mod_status_popup())
+
+        loaded_frame = ttk.Frame(notebook)
+        blocked_frame = ttk.Frame(notebook)
+        notebook.add(loaded_frame, text="Loaded")
+        notebook.add(blocked_frame, text="Blocked")
+
+        def create_tree(parent: ttk.Frame) -> ttk.Treeview:
+            frame = ttk.Frame(parent)
+            frame.pack(fill="both", expand=True)
+            tree = ttk.Treeview(
+                frame,
+                columns=("name", "folder", "version", "status", "message"),
+                show="headings",
+                height=8,
+            )
+            tree.heading("name", text="Name")
+            tree.heading("folder", text="Folder")
+            tree.heading("version", text="Version")
+            tree.heading("status", text="Status")
+            tree.heading("message", text="Details")
+            tree.column("name", width=220, anchor="w")
+            tree.column("folder", width=120, anchor="w")
+            tree.column("version", width=90, anchor="center")
+            tree.column("status", width=100, anchor="center")
+            tree.column("message", width=260, anchor="w")
+            tree.pack(side="left", fill="both", expand=True)
+            scroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+            tree.configure(yscrollcommand=scroll.set)
+            scroll.pack(side="right", fill="y")
+            tree.bind("<Escape>", lambda _e: self._close_mod_status_popup())
+            return tree
+
+        loaded_tree = create_tree(loaded_frame)
+        blocked_tree = create_tree(blocked_frame)
+        self._status_trees = {"loaded": loaded_tree, "blocked": blocked_tree}
+
+        ttk.Label(
+            container,
+            textvariable=self._status_summary_var,
+            style="PluginStatus.Summary.TLabel",
+        ).grid(row=2, column=0, sticky="w", pady=(12, 0))
+
+        self._mod_status_overlay = overlay
+        self._mod_status_container = container
+        self._refresh_mod_status_overlay_theme()
+        return overlay
+
+    def _refresh_mod_status_overlay_theme(self) -> None:
+        overlay = getattr(self, "_mod_status_overlay", None)
+        if not overlay or not overlay.winfo_exists():
+            return
+        palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
+        overlay.configure(bg=_scrim_color(palette.get("bg", "#111316")))
+        container = getattr(self, "_mod_status_container", None)
+        if container and container.winfo_exists():
+            try:
+                container.configure(style="PluginStatus.Overlay.TFrame")
+            except tk.TclError:
+                pass
+
     def on_apply_theme(self) -> None:
         self._hide_tooltip()
         self._build_style()
@@ -4358,6 +4450,7 @@ for _ in range(10):
             scrim.configure(bg=_scrim_color(palette.get("bg", "#111316")))
         self._refresh_update_overlay_theme()
         self._refresh_dialog_overlay_theme()
+        self._refresh_mod_status_overlay_theme()
         self._update_theme_preview_highlight()
         dashboard = getattr(self, "command_center", None)
         if dashboard is not None:

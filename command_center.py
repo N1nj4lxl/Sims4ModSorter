@@ -43,27 +43,11 @@ def _mix_colors(foreground: str, background: str, ratio: float) -> str:
     return f"#{blend[0]:02x}{blend[1]:02x}{blend[2]:02x}"
 
 
-def _center(window: tk.Toplevel) -> None:
-    try:
-        window.update_idletasks()
-        width = window.winfo_width()
-        height = window.winfo_height()
-        if width <= 1 or height <= 1:
-            geometry = window.geometry()
-            size = geometry.split("+", 1)[0]
-            if "x" in size:
-                width_str, height_str = size.split("x", 1)
-                width = int(width_str)
-                height = int(height_str)
-            else:
-                width, height = 720, 540
-        screen_w = window.winfo_screenwidth()
-        screen_h = window.winfo_screenheight()
-        x = max(int((screen_w - width) / 2), 0)
-        y = max(int((screen_h - height) / 2), 0)
-        window.geometry(f"{width}x{height}+{x}+{y}")
-    except Exception:
-        return
+def _scrim_color(bg_hex: str) -> str:
+    """Blend the background colour with black for an overlay scrim."""
+
+    darkened = _mix_colors("#000000", bg_hex, 0.55)
+    return darkened or "#000000"
 
 
 class CommandCenter:
@@ -71,7 +55,8 @@ class CommandCenter:
 
     def __init__(self, app: tk.Tk) -> None:
         self.app = app
-        self.window: tk.Toplevel | None = None
+        self.window: tk.Frame | None = None
+        self._shell: ttk.Frame | None = None
         self._content: ttk.Frame | None = None
         self._modal: bool = True
 
@@ -84,14 +69,15 @@ class CommandCenter:
         if self.window is None:
             return
         self.refresh()
-        self.window.deiconify()
-        _center(self.window)
+        self.window.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.window.tkraise()
         if modal:
             try:
                 self.window.grab_set()
             except Exception:
                 pass
-        self.window.focus_set()
+        if self._shell is not None:
+            self._shell.focus_set()
 
     def hide(self) -> None:
         if self.window is None:
@@ -101,12 +87,19 @@ class CommandCenter:
                 self.window.grab_release()
             except Exception:
                 pass
+            self.window.place_forget()
             self.window.destroy()
         self.window = None
+        self._shell = None
         self._content = None
 
     def refresh(self) -> None:
-        if self.window is None or not self.window.winfo_exists() or self._content is None:
+        if (
+            self.window is None
+            or not self.window.winfo_exists()
+            or self._content is None
+            or self._shell is None
+        ):
             return
         self._apply_theme()
         for child in list(self._content.winfo_children()):
@@ -121,7 +114,9 @@ class CommandCenter:
         self.refresh()
 
     def is_visible(self) -> bool:
-        return bool(self.window and self.window.winfo_exists())
+        return bool(
+            self.window and self.window.winfo_exists() and self.window.winfo_ismapped()
+        )
 
     # ------------------------------------------------------------------
     # Construction helpers
@@ -130,22 +125,43 @@ class CommandCenter:
         if self.window is not None and self.window.winfo_exists():
             return
         palette = self._palette()
-        self.window = tk.Toplevel(self.app)
-        self.window.withdraw()
-        self.window.title("Command Center")
-        self.window.transient(self.app)
-        self.window.resizable(False, False)
-        self.window.configure(bg=palette.get("bg", _DEFAULT_PALETTE["bg"]))
-        self.window.protocol("WM_DELETE_WINDOW", self.hide)
-        self.window.bind("<Escape>", lambda _e: self.hide())
+        overlay = tk.Frame(
+            self.app,
+            bg=_scrim_color(palette.get("bg", _DEFAULT_PALETTE["bg"])),
+            highlightthickness=0,
+            bd=0,
+        )
+        overlay.place_forget()
+        overlay.grid_rowconfigure(0, weight=1)
+        overlay.grid_columnconfigure(0, weight=1)
+        overlay.bind("<Escape>", lambda _e: self.hide())
+        overlay.bind(
+            "<Button-1>",
+            lambda event: self.hide() if event.widget is overlay else None,
+        )
 
-        self._content = ttk.Frame(
-            self.window,
+        shell = ttk.Frame(
+            overlay,
+            padding=0,
+            style="CommandCenter.OverlayShell.TFrame",
+        )
+        shell.grid(row=0, column=0, padx=32, pady=32)
+        shell.columnconfigure(0, weight=1)
+        shell.rowconfigure(0, weight=1)
+        shell.bind("<Escape>", lambda _e: self.hide())
+
+        content = ttk.Frame(
+            shell,
             padding=(24, 26, 24, 24),
             style="CommandCenter.Container.TFrame",
         )
-        self._content.pack(fill="both", expand=True)
-        self._content.columnconfigure(0, weight=1)
+        content.grid(row=0, column=0, sticky="nsew")
+        content.columnconfigure(0, weight=1)
+        content.bind("<Escape>", lambda _e: self.hide())
+
+        self.window = overlay
+        self._shell = shell
+        self._content = content
         self._apply_theme()
 
     def _populate_content(self, container: ttk.Frame) -> None:
@@ -384,6 +400,12 @@ class CommandCenter:
         border = _mix_colors(fg, bg, 0.75)
 
         style = ttk.Style(self.window)
+        style.configure(
+            "CommandCenter.OverlayShell.TFrame",
+            background=bg,
+            borderwidth=1,
+            relief="solid",
+        )
         style.configure("CommandCenter.Container.TFrame", background=bg)
         style.configure("CommandCenter.Header.TFrame", background=bg)
         style.configure("CommandCenter.Footer.TFrame", background=bg)
@@ -488,7 +510,12 @@ class CommandCenter:
             foreground=[("disabled", muted)],
         )
 
-        self.window.configure(bg=bg)
+        self.window.configure(bg=_scrim_color(bg))
+        if self._shell is not None and self._shell.winfo_exists():
+            try:
+                self._shell.configure(style="CommandCenter.OverlayShell.TFrame")
+            except tk.TclError:
+                pass
         if self._content is not None and self._content.winfo_exists():
             try:
                 self._content.configure(style="CommandCenter.Container.TFrame")
