@@ -400,22 +400,166 @@ class DependencyAnalyser:
 class DependencyOverlay:
     def __init__(self, api) -> None:
         self.api = api
-        self.window: Optional[tk.Toplevel] = None
-        self.tree: Optional[ttk.Treeview] = None
-        self.status_var: Optional[tk.StringVar] = None
         self._results: List[DependencyResult] = []
-        self._item_links: Dict[str, List[RequirementDetail]] = {}
-        self._link_container: Optional[ttk.Frame] = None
-        self._context_menu: Optional[tk.Menu] = None
+        self._selected: Optional[str] = None
 
     # ------------------------------------------------------------------
     def show(self) -> None:
-        window = self._ensure_window()
-        if not window:
+        app = getattr(self.api, "app", None)
+        if app is None:
             return
-        window.deiconify()
-        window.lift()
-        self._populate()
+        results = list(self._results)
+
+        if not results:
+            self.api.log("[Dependency Tracker] No dependency results to display.")
+
+        def builder(body: ttk.Frame, footer: ttk.Frame) -> None:
+            if body is None or footer is None:
+                return
+            body.grid_columnconfigure(0, weight=1)
+            body.grid_columnconfigure(1, weight=2)
+            body.grid_rowconfigure(0, weight=1)
+
+            tree_frame = ttk.Frame(body, style="Overlay.Body.TFrame")
+            tree_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+            tree_frame.grid_rowconfigure(0, weight=1)
+            tree_frame.grid_columnconfigure(0, weight=1)
+
+            tree = ttk.Treeview(
+                tree_frame,
+                columns=("file", "mod", "status"),
+                show="headings",
+                selectmode="browse",
+            )
+            tree.heading("file", text="File")
+            tree.heading("mod", text="Detected Mod")
+            tree.heading("status", text="Status")
+            tree.column("file", width=220, anchor="w")
+            tree.column("mod", width=160, anchor="w")
+            tree.column("status", width=90, anchor="center")
+            tree.grid(row=0, column=0, sticky="nsew")
+
+            scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+            tree.configure(yscrollcommand=scroll.set)
+            scroll.grid(row=0, column=1, sticky="ns")
+
+            detail = ttk.Frame(body, style="Overlay.Body.TFrame")
+            detail.grid(row=0, column=1, sticky="nsew")
+            detail.grid_columnconfigure(0, weight=1)
+
+            title_var = tk.StringVar(value="Select a mod to review requirements")
+            summary_var = tk.StringVar(value="")
+            ttk.Label(detail, textvariable=title_var, style="Overlay.Title.TLabel").grid(
+                row=0, column=0, sticky="w"
+            )
+            ttk.Label(detail, textvariable=summary_var, style="Overlay.Subtitle.TLabel").grid(
+                row=1, column=0, sticky="w", pady=(6, 0)
+            )
+
+            remediation_frame = ttk.LabelFrame(
+                detail,
+                text="Remediation actions",
+                padding=(12, 10),
+                style="CommandCenter.Section.TLabelframe",
+            )
+            remediation_frame.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+            remediation_frame.grid_columnconfigure(0, weight=1)
+
+            notes_text = tk.Text(detail, height=10, wrap="word")
+            notes_text.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
+            notes_text.configure(state="disabled")
+            detail.grid_rowconfigure(3, weight=1)
+
+            status_bar = ttk.Frame(detail, style="Overlay.Body.TFrame")
+            status_bar.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+            status_var = tk.StringVar(value="No dependencies detected.")
+            ttk.Label(status_bar, textvariable=status_var, style="Overlay.Subtitle.TLabel").pack(anchor="w")
+
+            rows: List[Tuple[str, DependencyResult]] = []
+            for result in results:
+                item = result.item
+                file_name = getattr(item, "name", "Unknown")
+                detected_mod = ", ".join(result.mods) or "Unknown"
+                status = "Missing" if result.missing else "OK"
+                row_id = str(id(result))
+                rows.append((row_id, result))
+                tree.insert("", "end", iid=row_id, values=(file_name, detected_mod, status))
+
+            missing_count = sum(1 for _row_id, res in rows if res.missing)
+            status_var.set(f"Tracked {len(rows)} mod(s); {missing_count} with missing dependencies")
+
+            def update_detail(row_id: Optional[str]) -> None:
+                if not row_id:
+                    title_var.set("Select a mod to review requirements")
+                    summary_var.set("")
+                    notes_text.configure(state="normal")
+                    notes_text.delete("1.0", "end")
+                    notes_text.configure(state="disabled")
+                    for child in remediation_frame.winfo_children():
+                        child.destroy()
+                    return
+                result = next((res for ident, res in rows if ident == row_id), None)
+                if result is None:
+                    return
+                item = result.item
+                display_name = getattr(item, "name", "Unknown")
+                title_var.set(display_name)
+                summary_var.set(result.detail or ("All dependencies resolved" if not result.missing else "Missing dependencies"))
+                for child in remediation_frame.winfo_children():
+                    child.destroy()
+                notes_text.configure(state="normal")
+                notes_text.delete("1.0", "end")
+                if result.requirements:
+                    notes_lines: List[str] = []
+                    for requirement in result.requirements:
+                        state = "Missing" if requirement.missing else "Present"
+                        line = f"{requirement.dependency} ({state})"
+                        if requirement.mod:
+                            line += f" – required by {requirement.mod}"
+                        notes_lines.append(line)
+                        if requirement.missing and requirement.url:
+                            label = requirement.dependency
+                            if requirement.mod:
+                                label = f"Download {requirement.dependency}"
+                            ttk.Button(
+                                remediation_frame,
+                                text=label,
+                                style="CommandCenter.Primary.TButton",
+                                command=lambda url=requirement.url: webbrowser.open(url),
+                            ).pack(fill="x", pady=(0, 6))
+                    if not notes_lines:
+                        notes_lines.append("No dependency notes available.")
+                    notes_text.insert("1.0", "\n".join(notes_lines))
+                else:
+                    notes_text.insert("1.0", "This mod does not declare any dependencies.")
+                notes_text.configure(state="disabled")
+
+            def on_select(_event=None) -> None:
+                selection = tree.selection()
+                row_id = selection[0] if selection else None
+                self._selected = row_id
+                update_detail(row_id)
+
+            tree.bind("<<TreeviewSelect>>", on_select)
+
+            ttk.Button(
+                footer,
+                text="Close",
+                command=lambda: app._hide_overlay_panel("dependency_tracker"),
+            ).pack(side="right")
+
+            if rows:
+                first_id = rows[0][0]
+                tree.selection_set(first_id)
+                update_detail(first_id)
+
+        app._show_overlay_panel(
+            "dependency_tracker",
+            "Dependency Remediation",
+            builder,
+            width=900,
+            height=560,
+        )
 
     def sync(self, results: Sequence[DependencyResult]) -> None:
         self._results = list(results)
@@ -424,142 +568,11 @@ class DependencyOverlay:
             return
 
         def refresh() -> None:
-            self._populate()
+            record = app._overlay_registry.get("dependency_tracker") if hasattr(app, "_overlay_registry") else None
+            if isinstance(record, dict) and record.get("visible"):
+                self.show()
 
         app.after(0, refresh)
-
-    # ------------------------------------------------------------------
-    def _ensure_window(self) -> Optional[tk.Toplevel]:
-        if self.window and self.window.winfo_exists():
-            return self.window
-
-        app = getattr(self.api, "app", None)
-        if app is None:
-            return None
-
-        window = tk.Toplevel(app)
-        window.title("Dependency Tracker Summary")
-        window.geometry("820x460")
-        window.transient(app)
-
-        frame = ttk.Frame(window, padding=12)
-        frame.pack(fill="both", expand=True)
-
-        columns = ("file", "mods", "status", "detail")
-        tree = ttk.Treeview(frame, columns=columns, show="headings")
-        tree.heading("file", text="File")
-        tree.heading("mods", text="Detected Mod")
-        tree.heading("status", text="Status")
-        tree.heading("detail", text="Dependencies")
-        tree.column("file", anchor="w", width=200)
-        tree.column("mods", anchor="w", width=220)
-        tree.column("status", anchor="center", width=100)
-        tree.column("detail", anchor="w", width=360)
-        tree.pack(fill="both", expand=True)
-        self.tree = tree
-
-        tree.bind("<<TreeviewSelect>>", lambda _event: self._update_link_buttons())
-
-        links_frame = ttk.Frame(frame)
-        links_frame.pack(fill="x", expand=False, pady=(8, 0))
-        ttk.Label(links_frame, text="Missing dependency links:").pack(anchor="w")
-        container = ttk.Frame(links_frame)
-        container.pack(anchor="w", fill="x")
-        self._link_container = container
-
-        context_menu = tk.Menu(tree, tearoff=False)
-        self._context_menu = context_menu
-
-        def show_context_menu(event) -> None:
-            item_id = tree.identify_row(event.y)
-            if not item_id:
-                return
-            links = [req for req in self._item_links.get(item_id, []) if req.url]
-            if not links:
-                return
-            context_menu.delete(0, "end")
-            for requirement in links:
-                label = requirement.dependency
-                if requirement.mod:
-                    label = f"{requirement.dependency} (required by {requirement.mod})"
-                context_menu.add_command(
-                    label=label,
-                    command=lambda url=requirement.url: webbrowser.open(url),
-                )
-            if context_menu.index("end") is None:
-                return
-            try:
-                context_menu.tk_popup(event.x_root, event.y_root)
-            finally:
-                context_menu.grab_release()
-
-        tree.bind("<Button-3>", show_context_menu, add="+")
-
-        self.status_var = tk.StringVar(value="No dependencies detected.")
-        ttk.Label(frame, textvariable=self.status_var).pack(anchor="w", pady=(8, 0))
-
-        def on_close() -> None:
-            window.withdraw()
-
-        window.protocol("WM_DELETE_WINDOW", on_close)
-        self.window = window
-        return window
-
-    def _populate(self) -> None:
-        if not self.tree or not self.tree.winfo_exists():
-            return
-        tree = self.tree
-        tree.delete(*tree.get_children())
-        self._item_links.clear()
-        total = len(self._results)
-        missing = 0
-        for result in self._results:
-            item = result.item
-            file_name = getattr(item, "name", "unknown")
-            mods = ", ".join(result.mods)
-            status = "Missing" if result.missing else "OK"
-            if result.missing:
-                missing += 1
-            detail = result.detail
-            item_id = tree.insert("", "end", values=(file_name, mods, status, detail))
-            links = [req for req in result.requirements if req.missing and req.url]
-            if links:
-                self._item_links[item_id] = links
-        if self.status_var is not None:
-            try:
-                if total:
-                    self.status_var.set(f"Tracked {total} mod(s); {missing} with missing dependencies")
-                else:
-                    self.status_var.set("No dependencies detected.")
-            except tk.TclError:
-                pass
-        self._update_link_buttons()
-
-    def _update_link_buttons(self) -> None:
-        container = self._link_container
-        tree = self.tree
-        if container is None or tree is None or not tree.winfo_exists():
-            return
-        for child in container.winfo_children():
-            child.destroy()
-        selection = tree.selection()
-        if not selection:
-            ttk.Label(container, text="Select a row to view available downloads.").pack(anchor="w")
-            return
-        item_id = selection[0]
-        links = self._item_links.get(item_id, [])
-        if not links:
-            ttk.Label(container, text="No URLs available for the selected item.").pack(anchor="w")
-            return
-        for requirement in links:
-            label = requirement.dependency
-            if requirement.mod:
-                label = f"{requirement.dependency} (required by {requirement.mod})"
-            ttk.Button(
-                container,
-                text=label,
-                command=lambda url=requirement.url: webbrowser.open(url),
-            ).pack(anchor="w", pady=(0, 4))
 
 
 class DependencyPlugin:

@@ -1,0 +1,43 @@
+{
+  "plugins": [
+    {
+      "id": "dependency-tracker",
+      "folder": "dependency_tracker",
+      "name": "Dependency Tracker",
+      "description": "Highlights missing script frameworks, provides remediation links, and keeps your mods compliant.",
+      "version": "2.4.0",
+      "author": "Sims4 Mod Sorter Team",
+      "tags": ["analysis", "framework"],
+      "rating": 4.7,
+      "download_url": "https://example.com/dependency-tracker",
+      "homepage": "https://example.com/dependency-tracker",
+      "requires": []
+    },
+    {
+      "id": "cleanup-wizard",
+      "folder": "cleanup_wizard",
+      "name": "Cleanup Wizard",
+      "description": "Automate archive extraction and tidy up broken packages before they reach your game.",
+      "version": "1.3.1",
+      "author": "Community",
+      "tags": ["cleanup", "automation"],
+      "rating": 4.2,
+      "download_url": "https://example.com/cleanup-wizard",
+      "homepage": "https://example.com/cleanup-wizard",
+      "requires": ["dependency-tracker"]
+    },
+    {
+      "id": "runtime-profiler",
+      "folder": "runtime_profiler",
+      "name": "Runtime Profiler",
+      "description": "Capture lightweight metrics about script load times to diagnose sluggish startups.",
+      "version": "0.9.5",
+      "author": "Mod Insights Collective",
+      "tags": ["metrics", "performance"],
+      "rating": 4.5,
+      "download_url": "https://example.com/runtime-profiler",
+      "homepage": "https://example.com/runtime-profiler",
+      "requires": []
+    }
+  ]
+}

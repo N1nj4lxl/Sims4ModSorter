@@ -652,6 +652,12 @@ def _natural_key(value: str) -> Tuple[object, ...]:
 
 LOG_NAME = ".sims4_modsorter_moves.json"
 LOADOUTS_FILENAME = ".sims4_modsorter_loadouts.json"
+LOADOUT_GALLERY_FILENAME = ".sims4_modsorter_gallery.json"
+AUTOMATION_FILENAME = ".sims4_modsorter_automations.json"
+AUTOMATION_VERSION = 1
+PLUGIN_MARKETPLACE_FILENAME = "plugin_marketplace.json"
+PLUGIN_RATINGS_FILENAME = ".sims4_modsorter_plugin_ratings.json"
+MOVE_FAVORITES_FILENAME = ".sims4_modsorter_favorite_moves.json"
 DEFAULT_LOADOUT_NAME = "Default Loadout"
 LOADOUTS_VERSION = 1
 SETTINGS_VERSION = 1
@@ -1019,11 +1025,20 @@ class Sims4ModSorterApp(tk.Tk):
         self._dialog_overlay_cancel: str = ""
         self._dialog_overlay_wait_var: Optional[tk.StringVar] = None
 
-        self._history_window: Optional[tk.Toplevel] = None
-        self._history_tree: Optional[ttk.Treeview] = None
+        self._overlay_registry: Dict[str, Dict[str, object]] = {}
+
         self._history_entries: Dict[str, Dict[str, object]] = {}
-        self._history_preview_btn: Optional[ttk.Button] = None
-        self._history_undo_btn: Optional[ttk.Button] = None
+        self._history_selection: Optional[str] = None
+
+        self.loadout_gallery: List[Dict[str, object]] = []
+        self._gallery_selection: Optional[str] = None
+        self.automation_macros: List[Dict[str, object]] = []
+        self.plugin_catalog: List[Dict[str, object]] = []
+        self.plugin_ratings: Dict[str, Dict[str, object]] = {}
+        self._plugin_marketplace_selection: Optional[str] = None
+
+        self._duplicate_groups: Dict[str, List[FileItem]] = {}
+        self.move_favorites: Set[str] = set()
 
         self.scan_folder_display = tk.StringVar(value="All folders")
         self.scan_folders: Optional[set[str]] = None
@@ -1041,6 +1056,11 @@ class Sims4ModSorterApp(tk.Tk):
         self._loadout_apply_btn: Optional[ttk.Button] = None
 
         self._load_loadouts_from_disk()
+        self._load_loadout_gallery()
+        self._load_automation_macros()
+        self._load_plugin_catalog()
+        self._load_plugin_ratings()
+        self._load_history_favorites()
 
         self._build_style()
         self._build_ui()
@@ -1335,6 +1355,30 @@ class Sims4ModSorterApp(tk.Tk):
             return None
         return root_path / LOADOUTS_FILENAME
 
+    def _resolve_gallery_path(self) -> Optional[Path]:
+        root_value = self.mods_root.get().strip()
+        if not root_value:
+            return None
+        try:
+            root_path = Path(root_value).expanduser()
+        except Exception:
+            return None
+        return root_path / LOADOUT_GALLERY_FILENAME
+
+    def _automation_path(self) -> Path:
+        base = self._settings_file_path().parent
+        return base / AUTOMATION_FILENAME
+
+    def _plugin_ratings_path(self) -> Path:
+        base = self._settings_file_path().parent
+        return base / PLUGIN_RATINGS_FILENAME
+
+    def _plugin_catalog_path(self) -> Path:
+        return Path(__file__).resolve().with_name(PLUGIN_MARKETPLACE_FILENAME)
+
+    def _history_favorites_path(self) -> Path:
+        return self._settings_file_path().parent / MOVE_FAVORITES_FILENAME
+
     def _load_loadouts_from_disk(self) -> None:
         path = self._resolve_loadouts_path()
         loadouts: Dict[str, Dict[str, bool]] = {}
@@ -1361,6 +1405,965 @@ class Sims4ModSorterApp(tk.Tk):
         self.loadouts = loadouts
         self._ensure_loadout_defaults(active_name=active_name)
         self._refresh_loadout_controls()
+
+    def _load_loadout_gallery(self) -> None:
+        path = self._resolve_gallery_path()
+        entries: List[Dict[str, object]] = []
+        if path and path.exists():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                payload = []
+            if isinstance(payload, list):
+                for entry in payload:
+                    if not isinstance(entry, dict):
+                        continue
+                    name = str(entry.get("name") or "").strip()
+                    loadout = entry.get("loadout")
+                    if not name or not isinstance(loadout, dict):
+                        continue
+                    normalized: Dict[str, object] = {
+                        "id": str(entry.get("id") or uuid.uuid4().hex),
+                        "name": name,
+                        "description": str(entry.get("description") or "").strip(),
+                        "tags": [str(tag).strip() for tag in entry.get("tags", []) if str(tag).strip()],
+                        "created": str(entry.get("created") or datetime.utcnow().isoformat()),
+                        "updated": str(entry.get("updated") or datetime.utcnow().isoformat()),
+                        "rating": float(entry.get("rating")) if isinstance(entry.get("rating"), (int, float)) else 0.0,
+                        "downloads": int(entry.get("downloads") or 0),
+                        "loadout": {str(path): bool(flag) for path, flag in loadout.items() if isinstance(path, str)},
+                    }
+                    entries.append(normalized)
+        entries.sort(key=lambda item: (str(item.get("name"))).lower())
+        self.loadout_gallery = entries
+
+    def _save_loadout_gallery(self) -> None:
+        path = self._resolve_gallery_path()
+        if not path:
+            return
+        payload = []
+        for entry in self.loadout_gallery:
+            if not isinstance(entry, dict):
+                continue
+            loadout = entry.get("loadout")
+            if not isinstance(loadout, dict):
+                continue
+            payload.append(
+                {
+                    "id": entry.get("id"),
+                    "name": entry.get("name"),
+                    "description": entry.get("description", ""),
+                    "tags": list(entry.get("tags", [])),
+                    "created": entry.get("created"),
+                    "updated": entry.get("updated"),
+                    "rating": entry.get("rating", 0.0),
+                    "downloads": entry.get("downloads", 0),
+                    "loadout": loadout,
+                }
+            )
+        try:
+            if path.parent:
+                path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception:
+            self.log("Unable to save loadout gallery to disk", level="warn")
+
+    def _load_automation_macros(self) -> None:
+        path = self._automation_path()
+        macros: List[Dict[str, object]] = []
+        if path.exists():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict):
+                raw_macros = payload.get("macros")
+                if isinstance(raw_macros, list):
+                    for entry in raw_macros:
+                        if not isinstance(entry, dict):
+                            continue
+                        name = str(entry.get("name") or "").strip()
+                        steps = entry.get("steps")
+                        if not name or not isinstance(steps, list):
+                            continue
+                        macros.append(
+                            {
+                                "id": str(entry.get("id") or uuid.uuid4().hex),
+                                "name": name,
+                                "description": str(entry.get("description") or "").strip(),
+                                "steps": [dict(step) for step in steps if isinstance(step, dict)],
+                            }
+                        )
+        if not macros:
+            macros = self._default_automation_macros()
+        self.automation_macros = macros
+
+    def _save_automation_macros(self) -> None:
+        path = self._automation_path()
+        payload = {
+            "version": AUTOMATION_VERSION,
+            "macros": [
+                {
+                    "id": entry.get("id"),
+                    "name": entry.get("name"),
+                    "description": entry.get("description", ""),
+                    "steps": entry.get("steps", []),
+                }
+                for entry in self.automation_macros
+                if isinstance(entry, dict)
+            ],
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception:
+            self.log("Unable to save automation macros", level="warn")
+
+    def _default_automation_macros(self) -> List[Dict[str, object]]:
+        return [
+            {
+                "id": uuid.uuid4().hex,
+                "name": "Scan & Apply Active Loadout",
+                "description": "Runs a scan and reapplies whichever loadout is currently selected.",
+                "steps": [
+                    {"action": "scan"},
+                    {"action": "apply_loadout", "name": "__ACTIVE__"},
+                ],
+            },
+            {
+                "id": uuid.uuid4().hex,
+                "name": "Open Mods Folder",
+                "description": "Opens the Mods directory in your file browser.",
+                "steps": [
+                    {"action": "open_mods"},
+                ],
+            },
+            {
+                "id": uuid.uuid4().hex,
+                "name": "Dependency Refresh",
+                "description": "Triggers the dependency tracker to recheck required frameworks after a scan.",
+                "steps": [
+                    {"action": "scan"},
+                    {"action": "run_plugin", "plugin": "dependency_tracker"},
+                ],
+            },
+        ]
+
+    def _load_plugin_catalog(self) -> None:
+        path = self._plugin_catalog_path()
+        entries: List[Dict[str, object]] = []
+        if path.exists():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict):
+                raw_entries = payload.get("plugins")
+                if isinstance(raw_entries, list):
+                    for entry in raw_entries:
+                        if not isinstance(entry, dict):
+                            continue
+                        plugin_id = str(entry.get("id") or entry.get("slug") or "").strip()
+                        name = str(entry.get("name") or "").strip()
+                        if not plugin_id or not name:
+                            continue
+                        entries.append(
+                            {
+                                "id": plugin_id,
+                                "name": name,
+                                "description": str(entry.get("description") or "").strip(),
+                                "version": str(entry.get("version") or "").strip(),
+                                "folder": str(entry.get("folder") or plugin_id),
+                                "author": str(entry.get("author") or "Unknown"),
+                                "tags": [str(tag).strip() for tag in entry.get("tags", []) if str(tag).strip()],
+                                "rating": float(entry.get("rating")) if isinstance(entry.get("rating"), (int, float)) else 0.0,
+                                "download_url": str(entry.get("download_url") or entry.get("url") or "").strip(),
+                                "homepage": str(entry.get("homepage") or "").strip(),
+                                "requires": [str(req).strip() for req in entry.get("requires", []) if str(req).strip()],
+                            }
+                        )
+        entries.sort(key=lambda item: (str(item.get("name"))).lower())
+        self.plugin_catalog = entries
+
+    def _load_plugin_ratings(self) -> None:
+        path = self._plugin_ratings_path()
+        ratings: Dict[str, Dict[str, object]] = {}
+        if path.exists():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict):
+                for plugin_id, rating in payload.items():
+                    try:
+                        plugin_key = str(plugin_id).strip()
+                    except Exception:
+                        continue
+                    if not plugin_key:
+                        continue
+                    if isinstance(rating, dict):
+                        entry = {
+                            "rating": float(rating.get("rating", 0.0)),
+                            "notes": str(rating.get("notes") or ""),
+                            "updated": str(rating.get("updated") or datetime.utcnow().isoformat()),
+                        }
+                    else:
+                        entry = {
+                            "rating": float(rating),
+                            "notes": "",
+                            "updated": datetime.utcnow().isoformat(),
+                        }
+                    ratings[plugin_key] = entry
+        self.plugin_ratings = ratings
+
+    def _save_plugin_ratings(self) -> None:
+        path = self._plugin_ratings_path()
+        payload = {
+            plugin_id: {
+                "rating": float(entry.get("rating", 0.0)),
+                "notes": entry.get("notes", ""),
+                "updated": entry.get("updated", datetime.utcnow().isoformat()),
+            }
+            for plugin_id, entry in self.plugin_ratings.items()
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception:
+            self.log("Unable to persist plugin ratings", level="warn")
+
+    def _user_rating_for(self, plugin_id: str) -> float:
+        entry = self.plugin_ratings.get(plugin_id)
+        if not entry:
+            return 0.0
+        try:
+            return float(entry.get("rating", 0.0))
+        except Exception:
+            return 0.0
+
+    def _load_history_favorites(self) -> None:
+        path = self._history_favorites_path()
+        favorites: Set[str] = set()
+        if path.exists():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                payload = []
+            if isinstance(payload, (list, set, tuple)):
+                favorites = {str(entry).strip() for entry in payload if str(entry).strip()}
+        self.move_favorites = favorites
+
+    def _save_history_favorites(self) -> None:
+        path = self._history_favorites_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(sorted(self.move_favorites)), encoding="utf-8")
+        except Exception:
+            self.log("Unable to save history favorites", level="warn")
+
+    def _find_gallery_entry(self, entry_id: str) -> Optional[Dict[str, object]]:
+        for entry in self.loadout_gallery:
+            if str(entry.get("id")) == entry_id:
+                return entry
+        return None
+
+    def _rebuild_duplicate_groups(self) -> None:
+        groups: Dict[str, List[FileItem]] = {}
+        for entry in self.items:
+            extras = getattr(entry, "extras", {})
+            if not isinstance(extras, dict):
+                continue
+            fingerprint = str(extras.get(FINGERPRINT_EXTRA_KEY, ""))
+            if fingerprint:
+                groups.setdefault(fingerprint, []).append(entry)
+        self._duplicate_groups = {key: value for key, value in groups.items() if len(value) > 1}
+
+    def show_duplicate_comparison(self) -> None:
+        self._rebuild_duplicate_groups()
+        if not self._duplicate_groups:
+            self._show_info_overlay("Duplicates", "No duplicates were flagged in the current plan.")
+            return
+        selection = list(self.tree.selection()) if hasattr(self, "tree") else []
+        target_group: Optional[str] = None
+        for iid in selection:
+            item = self.items_by_path.get(iid)
+            extras = getattr(item, "extras", {}) if item else {}
+            fingerprint = str(extras.get(FINGERPRINT_EXTRA_KEY, "")) if isinstance(extras, dict) else ""
+            if fingerprint and fingerprint in self._duplicate_groups:
+                target_group = fingerprint
+                break
+        if not target_group:
+            target_group = next(iter(self._duplicate_groups.keys()))
+        group_items = list(self._duplicate_groups.get(target_group, []))
+        if not group_items:
+            self._show_info_overlay("Duplicates", "No duplicates were found for the selection.")
+            return
+        group_items.sort(key=lambda entry: _natural_key(entry.relpath))
+
+        def builder(body: ttk.Frame, footer: ttk.Frame) -> None:
+            if body is None or footer is None:
+                return
+            body.grid_columnconfigure(0, weight=1)
+            body.grid_columnconfigure(1, weight=1)
+            body.grid_rowconfigure(0, weight=1)
+
+            tree_frame = ttk.Frame(body, style="Overlay.Body.TFrame")
+            tree_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+            tree_frame.grid_rowconfigure(0, weight=1)
+            tree_frame.grid_columnconfigure(0, weight=1)
+
+            tree = ttk.Treeview(
+                tree_frame,
+                columns=("include", "path", "size", "target"),
+                show="headings",
+                selectmode="browse",
+            )
+            tree.heading("include", text="✔")
+            tree.heading("path", text="Path")
+            tree.heading("size", text="MB")
+            tree.heading("target", text="Target")
+            tree.column("include", width=40, anchor="center")
+            tree.column("path", width=220, anchor="w")
+            tree.column("size", width=70, anchor="e")
+            tree.column("target", width=120, anchor="w")
+            tree.grid(row=0, column=0, sticky="nsew")
+
+            scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+            tree.configure(yscrollcommand=scroll.set)
+            scroll.grid(row=0, column=1, sticky="ns")
+
+            comparison = ttk.Frame(body, style="Overlay.Body.TFrame")
+            comparison.grid(row=0, column=1, sticky="nsew")
+            for idx in range(2):
+                comparison.grid_columnconfigure(idx, weight=1)
+
+            primary = group_items[0]
+
+            ttk.Label(comparison, text="Primary", style="Overlay.Title.TLabel").grid(
+                row=0, column=0, sticky="w"
+            )
+            ttk.Label(comparison, text="Selected", style="Overlay.Title.TLabel").grid(
+                row=0, column=1, sticky="w"
+            )
+
+            primary_path = tk.StringVar(value=primary.relpath)
+            primary_size = tk.StringVar(value=f"{primary.size_mb:.2f} MB")
+            primary_target = tk.StringVar(value=primary.target_folder)
+            primary_include = tk.StringVar(value="Yes" if primary.include else "No")
+
+            ttk.Label(comparison, textvariable=primary_path, style="Overlay.Subtitle.TLabel").grid(
+                row=1, column=0, sticky="w"
+            )
+            ttk.Label(comparison, textvariable=primary_size, style="Overlay.Subtitle.TLabel").grid(
+                row=2, column=0, sticky="w"
+            )
+            ttk.Label(comparison, textvariable=primary_target, style="Overlay.Subtitle.TLabel").grid(
+                row=3, column=0, sticky="w"
+            )
+            ttk.Label(comparison, textvariable=primary_include, style="Overlay.Subtitle.TLabel").grid(
+                row=4, column=0, sticky="w"
+            )
+
+            selected_path = tk.StringVar(value="Select a duplicate to compare")
+            selected_size = tk.StringVar(value="")
+            selected_target = tk.StringVar(value="")
+            selected_include = tk.StringVar(value="")
+            diff_var = tk.StringVar(value="")
+
+            ttk.Label(comparison, textvariable=selected_path, style="Overlay.Subtitle.TLabel").grid(
+                row=1, column=1, sticky="w"
+            )
+            ttk.Label(comparison, textvariable=selected_size, style="Overlay.Subtitle.TLabel").grid(
+                row=2, column=1, sticky="w"
+            )
+            ttk.Label(comparison, textvariable=selected_target, style="Overlay.Subtitle.TLabel").grid(
+                row=3, column=1, sticky="w"
+            )
+            ttk.Label(comparison, textvariable=selected_include, style="Overlay.Subtitle.TLabel").grid(
+                row=4, column=1, sticky="w"
+            )
+            ttk.Label(comparison, textvariable=diff_var, style="Overlay.Subtitle.TLabel").grid(
+                row=5, column=0, columnspan=2, sticky="w", pady=(10, 0)
+            )
+
+            def refresh_tree(select_id: Optional[str] = None) -> None:
+                tree.delete(*tree.get_children())
+                for item in group_items:
+                    include_icon = "✓" if item.include else ""
+                    tree.insert(
+                        "",
+                        "end",
+                        iid=str(item.path),
+                        values=(
+                            include_icon,
+                            item.relpath,
+                            f"{item.size_mb:.2f}",
+                            item.target_folder,
+                        ),
+                    )
+                if select_id:
+                    try:
+                        tree.selection_set(select_id)
+                        tree.focus(select_id)
+                    except tk.TclError:
+                        pass
+
+            def describe_difference(base: FileItem, other: FileItem) -> str:
+                differences: List[str] = []
+                if abs(base.size_mb - other.size_mb) > 0.01:
+                    differences.append(
+                        f"Size diff: {base.size_mb:.2f} vs {other.size_mb:.2f} MB"
+                    )
+                if base.target_folder != other.target_folder:
+                    differences.append(
+                        f"Folder diff: {base.target_folder or 'Default'} vs {other.target_folder or 'Default'}"
+                    )
+                if base.include != other.include:
+                    differences.append(
+                        "Include state differs"
+                    )
+                if base.bundle != other.bundle:
+                    differences.append("Bundle status differs")
+                return "; ".join(differences) if differences else "Files share identical metadata."
+
+            def update_detail(iid: Optional[str]) -> None:
+                if not iid:
+                    selected_path.set("Select a duplicate to compare")
+                    selected_size.set("")
+                    selected_target.set("")
+                    selected_include.set("")
+                    diff_var.set("")
+                    return
+                current = next((item for item in group_items if str(item.path) == iid), None)
+                if current is None:
+                    selected_path.set("Select a duplicate to compare")
+                    selected_size.set("")
+                    selected_target.set("")
+                    selected_include.set("")
+                    diff_var.set("")
+                    return
+                selected_path.set(current.relpath)
+                selected_size.set(f"{current.size_mb:.2f} MB")
+                selected_target.set(current.target_folder)
+                selected_include.set("Included" if current.include else "Excluded")
+                diff_var.set(describe_difference(primary, current))
+
+            def on_select(_event=None) -> None:
+                selection = tree.selection()
+                update_detail(selection[0] if selection else None)
+
+            tree.bind("<<TreeviewSelect>>", on_select)
+
+            def keep_selected() -> None:
+                selection = tree.selection()
+                if not selection:
+                    self._show_info_overlay("Duplicates", "Select a duplicate to keep first.")
+                    return
+                selected_item = next((item for item in group_items if str(item.path) == selection[0]), None)
+                if selected_item is None:
+                    return
+                for item in group_items:
+                    item.include = item is selected_item
+                self._refresh_tree()
+                self._rebuild_duplicate_groups()
+                refresh_tree(selection[0])
+                update_detail(selection[0])
+                self._show_info_overlay("Duplicates", f"Keeping only '{selected_item.relpath}'.")
+
+            def open_location() -> None:
+                selection = tree.selection()
+                if not selection:
+                    self._show_info_overlay("Duplicates", "Select a duplicate to open first.")
+                    return
+                target = Path(selection[0])
+                folder = target.parent
+                try:
+                    if sys.platform.startswith("win"):
+                        os.startfile(str(folder))  # type: ignore[attr-defined]
+                    elif sys.platform == "darwin":
+                        subprocess.Popen(["open", str(folder)])
+                    else:
+                        subprocess.Popen(["xdg-open", str(folder)])
+                except Exception as exc:
+                    self._show_error_overlay("Duplicates", f"Unable to open location: {exc}")
+
+            ttk.Button(footer, text="Keep only selected", command=keep_selected).pack(side="left", padx=(0, 8))
+            ttk.Button(footer, text="Open location", command=open_location).pack(side="left")
+            ttk.Button(footer, text="Close", command=lambda: self._hide_overlay_panel("duplicate_diff")).pack(
+                side="right"
+            )
+
+            refresh_tree(str(group_items[0].path))
+            tree.selection_set(str(group_items[0].path))
+            update_detail(str(group_items[0].path))
+
+        title = f"Duplicate Comparison ({len(group_items)} files)"
+        self._show_overlay_panel("duplicate_diff", title, builder, width=900, height=520)
+
+    def show_loadout_gallery(self) -> None:
+        def builder(body: ttk.Frame, footer: ttk.Frame) -> None:
+            if body is None or footer is None:
+                return
+            body.grid_columnconfigure(0, weight=1)
+            body.grid_columnconfigure(1, weight=2)
+            body.grid_rowconfigure(0, weight=1)
+
+            tree_frame = ttk.Frame(body, style="Overlay.Body.TFrame")
+            tree_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+            tree_frame.grid_columnconfigure(0, weight=1)
+            tree_frame.grid_rowconfigure(0, weight=1)
+
+            tree = ttk.Treeview(
+                tree_frame,
+                columns=("name", "tags", "rating"),
+                show="headings",
+                selectmode="browse",
+                height=12,
+            )
+            tree.heading("name", text="Name")
+            tree.heading("tags", text="Tags")
+            tree.heading("rating", text="Rating")
+            tree.column("name", width=200, anchor="w")
+            tree.column("tags", width=120, anchor="w")
+            tree.column("rating", width=80, anchor="center")
+            tree.grid(row=0, column=0, sticky="nsew")
+
+            scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+            tree.configure(yscrollcommand=scroll.set)
+            scroll.grid(row=0, column=1, sticky="ns")
+
+            detail = ttk.Frame(body, style="Overlay.Body.TFrame")
+            detail.grid(row=0, column=1, sticky="nsew")
+            detail.grid_columnconfigure(0, weight=1)
+
+            title_var = tk.StringVar(value="Select a gallery entry")
+            desc_var = tk.StringVar(value="Pick a curated loadout to review its details.")
+            tags_var = tk.StringVar(value="")
+            stats_var = tk.StringVar(value="")
+
+            ttk.Label(detail, textvariable=title_var, style="Overlay.Title.TLabel").grid(
+                row=0, column=0, sticky="w"
+            )
+            ttk.Label(detail, textvariable=desc_var, style="Overlay.Subtitle.TLabel").grid(
+                row=1, column=0, sticky="w", pady=(6, 0)
+            )
+            ttk.Label(detail, textvariable=tags_var, style="Overlay.Subtitle.TLabel").grid(
+                row=2, column=0, sticky="w", pady=(4, 0)
+            )
+            ttk.Label(detail, textvariable=stats_var, style="Overlay.Subtitle.TLabel").grid(
+                row=3, column=0, sticky="w", pady=(4, 0)
+            )
+
+            publish_frame = ttk.LabelFrame(
+                detail,
+                text="Publish current loadout",
+                padding=(12, 10),
+                style="CommandCenter.Section.TLabelframe",
+            )
+            publish_frame.grid(row=4, column=0, sticky="ew", pady=(16, 0))
+            publish_frame.grid_columnconfigure(0, weight=1)
+
+            publish_name = tk.StringVar(value=self._active_loadout_name)
+            publish_tags = tk.StringVar(value="")
+            ttk.Label(publish_frame, text="Name").grid(row=0, column=0, sticky="w")
+            ttk.Entry(publish_frame, textvariable=publish_name).grid(row=1, column=0, sticky="ew")
+            ttk.Label(publish_frame, text="Tags (comma separated)").grid(row=2, column=0, sticky="w", pady=(8, 0))
+            ttk.Entry(publish_frame, textvariable=publish_tags).grid(row=3, column=0, sticky="ew")
+            ttk.Label(publish_frame, text="Description").grid(row=4, column=0, sticky="w", pady=(8, 0))
+            desc_text = tk.Text(publish_frame, height=4, wrap="word")
+            desc_text.grid(row=5, column=0, sticky="ew")
+            desc_text.insert("1.0", f"Captured from loadout '{self._active_loadout_name}'.")
+
+            def refresh_tree(select_id: Optional[str] = None) -> None:
+                tree.delete(*tree.get_children())
+                for entry in self.loadout_gallery:
+                    tags_display = ", ".join(entry.get("tags", [])[:3])
+                    tree.insert(
+                        "",
+                        "end",
+                        iid=str(entry.get("id")),
+                        values=(entry.get("name"), tags_display, f"{float(entry.get('rating', 0.0)):.1f}"),
+                    )
+                target = select_id or self._gallery_selection
+                if target:
+                    try:
+                        tree.selection_set(target)
+                        tree.focus(target)
+                    except tk.TclError:
+                        pass
+
+            def update_detail(entry_id: Optional[str]) -> None:
+                entry = self._find_gallery_entry(entry_id or "")
+                if not entry:
+                    title_var.set("Select a gallery entry")
+                    desc_var.set("Pick a curated loadout to review its details.")
+                    tags_var.set("")
+                    stats_var.set("")
+                    return
+                title_var.set(entry.get("name", "Untitled"))
+                desc = entry.get("description", "") or "No description provided."
+                desc_var.set(desc)
+                tags = entry.get("tags", [])
+                tags_var.set("Tags: " + (", ".join(tags) if tags else "None"))
+                loadout = entry.get("loadout", {})
+                stats_var.set(
+                    f"Entries: {len(loadout)} | Rating: {float(entry.get('rating', 0.0)):.1f} | Downloads: {int(entry.get('downloads', 0))}"
+                )
+
+            def on_select(_event=None) -> None:
+                selection = tree.selection()
+                if selection:
+                    self._gallery_selection = selection[0]
+                else:
+                    self._gallery_selection = None
+                update_detail(self._gallery_selection)
+
+            tree.bind("<<TreeviewSelect>>", on_select)
+
+            def publish_entry() -> None:
+                name = publish_name.get().strip()
+                if not name:
+                    self._show_error_overlay("Loadout Gallery", "Provide a name before publishing.")
+                    return
+                mapping = self.loadouts.get(self._active_loadout_name)
+                if not mapping:
+                    mapping = {str(item.path): bool(item.include) for item in self.items}
+                if not mapping:
+                    self._show_warning_overlay(
+                        "Loadout Gallery",
+                        "No files are associated with the active loadout yet.",
+                    )
+                    return
+                tags = [token.strip() for token in publish_tags.get().split(",") if token.strip()]
+                description = desc_text.get("1.0", "end").strip()
+                entry_id = uuid.uuid4().hex
+                now = datetime.utcnow().isoformat()
+                self.loadout_gallery.append(
+                    {
+                        "id": entry_id,
+                        "name": name,
+                        "description": description,
+                        "tags": tags,
+                        "created": now,
+                        "updated": now,
+                        "rating": 0.0,
+                        "downloads": 0,
+                        "loadout": dict(mapping),
+                    }
+                )
+                self.loadout_gallery.sort(key=lambda item: str(item.get("name")).lower())
+                self._save_loadout_gallery()
+                refresh_tree(entry_id)
+                update_detail(entry_id)
+                self._show_info_overlay("Loadout Gallery", f"Published '{name}' to the gallery.")
+
+            ttk.Button(publish_frame, text="Publish", command=publish_entry).grid(
+                row=6, column=0, sticky="e", pady=(10, 0)
+            )
+
+            def import_selected(apply: bool) -> None:
+                selection = tree.selection()
+                if not selection:
+                    self._show_info_overlay("Loadout Gallery", "Select a loadout to import first.")
+                    return
+                entry = self._find_gallery_entry(selection[0])
+                if not entry:
+                    self._show_error_overlay("Loadout Gallery", "Selected entry is no longer available.")
+                    refresh_tree()
+                    return
+                mapping = entry.get("loadout", {})
+                if not isinstance(mapping, dict):
+                    self._show_error_overlay("Loadout Gallery", "This entry has no loadout data.")
+                    return
+                base_name = str(entry.get("name") or "Imported Loadout").strip() or "Imported Loadout"
+                target_name = base_name
+                counter = 1
+                while target_name in self.loadouts:
+                    counter += 1
+                    target_name = f"{base_name} ({counter})"
+                self.loadouts[target_name] = {str(path): bool(flag) for path, flag in mapping.items()}
+                self._active_loadout_name = target_name
+                self.loadout_var.set(target_name)
+                entry["downloads"] = int(entry.get("downloads", 0)) + 1
+                entry["updated"] = datetime.utcnow().isoformat()
+                self._refresh_loadout_controls()
+                self._save_loadouts_to_disk()
+                self._save_loadout_gallery()
+                if apply:
+                    self._apply_loadout_to_items(target_name)
+                self._show_info_overlay(
+                    "Loadout Gallery",
+                    f"Imported loadout '{target_name}'.",
+                )
+                refresh_tree(selection[0])
+                update_detail(selection[0])
+
+            def delete_selected() -> None:
+                selection = tree.selection()
+                if not selection:
+                    self._show_info_overlay("Loadout Gallery", "Select a loadout to remove first.")
+                    return
+                entry = self._find_gallery_entry(selection[0])
+                if not entry:
+                    refresh_tree()
+                    return
+                if not self._ask_yes_no_overlay(
+                    "Remove Entry",
+                    f"Remove '{entry.get('name', 'Untitled')}' from the gallery?",
+                    default="no",
+                ):
+                    return
+                self.loadout_gallery = [item for item in self.loadout_gallery if item is not entry]
+                self._save_loadout_gallery()
+                self._gallery_selection = None
+                refresh_tree()
+                update_detail(None)
+
+            ttk.Button(footer, text="Import", command=lambda: import_selected(False)).pack(
+                side="left", padx=(0, 8)
+            )
+            ttk.Button(footer, text="Import & Apply", command=lambda: import_selected(True)).pack(
+                side="left", padx=(0, 8)
+            )
+            ttk.Button(footer, text="Remove", command=delete_selected).pack(side="left")
+            ttk.Button(footer, text="Close", command=lambda: self._hide_overlay_panel("loadout_gallery")).pack(
+                side="right"
+            )
+
+            refresh_tree()
+        update_detail(self._gallery_selection)
+
+        self._show_overlay_panel("loadout_gallery", "Community Loadout Gallery", builder, width=880, height=560)
+
+    def show_plugin_marketplace(self) -> None:
+        def builder(body: ttk.Frame, footer: ttk.Frame) -> None:
+            if body is None or footer is None:
+                return
+            body.grid_columnconfigure(0, weight=1)
+            body.grid_columnconfigure(1, weight=2)
+            body.grid_rowconfigure(0, weight=1)
+
+            tree_frame = ttk.Frame(body, style="Overlay.Body.TFrame")
+            tree_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+            tree_frame.grid_columnconfigure(0, weight=1)
+            tree_frame.grid_rowconfigure(0, weight=1)
+
+            tree = ttk.Treeview(
+                tree_frame,
+                columns=("name", "status", "rating"),
+                show="headings",
+                selectmode="browse",
+                height=12,
+            )
+            tree.heading("name", text="Plugin")
+            tree.heading("status", text="Status")
+            tree.heading("rating", text="Rating")
+            tree.column("name", width=220, anchor="w")
+            tree.column("status", width=120, anchor="center")
+            tree.column("rating", width=80, anchor="center")
+            tree.grid(row=0, column=0, sticky="nsew")
+
+            scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+            tree.configure(yscrollcommand=scroll.set)
+            scroll.grid(row=0, column=1, sticky="ns")
+
+            detail = ttk.Frame(body, style="Overlay.Body.TFrame")
+            detail.grid(row=0, column=1, sticky="nsew")
+            detail.grid_columnconfigure(0, weight=1)
+
+            title_var = tk.StringVar(value="Select a plugin")
+            desc_var = tk.StringVar(value="Browse curated extensions and manage ratings.")
+            meta_var = tk.StringVar(value="")
+            version_var = tk.StringVar(value="")
+            user_rating_var = tk.StringVar(value="Your rating: –")
+
+            ttk.Label(detail, textvariable=title_var, style="Overlay.Title.TLabel").grid(
+                row=0, column=0, sticky="w"
+            )
+            ttk.Label(detail, textvariable=desc_var, style="Overlay.Subtitle.TLabel").grid(
+                row=1, column=0, sticky="w", pady=(6, 0)
+            )
+            ttk.Label(detail, textvariable=meta_var, style="Overlay.Subtitle.TLabel").grid(
+                row=2, column=0, sticky="w", pady=(4, 0)
+            )
+            ttk.Label(detail, textvariable=version_var, style="Overlay.Subtitle.TLabel").grid(
+                row=3, column=0, sticky="w", pady=(4, 0)
+            )
+            ttk.Label(detail, textvariable=user_rating_var, style="Overlay.Subtitle.TLabel").grid(
+                row=4, column=0, sticky="w", pady=(4, 0)
+            )
+
+            rating_var = tk.DoubleVar(value=0.0)
+            rating_frame = ttk.Frame(detail, style="Overlay.Body.TFrame")
+            rating_frame.grid(row=5, column=0, sticky="ew", pady=(12, 0))
+            ttk.Label(rating_frame, text="Set rating (0-5)").grid(row=0, column=0, sticky="w")
+            rating_scale = ttk.Scale(rating_frame, from_=0.0, to=5.0, orient="horizontal", variable=rating_var)
+            rating_scale.grid(row=1, column=0, sticky="ew")
+
+            buttons_frame = ttk.Frame(detail, style="Overlay.Body.TFrame")
+            buttons_frame.grid(row=6, column=0, sticky="w", pady=(16, 0))
+            install_btn = ttk.Button(buttons_frame, text="Open download")
+            install_btn.grid(row=0, column=0, padx=(0, 8))
+            homepage_btn = ttk.Button(buttons_frame, text="Homepage")
+            homepage_btn.grid(row=0, column=1, padx=(0, 8))
+            folder_btn = ttk.Button(buttons_frame, text="Open folder")
+            folder_btn.grid(row=0, column=2, padx=(0, 8))
+            rate_btn = ttk.Button(buttons_frame, text="Save rating")
+            rate_btn.grid(row=0, column=3)
+
+            catalog_by_id = {str(entry.get("id")): entry for entry in self.plugin_catalog}
+            catalog_by_folder = {str(entry.get("folder")): entry for entry in self.plugin_catalog}
+            installed_map: Dict[str, PluginStatus] = {}
+            if self.plugin_manager:
+                for status in self.plugin_manager.get_statuses():
+                    installed_map[status.folder] = status
+
+            rows: List[Dict[str, object]] = []
+            for entry_id, entry in catalog_by_id.items():
+                folder = str(entry.get("folder"))
+                installed = installed_map.get(folder)
+                installed_version = installed.version if installed else ""
+                catalog_version = str(entry.get("version") or "")
+                if installed and catalog_version:
+                    comparison = _compare_versions(installed_version or "0", catalog_version)
+                    if comparison < 0:
+                        status_text = "Update available"
+                    elif comparison > 0:
+                        status_text = "Ahead of catalog"
+                    else:
+                        status_text = "Up to date"
+                elif installed:
+                    status_text = installed.status.title()
+                else:
+                    status_text = "Not installed"
+                rating = max(float(entry.get("rating", 0.0)), self._user_rating_for(entry_id))
+                rows.append(
+                    {
+                        "id": entry_id,
+                        "name": entry.get("name"),
+                        "status": status_text,
+                        "rating": rating,
+                        "catalog": entry,
+                        "installed": installed,
+                    }
+                )
+
+            for folder, status in installed_map.items():
+                if folder not in catalog_by_folder:
+                    entry_id = f"installed::{folder}"
+                    rows.append(
+                        {
+                            "id": entry_id,
+                            "name": status.name,
+                            "status": status.status.title(),
+                            "rating": 0.0,
+                            "catalog": None,
+                            "installed": status,
+                        }
+                    )
+
+            def refresh_tree(select_id: Optional[str] = None) -> None:
+                tree.delete(*tree.get_children())
+                for record in rows:
+                    tree.insert(
+                        "",
+                        "end",
+                        iid=str(record["id"]),
+                        values=(record.get("name"), record.get("status"), f"{record.get('rating', 0.0):.1f}"),
+                    )
+                target = select_id or self._plugin_marketplace_selection
+                if target:
+                    try:
+                        tree.selection_set(target)
+                        tree.focus(target)
+                    except tk.TclError:
+                        pass
+
+            def update_detail(entry_id: Optional[str]) -> None:
+                record = next((item for item in rows if str(item.get("id")) == entry_id), None)
+                if not record:
+                    title_var.set("Select a plugin")
+                    desc_var.set("Browse curated extensions and manage ratings.")
+                    meta_var.set("")
+                    version_var.set("")
+                    user_rating_var.set("Your rating: –")
+                    rating_var.set(0.0)
+                    for widget in (install_btn, homepage_btn, folder_btn, rate_btn):
+                        widget.configure(state="disabled")
+                    return
+                catalog = record.get("catalog")
+                installed = record.get("installed")
+                title_var.set(str(record.get("name") or "Unknown plugin"))
+                if isinstance(catalog, dict):
+                    desc = catalog.get("description", "") or "No description provided."
+                    desc_var.set(desc)
+                    tags = catalog.get("tags", [])
+                    meta_var.set(
+                        "Tags: " + (", ".join(tags) if tags else "None") + f" | Author: {catalog.get('author', 'Unknown')}"
+                    )
+                    catalog_version = str(catalog.get("version") or "Unknown")
+                else:
+                    desc_var.set("Installed plugin not in catalog.")
+                    meta_var.set("Tags: – | Author: –")
+                    catalog_version = "Unknown"
+                installed_version = getattr(installed, "version", "") or "Not installed"
+                version_var.set(f"Catalog version: {catalog_version} | Installed: {installed_version}")
+                entry_id = str(record.get("id"))
+                user_rating = self._user_rating_for(entry_id)
+                if user_rating:
+                    user_rating_var.set(f"Your rating: {user_rating:.1f}/5")
+                else:
+                    user_rating_var.set("Your rating: –")
+                rating_var.set(user_rating or float(record.get("rating", 0.0)))
+
+                download_url = str(catalog.get("download_url") if isinstance(catalog, dict) else "")
+                homepage_url = str(catalog.get("homepage") if isinstance(catalog, dict) else "")
+                folder_name = str(getattr(installed, "folder", ""))
+
+                install_btn.configure(
+                    state="normal" if download_url else "disabled",
+                    command=(lambda url=download_url: webbrowser.open(url) if url else None),
+                )
+                homepage_btn.configure(
+                    state="normal" if homepage_url else "disabled",
+                    command=(lambda url=homepage_url: webbrowser.open(url) if url else None),
+                )
+                folder_btn.configure(
+                    state="normal" if folder_name else "disabled",
+                    command=(lambda name=folder_name: self._open_plugin_folder(name) if name else None),
+                )
+
+                def save_rating() -> None:
+                    self.plugin_ratings[entry_id] = {
+                        "rating": float(rating_var.get()),
+                        "notes": "",
+                        "updated": datetime.utcnow().isoformat(),
+                    }
+                    self._save_plugin_ratings()
+                    user_rating_var.set(f"Your rating: {float(rating_var.get()):.1f}/5")
+                    record["rating"] = max(float(record.get("rating", 0.0)), float(rating_var.get()))
+                    refresh_tree(entry_id)
+
+                rate_btn.configure(state="normal", command=save_rating)
+
+            def on_select(_event=None) -> None:
+                selection = tree.selection()
+                if selection:
+                    self._plugin_marketplace_selection = selection[0]
+                else:
+                    self._plugin_marketplace_selection = None
+                update_detail(self._plugin_marketplace_selection)
+
+            tree.bind("<<TreeviewSelect>>", on_select)
+
+            ttk.Button(footer, text="Close", command=lambda: self._hide_overlay_panel("plugin_marketplace")).pack(
+                side="right"
+            )
+
+            refresh_tree()
+            update_detail(self._plugin_marketplace_selection)
+
+        self._show_overlay_panel("plugin_marketplace", "Plugin Marketplace", builder, width=920, height=580)
 
     def _ensure_loadout_defaults(self, active_name: Optional[str] = None) -> None:
         if not self.loadouts:
@@ -1995,6 +2998,12 @@ class Sims4ModSorterApp(tk.Tk):
         ).pack(fill="x")
         ttk.Button(
             utilities_section,
+            text="Compare Duplicates",
+            command=self.show_duplicate_comparison,
+            style="Sidebar.TButton",
+        ).pack(fill="x", pady=(6, 0))
+        ttk.Button(
+            utilities_section,
             text="Undo Last",
             command=self.on_undo,
             style="Sidebar.TButton",
@@ -2049,6 +3058,12 @@ class Sims4ModSorterApp(tk.Tk):
             style="Sidebar.TButton",
         )
         self._loadout_apply_btn.pack(fill="x", pady=(10, 0))
+        ttk.Button(
+            loadout_section,
+            text="Loadout Gallery…",
+            command=self.show_loadout_gallery,
+            style="Sidebar.TButton",
+        ).pack(fill="x", pady=(6, 0))
 
         if sidebar_buttons:
             plugin_section = ttk.LabelFrame(
@@ -3115,6 +4130,9 @@ class Sims4ModSorterApp(tk.Tk):
     def _on_root_configure(self, _event=None) -> None:
         if self._dialog_overlay_visible:
             self._layout_dialog_overlay()
+        for key, record in list(self._overlay_registry.items()):
+            if record.get("visible"):
+                self._layout_overlay_panel(key)
 
     def _show_dialog_overlay(
         self,
@@ -3287,6 +4305,210 @@ class Sims4ModSorterApp(tk.Tk):
             cancel=cancel,
         )
         return result.lower() == "yes"
+
+    # ------------------------------------------------------------------
+    # Generic overlay panels
+    # ------------------------------------------------------------------
+
+    def _ensure_overlay_panel(
+        self,
+        key: str,
+        title: str,
+        *,
+        width: int = 760,
+        height: int = 520,
+    ) -> Dict[str, object]:
+        entry = self._overlay_registry.get(key)
+        scrim = entry.get("window") if isinstance(entry, dict) else None
+        if scrim is not None and scrim.winfo_exists():
+            title_var = entry.get("title_var")
+            if isinstance(title_var, tk.StringVar):
+                title_var.set(title)
+            entry["size"] = (width, height)
+            return entry
+
+        palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
+        overlay = tk.Frame(self, bg=_scrim_color(palette.get("bg", "#111316")))
+        overlay.configure(takefocus=True)
+        overlay.place_forget()
+        overlay.grid_rowconfigure(0, weight=1)
+        overlay.grid_columnconfigure(0, weight=1)
+        def _on_scrim_click(event: tk.Event) -> str:
+            if event.widget is overlay:
+                self._hide_overlay_panel(key)
+            return "break"
+
+        overlay.bind("<Button-1>", _on_scrim_click)
+
+        shell = ttk.Frame(overlay, style="Overlay.Shell.TFrame", padding=0)
+        shell.place(relx=0.5, rely=0.5, anchor="center")
+        shell.grid_rowconfigure(0, weight=1)
+        shell.grid_columnconfigure(0, weight=1)
+        shell.configure(width=width, height=height)
+        shell.grid_propagate(False)
+
+        container = ttk.Frame(shell, style="Overlay.Container.TFrame", padding=(24, 22, 24, 24))
+        container.grid(row=0, column=0, sticky="nsew")
+        container.grid_rowconfigure(2, weight=1)
+        container.grid_columnconfigure(0, weight=1)
+
+        title_var = tk.StringVar(value=title)
+        header = ttk.Frame(container, style="Overlay.Header.TFrame")
+        header.grid(row=0, column=0, sticky="ew")
+        title_label = ttk.Label(header, textvariable=title_var, style="Overlay.Title.TLabel")
+        title_label.pack(side="left")
+        close_btn = ttk.Button(
+            header,
+            text="✖",
+            width=3,
+            style="Overlay.Close.TButton",
+            command=lambda: self._hide_overlay_panel(key),
+        )
+        close_btn.pack(side="right", padx=(12, 0))
+
+        body = ttk.Frame(container, style="Overlay.Body.TFrame")
+        body.grid(row=1, column=0, sticky="nsew", pady=(18, 0))
+        body.grid_rowconfigure(0, weight=1)
+        body.grid_columnconfigure(0, weight=1)
+
+        footer = ttk.Frame(container, style="Overlay.Footer.TFrame")
+        footer.grid(row=2, column=0, sticky="ew", pady=(18, 0))
+
+        overlay.bind("<KeyPress-Escape>", lambda _e: self._hide_overlay_panel(key))
+
+        record = {
+            "window": overlay,
+            "shell": shell,
+            "container": container,
+            "title_var": title_var,
+            "body": body,
+            "footer": footer,
+            "visible": False,
+            "size": (width, height),
+        }
+        self._overlay_registry[key] = record
+        self._apply_overlay_theme(record)
+        self._layout_overlay_panel(key)
+        return record
+
+    def _layout_overlay_panel(self, key: str) -> None:
+        record = self._overlay_registry.get(key)
+        if not record:
+            return
+        scrim = record.get("window")
+        shell = record.get("shell")
+        if not scrim or not shell or not scrim.winfo_exists():
+            return
+        width, height = record.get("size", (shell.winfo_width(), shell.winfo_height()))
+        try:
+            shell.configure(width=width, height=height)
+        except tk.TclError:
+            pass
+        scrim.update_idletasks()
+        if record.get("visible"):
+            try:
+                scrim.place_configure(relx=0, rely=0, relwidth=1, relheight=1)
+            except tk.TclError:
+                pass
+        try:
+            shell.place_configure(relx=0.5, rely=0.5, anchor="center")
+        except tk.TclError:
+            pass
+
+    def _show_overlay_panel(
+        self,
+        key: str,
+        title: str,
+        builder: Callable[[ttk.Frame, ttk.Frame], None],
+        *,
+        width: int = 760,
+        height: int = 520,
+    ) -> None:
+        record = self._ensure_overlay_panel(key, title, width=width, height=height)
+        body = record.get("body")
+        footer = record.get("footer")
+        if isinstance(body, ttk.Frame):
+            for child in list(body.winfo_children()):
+                child.destroy()
+        if isinstance(footer, ttk.Frame):
+            for child in list(footer.winfo_children()):
+                child.destroy()
+        if callable(builder):
+            try:
+                builder(body, footer)
+            except Exception as exc:
+                if isinstance(body, ttk.Frame):
+                    ttk.Label(body, text=f"Unable to render overlay: {exc}").grid(
+                        row=0, column=0, sticky="nsew"
+                    )
+        scrim = record.get("window")
+        if scrim and scrim.winfo_exists():
+            try:
+                scrim.place(relx=0, rely=0, relwidth=1, relheight=1)
+                scrim.lift()
+                scrim.focus_set()
+            except tk.TclError:
+                pass
+        record["visible"] = True
+        self._layout_overlay_panel(key)
+
+    def _hide_overlay_panel(self, key: str) -> None:
+        record = self._overlay_registry.get(key)
+        if not record:
+            return
+        scrim = record.get("window")
+        if scrim and scrim.winfo_exists():
+            try:
+                scrim.place_forget()
+            except tk.TclError:
+                pass
+        try:
+            self.focus_set()
+        except tk.TclError:
+            pass
+        record["visible"] = False
+
+    def _apply_overlay_theme(self, record: Dict[str, object]) -> None:
+        scrim = record.get("window")
+        if not scrim or not scrim.winfo_exists():
+            return
+        palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
+        scrim.configure(bg=_scrim_color(palette.get("bg", "#111316")))
+        self._refresh_overlay_styles()
+
+    def _refresh_overlay_styles(self) -> None:
+        palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
+        bg = palette.get("bg", "#111316")
+        fg = palette.get("fg", "#E6E6E6")
+        alt = palette.get("alt", "#1f2328")
+        muted = _scrim_color(palette.get("fg", "#E6E6E6"), strength=0.65)
+        accent = palette.get("accent", "#4C8BF5")
+        style = ttk.Style(self)
+        style.configure("Overlay.Shell.TFrame", background=bg)
+        style.configure("Overlay.Container.TFrame", background=alt)
+        style.configure("Overlay.Header.TFrame", background=alt)
+        style.configure("Overlay.Body.TFrame", background=alt)
+        style.configure("Overlay.Footer.TFrame", background=alt)
+        style.configure(
+            "Overlay.Title.TLabel",
+            background=alt,
+            foreground=fg,
+            font=("TkDefaultFont", 16, "bold"),
+        )
+        style.configure("Overlay.Close.TButton", padding=(4, 2))
+        style.map(
+            "Overlay.Close.TButton",
+            background=[("active", accent)],
+            foreground=[("active", fg)],
+        )
+        style.configure("Overlay.Subtitle.TLabel", background=alt, foreground=muted, wraplength=560)
+
+    def _refresh_all_overlays(self) -> None:
+        self._refresh_overlay_styles()
+        for key, record in list(self._overlay_registry.items()):
+            self._apply_overlay_theme(record)
+            if record.get("visible"):
+                self._layout_overlay_panel(key)
 
     def _start_update_download(
         self, *, mode: Literal["auto-install", "manual-download"]
@@ -4451,6 +5673,7 @@ for _ in range(10):
         self._refresh_update_overlay_theme()
         self._refresh_dialog_overlay_theme()
         self._refresh_mod_status_overlay_theme()
+        self._refresh_all_overlays()
         self._update_theme_preview_highlight()
         dashboard = getattr(self, "command_center", None)
         if dashboard is not None:
@@ -4464,13 +5687,108 @@ for _ in range(10):
         if path:
             self.mods_root.set(path)
 
-    def open_plugin_manager_ui(self) -> None:
-        script = Path(__file__).resolve().with_name("plugin_manager.py")
+    def run_automation_macro(self, macro_id: str) -> None:
+        macro = None
+        for entry in self.automation_macros:
+            if str(entry.get("id")) == macro_id:
+                macro = entry
+                break
+        if not macro:
+            self._show_error_overlay("Automation", "Selected macro is no longer available.")
+            return
+        steps = [step for step in macro.get("steps", []) if isinstance(step, dict)]
+        if not steps:
+            self._show_warning_overlay("Automation", "This macro has no actions defined.")
+            return
+        self.log(f"Running automation macro '{macro.get('name', macro_id)}'.")
+        self._execute_macro_steps(steps, 0, macro)
+
+    def _execute_macro_steps(self, steps: Sequence[Dict[str, object]], index: int, macro: Dict[str, object]) -> None:
+        if index >= len(steps):
+            self.log(f"Automation '{macro.get('name', 'Macro')}' completed.")
+            return
+        step = steps[index]
+        action = str(step.get("action") or "").strip().lower()
+
+        def advance(delay: int = 250) -> None:
+            self.after(delay, lambda: self._execute_macro_steps(steps, index + 1, macro))
+
+        if action == "scan":
+            self.after(0, self.on_scan)
+            advance(600)
+        elif action == "apply_loadout":
+            target = str(step.get("name") or "").strip()
+            if target == "__ACTIVE__" or not target:
+                target = self._active_loadout_name
+            if target in self.loadouts:
+                self.loadout_var.set(target)
+                self.after(0, self.on_apply_loadout)
+            else:
+                self.log(f"Macro skipped unknown loadout '{target}'.", level="warn")
+            advance(400)
+        elif action == "open_mods":
+            self._open_mods_directory()
+            advance(200)
+        elif action == "run_plugin":
+            plugin_id = str(step.get("plugin") or "").strip()
+            self._run_plugin_macro_action(plugin_id)
+            advance(400)
+        else:
+            self.log(f"Unknown automation action: {action}", level="warn")
+            advance(200)
+
+    def _open_mods_directory(self) -> None:
+        mods_path = Path(self.mods_root.get()).expanduser()
+        if not mods_path.exists():
+            self._show_warning_overlay("Open Mods Folder", "Mods directory does not exist yet.")
+            return
         try:
-            subprocess.Popen([sys.executable, str(script)])
+            if sys.platform.startswith("win"):
+                os.startfile(str(mods_path))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(mods_path)])
+            else:
+                subprocess.Popen(["xdg-open", str(mods_path)])
         except Exception as exc:
-            self._show_error_overlay("Plugin Manager", f"Unable to launch Plugin Manager: {exc}")
-            self.log(f"Plugin Manager launch failed: {exc}", level="error")
+            self._show_error_overlay("Open Mods Folder", f"Unable to open folder: {exc}")
+
+    def _run_plugin_macro_action(self, plugin_id: str) -> None:
+        if not plugin_id or not self.plugin_manager:
+            return
+        buttons = getattr(self, "_plugin_toolbar_buttons", [])
+        for button in buttons:
+            if button.button_id == plugin_id:
+                try:
+                    button.command(self, self.plugin_manager.api)
+                except Exception as exc:
+                    self.log(f"Automation failed invoking plugin '{plugin_id}': {exc}", level="error")
+                    self._show_error_overlay(
+                        "Automation",
+                        f"Plugin '{plugin_id}' reported an error while running.",
+                    )
+                break
+
+    def _open_plugin_folder(self, folder: str) -> None:
+        if not folder:
+            return
+        target = USER_PLUGINS_DIR / folder
+        if not target.exists():
+            self._show_warning_overlay(
+                "Plugin Folder",
+                f"Plugin directory '{folder}' was not found.",
+            )
+            return
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(str(target))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(target)])
+            else:
+                subprocess.Popen(["xdg-open", str(target)])
+        except Exception as exc:
+            self._show_error_overlay("Plugin Folder", f"Unable to open plugin directory: {exc}")
+    def open_plugin_manager_ui(self) -> None:
+        self.show_plugin_marketplace()
 
     def on_scan(self) -> None:
         mods_path = Path(self.mods_root.get())
@@ -4621,6 +5939,7 @@ for _ in range(10):
         if self.disabled_items:
             combined_items.extend(self.disabled_items)
         self.items = combined_items
+        self._rebuild_duplicate_groups()
         self.items_by_path = {str(item.path): item for item in self.items}
         self.scan_errors = result.errors
         self._apply_loadout_to_items()
@@ -4792,226 +6111,238 @@ for _ in range(10):
     def show_move_history(self) -> None:
         mods_root = Path(self.mods_root.get())
         entries = load_move_history(mods_root)
-        if not entries and (
-            not self._history_window or not self._history_window.winfo_exists()
-        ):
+        if not entries:
             self._show_info_overlay(
-                "Move History",
+                "Sorting History",
                 "No move batches have been recorded yet.",
             )
             return
-        if not self._history_window or not self._history_window.winfo_exists():
-            window = tk.Toplevel(self)
-            window.title("Move History")
-            window.transient(self)
-            window.grab_set()
-            container = ttk.Frame(window, padding=12)
-            container.pack(fill="both", expand=True)
+        self._history_entries = {str(entry.get("id")): entry for entry in entries if isinstance(entry.get("id"), str)}
+        history_rows = list(entries)
+
+        def builder(body: ttk.Frame, footer: ttk.Frame) -> None:
+            if body is None or footer is None:
+                return
+            body.grid_columnconfigure(0, weight=1)
+            body.grid_columnconfigure(1, weight=2)
+            body.grid_rowconfigure(0, weight=1)
+
+            tree_frame = ttk.Frame(body, style="Overlay.Body.TFrame")
+            tree_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+            tree_frame.grid_rowconfigure(0, weight=1)
+            tree_frame.grid_columnconfigure(0, weight=1)
+
             tree = ttk.Treeview(
-                container,
-                columns=("timestamp", "moved", "samples"),
+                tree_frame,
+                columns=("time", "files", "favorite", "summary"),
                 show="headings",
                 selectmode="browse",
             )
-            tree.heading("timestamp", text="Timestamp")
-            tree.heading("moved", text="Files")
-            tree.heading("samples", text="Sample Destinations")
-            tree.column("timestamp", width=190, anchor="w")
-            tree.column("moved", width=60, anchor="center")
-            tree.column("samples", width=420, anchor="w")
-            tree.pack(fill="both", expand=True)
-            tree.bind("<<TreeviewSelect>>", lambda *_: self._update_history_button_states())
-            self._history_tree = tree
-            button_row = ttk.Frame(container)
-            button_row.pack(fill="x", pady=(10, 0))
-            preview_btn = ttk.Button(
-                button_row, text="Preview", command=self._preview_history_selection
-            )
-            undo_btn = ttk.Button(
-                button_row, text="Undo Selected", command=self._undo_history_selection
-            )
-            close_btn = ttk.Button(button_row, text="Close", command=self._close_history_window)
-            preview_btn.pack(side="left")
-            undo_btn.pack(side="left", padx=(8, 0))
-            close_btn.pack(side="right")
-            self._history_preview_btn = preview_btn
-            self._history_undo_btn = undo_btn
-            self._history_window = window
-            window.protocol("WM_DELETE_WINDOW", self._close_history_window)
-            window.bind("<Destroy>", self._on_history_destroy)
-            self._update_history_button_states()
-            center_window(window)
-        else:
-            try:
-                self._history_window.deiconify()
-                self._history_window.lift()
-                self._history_window.focus_set()
-            except Exception:
-                pass
-        self._refresh_move_history(entries)
+            tree.heading("time", text="Timestamp")
+            tree.heading("files", text="Files")
+            tree.heading("favorite", text="★")
+            tree.heading("summary", text="Summary")
+            tree.column("time", width=180, anchor="w")
+            tree.column("files", width=60, anchor="center")
+            tree.column("favorite", width=40, anchor="center")
+            tree.column("summary", width=260, anchor="w")
+            tree.grid(row=0, column=0, sticky="nsew")
 
-    def _refresh_move_history(self, entries: Optional[List[Dict[str, object]]] = None) -> None:
-        if not self._history_tree or not self._history_tree.winfo_exists():
-            return
-        if entries is None:
-            entries = load_move_history(Path(self.mods_root.get()))
-        tree = self._history_tree
-        tree.delete(*tree.get_children())
-        self._history_entries = {}
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            row_id = entry.get("id")
-            if not isinstance(row_id, str):
-                row_id = str(row_id)
-            entry["row_id"] = row_id
-            self._history_entries[row_id] = entry
-            samples = entry.get("sample_display") or []
-            sample_text = ", ".join(samples[:5])
-            tree.insert(
-                "",
-                "end",
-                iid=row_id,
-                values=(
-                    entry.get("display_time", "Unknown"),
-                    entry.get("moved_count", 0),
-                    sample_text,
-                ),
-            )
-        if entries:
-            first_row = entries[0]
-            row_id = first_row.get("row_id")
-            if isinstance(row_id, str):
-                tree.selection_set(row_id)
-                tree.focus(row_id)
-        self._update_history_button_states()
+            scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+            tree.configure(yscrollcommand=scroll.set)
+            scroll.grid(row=0, column=1, sticky="ns")
 
-    def _update_history_button_states(self) -> None:
-        has_selection = bool(self._history_tree and self._history_tree.selection())
-        if self._history_preview_btn:
-            if has_selection:
-                self._history_preview_btn.state(["!disabled"])
-            else:
-                self._history_preview_btn.state(["disabled"])
-        if self._history_undo_btn:
-            if has_selection:
-                self._history_undo_btn.state(["!disabled"])
-            else:
-                self._history_undo_btn.state(["disabled"])
+            detail = ttk.Frame(body, style="Overlay.Body.TFrame")
+            detail.grid(row=0, column=1, sticky="nsew")
+            detail.grid_columnconfigure(0, weight=1)
 
-    def _preview_history_selection(self) -> None:
-        if not self._history_tree:
-            return
-        selection = self._history_tree.selection()
-        if not selection:
-            self._show_info_overlay(
-                "Preview Move Batch",
-                "Select a move batch to preview.",
-            )
-            return
-        entry = self._history_entries.get(selection[0])
-        if not entry:
-            return
-        preview_parent = self._history_window or self
-        preview = tk.Toplevel(preview_parent)
-        preview.title(f"Batch Preview ({entry.get('display_time', 'Unknown')})")
-        preview.transient(preview_parent)
-        summary = entry.get("summary", "Move batch")
-        counts = entry.get("counts") if isinstance(entry.get("counts"), dict) else {}
-        extra_bits: List[str] = []
-        sources = counts.get("sources")
-        targets = counts.get("targets")
-        if isinstance(sources, int):
-            extra_bits.append(f"Sources: {sources}")
-        if isinstance(targets, int):
-            extra_bits.append(f"Targets: {targets}")
-        header_text = summary
-        if extra_bits:
-            header_text = f"{summary} ({', '.join(extra_bits)})"
-        ttk.Label(preview, text=header_text, padding=(12, 12, 12, 4)).pack(anchor="w")
-        text_frame = ttk.Frame(preview, padding=(12, 0, 12, 12))
-        text_frame.pack(fill="both", expand=True)
-        text_widget = tk.Text(text_frame, height=18, wrap="none")
-        text_widget.pack(side="left", fill="both", expand=True)
-        scroll = ttk.Scrollbar(text_frame, orient="vertical", command=text_widget.yview)
-        scroll.pack(side="right", fill="y")
-        text_widget.configure(yscrollcommand=scroll.set)
-        moves = entry.get("moves") if isinstance(entry.get("moves"), list) else []
-        max_preview = 200
-        for idx, move in enumerate(moves[:max_preview], start=1):
-            if not isinstance(move, dict):
-                continue
-            src = move.get("from", "")
-            dst = move.get("to", "")
-            text_widget.insert("end", f"{idx}. {src} -> {dst}\n")
-        if isinstance(moves, list) and len(moves) > max_preview:
-            text_widget.insert(
-                "end",
-                f"… {len(moves) - max_preview} additional move(s) not shown.\n",
-            )
-        text_widget.configure(state="disabled")
-        ttk.Button(preview, text="Close", command=preview.destroy).pack(pady=(0, 12))
-        center_window(preview)
+            title_var = tk.StringVar(value="Select a move batch")
+            stats_var = tk.StringVar(value="")
+            favorite_var = tk.BooleanVar(value=False)
 
-    def _undo_history_selection(self) -> None:
-        if not self._history_tree:
-            return
-        selection = self._history_tree.selection()
-        if not selection:
-            self._show_info_overlay(
-                "Undo Move Batch",
-                "Select a move batch to undo.",
+            ttk.Label(detail, textvariable=title_var, style="Overlay.Title.TLabel").grid(
+                row=0, column=0, sticky="w"
             )
-            return
-        entry = self._history_entries.get(selection[0])
-        if not entry:
-            self._show_error_overlay(
-                "Undo Move Batch",
-                "The selected history entry could not be located.",
+            ttk.Label(detail, textvariable=stats_var, style="Overlay.Subtitle.TLabel").grid(
+                row=1, column=0, sticky="w", pady=(6, 0)
             )
-            return
-        moved_count = entry.get("moved_count", 0)
-        label = entry.get("display_time", "this batch")
-        if not self._ask_yes_no_overlay(
-            "Undo Move Batch",
-            f"Restore {moved_count} file(s) from {label}?",
-        ):
-            return
-        mods_root = Path(self.mods_root.get())
-        identifier: Optional[Union[str, int]]
-        history_index = entry.get("history_index")
-        if isinstance(history_index, int):
-            identifier = history_index
-        else:
-            entry_id = entry.get("id")
-            identifier = entry_id if isinstance(entry_id, str) and entry_id else None
-        self.status_var.set("Undoing selected batch…")
+            favorite_check = ttk.Checkbutton(
+                detail,
+                text="Mark as favorite",
+                variable=favorite_var,
+                style="CommandCenter.Checkbutton.TCheckbutton",
+            )
+            favorite_check.grid(row=2, column=0, sticky="w", pady=(6, 0))
 
-        def worker() -> None:
-            undone, failed, errors, undo_label = undo_moves(mods_root, identifier)
-            self._enqueue_ui(
-                lambda: self._handle_history_undo_result(undone, failed, errors, undo_label)
+            preview = tk.Text(detail, height=18, wrap="none")
+            preview.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
+            preview.configure(state="disabled")
+            preview_scroll = ttk.Scrollbar(detail, orient="vertical", command=preview.yview)
+            preview.configure(yscrollcommand=preview_scroll.set)
+            preview_scroll.grid(row=3, column=1, sticky="ns")
+            detail.grid_rowconfigure(3, weight=1)
+
+            def refresh_tree(select_id: Optional[str] = None) -> None:
+                tree.delete(*tree.get_children())
+                for entry in history_rows:
+                    entry_id = str(entry.get("id"))
+                    favorite_icon = "★" if entry_id in self.move_favorites else ""
+                    tree.insert(
+                        "",
+                        "end",
+                        iid=entry_id,
+                        values=(
+                            entry.get("display_time", "Unknown"),
+                            entry.get("moved_count", 0),
+                            favorite_icon,
+                            entry.get("summary", ""),
+                        ),
+                    )
+                target = select_id or self._history_selection
+                if target:
+                    try:
+                        tree.selection_set(target)
+                        tree.focus(target)
+                    except tk.TclError:
+                        pass
+
+            def update_preview(entry: Optional[Dict[str, object]]) -> None:
+                preview.configure(state="normal")
+                preview.delete("1.0", "end")
+                if not entry:
+                    preview.configure(state="disabled")
+                    return
+                moves = entry.get("moves") if isinstance(entry.get("moves"), list) else []
+                for idx, move in enumerate(moves[:200], start=1):
+                    if not isinstance(move, dict):
+                        continue
+                    src = move.get("from", "") or "(unknown)"
+                    dst = move.get("to", "") or "(unknown)"
+                    preview.insert("end", f"{idx}. {src} -> {dst}\n")
+                if len(moves) > 200:
+                    preview.insert("end", f"… {len(moves) - 200} additional move(s) not shown.\n")
+                preview.configure(state="disabled")
+
+            def update_detail(entry_id: Optional[str]) -> None:
+                if not entry_id:
+                    title_var.set("Select a move batch")
+                    stats_var.set("")
+                    favorite_var.set(False)
+                    update_preview(None)
+                    return
+                entry = self._history_entries.get(entry_id)
+                if not entry:
+                    title_var.set("Select a move batch")
+                    stats_var.set("")
+                    favorite_var.set(False)
+                    update_preview(None)
+                    return
+                counts = entry.get("counts") if isinstance(entry.get("counts"), dict) else {}
+                sources = counts.get("sources") if isinstance(counts.get("sources"), int) else None
+                targets = counts.get("targets") if isinstance(counts.get("targets"), int) else None
+                fragments = [f"Moved {entry.get('moved_count', 0)} file(s)"]
+                if sources is not None:
+                    fragments.append(f"Sources: {sources}")
+                if targets is not None:
+                    fragments.append(f"Targets: {targets}")
+                title_var.set(entry.get("summary", "Move batch"))
+                stats_var.set(" | ".join(fragments))
+                favorite_var.set(entry_id in self.move_favorites)
+                update_preview(entry)
+
+                def toggle_favorite() -> None:
+                    if favorite_var.get():
+                        self.move_favorites.add(entry_id)
+                    else:
+                        self.move_favorites.discard(entry_id)
+                    self._save_history_favorites()
+                    refresh_tree(entry_id)
+
+                favorite_check.configure(command=toggle_favorite)
+
+            def on_select(_event=None) -> None:
+                selection = tree.selection()
+                entry_id = selection[0] if selection else None
+                self._history_selection = entry_id
+                update_detail(entry_id)
+
+            tree.bind("<<TreeviewSelect>>", on_select)
+
+            def reload_entries(select_id: Optional[str] = None) -> None:
+                new_entries = load_move_history(mods_root)
+                self._history_entries = {str(entry.get("id")): entry for entry in new_entries if isinstance(entry.get("id"), str)}
+                history_rows.clear()
+                history_rows.extend(new_entries)
+                refresh_tree(select_id)
+                update_detail(select_id)
+
+            def undo_selected() -> None:
+                selection = tree.selection()
+                if not selection:
+                    self._show_info_overlay("Undo Move Batch", "Select a move batch to undo.")
+                    return
+                entry_id = selection[0]
+                entry = self._history_entries.get(entry_id)
+                if not entry:
+                    self._show_error_overlay("Undo Move Batch", "The selected entry could not be located.")
+                    return
+                moved_count = entry.get("moved_count", 0)
+                label = entry.get("display_time", "this batch")
+                if not self._ask_yes_no_overlay(
+                    "Undo Move Batch",
+                    f"Restore {moved_count} file(s) from {label}?",
+                ):
+                    return
+                history_index = entry.get("history_index")
+                if isinstance(history_index, int):
+                    identifier: Optional[Union[str, int]] = history_index
+                else:
+                    identifier = entry_id
+                self.status_var.set("Undoing selected batch…")
+
+                def worker() -> None:
+                    undone, failed, errors, undo_label = undo_moves(mods_root, identifier)
+                    self._enqueue_ui(
+                        lambda: self._handle_history_undo_result(
+                            undone,
+                            failed,
+                            errors,
+                            undo_label,
+                            lambda: reload_entries(None),
+                        )
+                    )
+
+                threading.Thread(target=worker, daemon=True).start()
+
+            ttk.Button(footer, text="Undo Selected", command=undo_selected).pack(side="left")
+            ttk.Button(footer, text="Close", command=lambda: self._hide_overlay_panel("move_history")).pack(
+                side="right"
             )
 
-        threading.Thread(target=worker, daemon=True).start()
+            initial_id = next(
+                (str(entry.get("id")) for entry in history_rows if isinstance(entry.get("id"), str)),
+                None,
+            )
+            refresh_tree(initial_id)
+            if initial_id:
+                tree.selection_set(initial_id)
+                update_detail(initial_id)
+
+        self._show_overlay_panel("move_history", "Sorting History Timeline", builder, width=980, height=600)
 
     def _handle_history_undo_result(
-        self, undone: int, failed: int, errors: List[str], label: Optional[str]
+        self,
+        undone: int,
+        failed: int,
+        errors: List[str],
+        label: Optional[str],
+        refresh_callback: Optional[Callable[[], None]] = None,
     ) -> None:
         self._handle_undo_result(undone, failed, errors, label)
-        self._refresh_move_history()
-
-    def _close_history_window(self) -> None:
-        if self._history_window and self._history_window.winfo_exists():
-            self._history_window.destroy()
-
-    def _on_history_destroy(self, event: tk.Event) -> None:
-        if event.widget is self._history_window:
-            self._history_window = None
-            self._history_tree = None
-            self._history_entries = {}
-            self._history_preview_btn = None
-            self._history_undo_btn = None
+        if refresh_callback:
+            refresh_callback()
+        else:
+            self.show_move_history()
 
     def on_import(self) -> None:
         filename = filedialog.askopenfilename(
