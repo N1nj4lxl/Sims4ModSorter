@@ -990,6 +990,7 @@ class Sims4ModSorterApp(tk.Tk):
         self._update_overlay_button_frame: Optional[ttk.Frame] = None
         self._update_overlay_details_btn: Optional[ttk.Button] = None
         self._update_overlay_manual_btn: Optional[ttk.Button] = None
+        self._update_overlay_button_pack: Dict[tk.Widget, Dict[str, object]] = {}
         self._update_overlay_progress_frame: Optional[ttk.Frame] = None
         self._update_overlay_progress_title_label: Optional[ttk.Label] = None
         self._update_overlay_progress_detail_label: Optional[ttk.Label] = None
@@ -3954,12 +3955,13 @@ class Sims4ModSorterApp(tk.Tk):
         overlay.grid_columnconfigure(0, weight=1)
         overlay.bind("<Escape>", lambda _e: self._hide_update_overlay())
 
-        container = ttk.Frame(overlay, padding=(16, 20, 16, 20), style="UpdateOverlay.TFrame")
-        container.place(relx=0.5, rely=0.5, anchor="center")
+        container = ttk.Frame(overlay, padding=(28, 32, 28, 32), style="UpdateOverlay.TFrame")
+        container.grid(row=0, column=0, padx=48, pady=48, sticky="nsew")
         container.columnconfigure(0, weight=1)
+        container.rowconfigure(1, weight=1)
 
         hero = ttk.Frame(container, style="UpdateOverlayHero.TFrame")
-        hero.grid(row=0, column=0, sticky="we", pady=(0, 16))
+        hero.grid(row=0, column=0, sticky="nsew", pady=(0, 24))
         hero.columnconfigure(1, weight=1)
 
         icon_label = ttk.Label(
@@ -4003,14 +4005,14 @@ class Sims4ModSorterApp(tk.Tk):
             hero,
             textvariable=self._update_overlay_message,
             style="UpdateOverlayBody.TLabel",
-            wraplength=460,
+            wraplength=580,
             justify="left",
         )
         body_label.grid(row=1, column=1, sticky="we", pady=(6, 0))
         self._update_overlay_body_label = body_label
 
         progress_frame = ttk.Frame(container, style="UpdateOverlayProgress.TFrame")
-        progress_frame.grid(row=1, column=0, sticky="we")
+        progress_frame.grid(row=1, column=0, sticky="nsew")
         progress_frame.columnconfigure(0, weight=1)
         self._update_overlay_progress_frame = progress_frame
 
@@ -4026,7 +4028,7 @@ class Sims4ModSorterApp(tk.Tk):
             progress_frame,
             textvariable=self._update_overlay_progress_detail,
             style="UpdateOverlayProgressDetail.TLabel",
-            wraplength=460,
+            wraplength=580,
             justify="left",
         )
         progress_detail_label.pack(fill="x", pady=(4, 0))
@@ -4088,7 +4090,7 @@ class Sims4ModSorterApp(tk.Tk):
         self._update_mode_description_label = description_label
 
         buttons = ttk.Frame(container, style="UpdateOverlay.TFrame")
-        buttons.grid(row=3, column=0, sticky="e", pady=(24, 0))
+        buttons.grid(row=3, column=0, sticky="e", pady=(28, 0))
 
         download_btn = ttk.Button(
             buttons,
@@ -4098,6 +4100,7 @@ class Sims4ModSorterApp(tk.Tk):
             style="Accent.TButton",
         )
         download_btn.pack(side="left", padx=4)
+        self._update_overlay_button_pack[download_btn] = {"side": "left", "padx": 4}
 
         manual_btn = ttk.Button(
             buttons,
@@ -4106,6 +4109,7 @@ class Sims4ModSorterApp(tk.Tk):
             state="disabled",
         )
         manual_btn.pack(side="left", padx=4)
+        self._update_overlay_button_pack[manual_btn] = {"side": "left", "padx": 4}
 
         details_btn = ttk.Button(
             buttons,
@@ -4114,6 +4118,7 @@ class Sims4ModSorterApp(tk.Tk):
             state="disabled",
         )
         details_btn.pack(side="left", padx=4)
+        self._update_overlay_button_pack[details_btn] = {"side": "left", "padx": 4}
 
         skip_btn = ttk.Button(
             buttons,
@@ -4122,6 +4127,7 @@ class Sims4ModSorterApp(tk.Tk):
             state="disabled",
         )
         skip_btn.pack(side="left", padx=4)
+        self._update_overlay_button_pack[skip_btn] = {"side": "left", "padx": 4}
 
         if self._update_overlay_progress_title_label:
             self._update_overlay_progress_title_label.pack_forget()
@@ -4142,6 +4148,10 @@ class Sims4ModSorterApp(tk.Tk):
         self._update_overlay_details_btn = details_btn
         self._update_overlay_skip_btn = skip_btn
         self._update_overlay_button_frame = buttons
+        if self._update_mode_frame:
+            self._update_mode_frame.grid_remove()
+        if self._update_overlay_button_frame:
+            self._update_overlay_button_frame.grid_remove()
         self._on_update_mode_changed()
         return overlay
 
@@ -4188,9 +4198,6 @@ class Sims4ModSorterApp(tk.Tk):
                     self._update_mode_frame.configure(style="TLabelframe")
                 except Exception:
                     pass
-            container = getattr(self, "_update_overlay_container", None)
-            if container and container.winfo_exists():
-                container.place_configure(relx=0.5, rely=0.5, anchor="center")
 
     def _center_update_overlay(self) -> None:
         overlay = getattr(self, "_update_overlay", None)
@@ -4206,7 +4213,6 @@ class Sims4ModSorterApp(tk.Tk):
         try:
             overlay.update_idletasks()
             container.update_idletasks()
-            container.place_configure(relx=0.5, rely=0.5, anchor="center")
         except Exception:
             pass
 
@@ -4455,7 +4461,7 @@ class Sims4ModSorterApp(tk.Tk):
             else:
                 resolved_headline = "Update status"
         self._update_overlay_headline.set(resolved_headline)
-        icon_value = status_icon if status_icon is not None else ("🔄" if progress else "⬆️")
+        icon_value = status_icon if status_icon is not None else ("🛰️" if progress else "⬆️")
         self._update_overlay_status_icon.set(icon_value)
         self._update_overlay_message.set(message)
 
@@ -4470,7 +4476,7 @@ class Sims4ModSorterApp(tk.Tk):
 
         resolved_progress_title = progress_title
         if resolved_progress_title is None:
-            resolved_progress_title = "Progress" if progress else ""
+            resolved_progress_title = "Status" if progress else ""
         self._update_overlay_progress_title.set(resolved_progress_title)
         if self._update_overlay_progress_title_label:
             if resolved_progress_title:
@@ -4500,19 +4506,48 @@ class Sims4ModSorterApp(tk.Tk):
             elif self._update_overlay_progress.winfo_manager():
                 self._update_overlay_progress.pack_forget()
 
-        if self._update_overlay_download_btn:
-            state = "normal" if enable_download else "disabled"
-            self._update_overlay_download_btn.configure(state=state)
-        if self._update_overlay_manual_btn:
-            state = "normal" if enable_manual else "disabled"
-            self._update_overlay_manual_btn.configure(state=state)
-        if self._update_overlay_details_btn:
-            state = "normal" if enable_details else "disabled"
-            self._update_overlay_details_btn.configure(state=state)
-        if self._update_overlay_skip_btn:
-            state = "normal" if enable_skip else "disabled"
-            text = skip_label if skip_label else "Skip for Now"
-            self._update_overlay_skip_btn.configure(state=state, text=text)
+        def _toggle_button(
+            widget: Optional[ttk.Button],
+            enabled: bool,
+            *,
+            label: Optional[str] = None,
+        ) -> None:
+            if not widget:
+                return
+            if label is not None:
+                widget.configure(text=label)
+            button_pack = self.__dict__.get("_update_overlay_button_pack", {})
+            options = button_pack.get(widget, {"side": "left", "padx": 4})
+            if enabled:
+                widget.configure(state="normal")
+                if options and not widget.winfo_manager():
+                    widget.pack(**options)
+            else:
+                widget.configure(state="disabled")
+                if widget.winfo_manager():
+                    widget.pack_forget()
+
+        _toggle_button(self._update_overlay_download_btn, enable_download)
+        _toggle_button(self._update_overlay_manual_btn, enable_manual)
+        _toggle_button(self._update_overlay_details_btn, enable_details)
+        skip_text = skip_label if skip_label else "Skip for Now"
+        _toggle_button(self._update_overlay_skip_btn, enable_skip, label=skip_text)
+
+        mode_frame = self.__dict__.get("_update_mode_frame")
+        if mode_frame:
+            if enable_download:
+                mode_frame.grid(row=2, column=0, sticky="we", pady=(24, 0))
+            elif mode_frame.winfo_manager():
+                mode_frame.grid_remove()
+
+        button_frame = self.__dict__.get("_update_overlay_button_frame")
+        if button_frame:
+            visible_children = [child for child in button_frame.winfo_children() if child.winfo_manager()]
+            if visible_children:
+                if not button_frame.winfo_manager():
+                    button_frame.grid(row=3, column=0, sticky="e", pady=(28, 0))
+            elif button_frame.winfo_manager():
+                button_frame.grid_remove()
         mode_state = "normal" if enable_download else "disabled"
         if self._update_mode_simple_radio:
             self._update_mode_simple_radio.configure(state=mode_state)

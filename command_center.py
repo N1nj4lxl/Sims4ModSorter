@@ -14,6 +14,10 @@ _DEFAULT_PALETTE = {
     "sel": "#2A2F3A",
 }
 
+_CONTENT_MIN_WIDTH = 760
+_CONTENT_MIN_HEIGHT = 520
+_CONTENT_WRAP_LENGTH = 620
+
 
 def _parse_hex_color(value: str) -> tuple[int, int, int] | None:
     value = value.strip().lstrip("#")
@@ -154,10 +158,10 @@ class CommandCenter:
             padding=0,
             style="CommandCenter.OverlayShell.TFrame",
         )
-        shell.grid(row=0, column=0, padx=32, pady=32)
-        shell.columnconfigure(0, weight=1)
+        shell.grid(row=0, column=0, padx=48, pady=48, sticky="nsew")
+        shell.columnconfigure(0, weight=1, minsize=_CONTENT_MIN_WIDTH)
         shell.columnconfigure(1, weight=0)
-        shell.rowconfigure(0, weight=1)
+        shell.rowconfigure(0, weight=1, minsize=_CONTENT_MIN_HEIGHT)
         shell.bind("<Escape>", lambda _e: self.hide())
 
         canvas = tk.Canvas(
@@ -179,7 +183,7 @@ class CommandCenter:
 
         content = ttk.Frame(
             canvas,
-            padding=(24, 26, 24, 24),
+            padding=(32, 36, 32, 32),
             style="CommandCenter.Container.TFrame",
         )
         content.columnconfigure(0, weight=1)
@@ -279,9 +283,9 @@ class CommandCenter:
         quick = ttk.Frame(
             container,
             style="CommandCenter.Card.TFrame",
-            padding=(18, 18, 18, 20),
+            padding=(24, 24, 24, 28),
         )
-        quick.grid(row=row, column=0, sticky="ew", pady=(18, 0))
+        quick.grid(row=row, column=0, sticky="ew", pady=(24, 0))
         quick.columnconfigure(0, weight=1)
         ttk.Label(quick, text="Quick actions", style="CommandCenter.CardHeading.TLabel").grid(
             row=0, column=0, sticky="w"
@@ -298,8 +302,8 @@ class CommandCenter:
             quick,
             text=f"Mods folder: {mods_display}",
             style="CommandCenter.Muted.TLabel",
-            wraplength=460,
-        ).grid(row=1, column=0, sticky="w", pady=(8, 12))
+            wraplength=_CONTENT_WRAP_LENGTH,
+        ).grid(row=1, column=0, sticky="w", pady=(10, 16))
         actions = ttk.Frame(quick, style="CommandCenter.CardBody.TFrame")
         actions.grid(row=2, column=0, sticky="ew")
         buttons = [
@@ -371,10 +375,10 @@ class CommandCenter:
         frame = ttk.LabelFrame(
             container,
             text="Recent Mods folders",
-            padding=(16, 14, 16, 16),
+            padding=(20, 18, 20, 20),
             style="CommandCenter.Section.TLabelframe",
         )
-        frame.grid(row=row, column=0, sticky="ew", pady=(18, 0))
+        frame.grid(row=row, column=0, sticky="ew", pady=(24, 0))
         frame.columnconfigure(0, weight=1)
         history = list(self._recent_directories())
         if not history:
@@ -382,7 +386,7 @@ class CommandCenter:
                 frame,
                 text="Browse to a Mods folder to populate this list.",
                 style="CommandCenter.Muted.TLabel",
-                wraplength=440,
+                wraplength=_CONTENT_WRAP_LENGTH,
             ).grid(row=0, column=0, sticky="w")
             return
         for index, directory in enumerate(history):
@@ -398,10 +402,10 @@ class CommandCenter:
         frame = ttk.LabelFrame(
             container,
             text="Loadout presets",
-            padding=(16, 14, 16, 16),
+            padding=(20, 18, 20, 20),
             style="CommandCenter.Section.TLabelframe",
         )
-        frame.grid(row=row, column=0, sticky="ew", pady=(18, 0))
+        frame.grid(row=row, column=0, sticky="ew", pady=(24, 0))
         frame.columnconfigure(0, weight=1)
         names = list(self._loadout_names())
         if not names:
@@ -409,7 +413,7 @@ class CommandCenter:
                 frame,
                 text="Create a loadout to quick load specific plans.",
                 style="CommandCenter.Muted.TLabel",
-                wraplength=440,
+                wraplength=_CONTENT_WRAP_LENGTH,
             ).grid(row=0, column=0, sticky="w")
             return
         active_name = ""
@@ -447,10 +451,10 @@ class CommandCenter:
         frame = ttk.LabelFrame(
             container,
             text="Automation deck",
-            padding=(16, 14, 16, 16),
+            padding=(20, 18, 20, 20),
             style="CommandCenter.Section.TLabelframe",
         )
-        frame.grid(row=row, column=0, sticky="ew", pady=(18, 0))
+        frame.grid(row=row, column=0, sticky="ew", pady=(24, 0))
         frame.columnconfigure(0, weight=1)
         macros = getattr(self.app, "automation_macros", [])
         if not macros:
@@ -458,7 +462,7 @@ class CommandCenter:
                 frame,
                 text="No macros defined yet. Publish one from the in-app gallery.",
                 style="CommandCenter.Muted.TLabel",
-                wraplength=440,
+                wraplength=_CONTENT_WRAP_LENGTH,
             ).grid(row=0, column=0, sticky="w")
             return
         for index, macro in enumerate(macros):
@@ -475,7 +479,7 @@ class CommandCenter:
                 frame,
                 text=description or "No description provided.",
                 style="CommandCenter.Muted.TLabel",
-                wraplength=440,
+                wraplength=_CONTENT_WRAP_LENGTH,
             ).grid(row=index * 2 + 1, column=0, sticky="w", pady=(0, 10))
 
     # ------------------------------------------------------------------
@@ -586,13 +590,13 @@ class CommandCenter:
             "CommandCenter.Subtitle.TLabel",
             background=bg,
             foreground=muted,
-            wraplength=460,
+            wraplength=_CONTENT_WRAP_LENGTH,
         )
         style.configure(
             "CommandCenter.Muted.TLabel",
             background=alt,
             foreground=muted,
-            wraplength=460,
+            wraplength=_CONTENT_WRAP_LENGTH,
         )
         style.configure(
             "CommandCenter.Section.TLabelframe",
