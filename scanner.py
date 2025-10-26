@@ -299,81 +299,8 @@ def _merge_tokens(*token_sets: Iterable[str]) -> Tuple[str, ...]:
     return tuple(merged)
 
 
-_DEFAULT_NAME_TOKENS: Dict[str, Tuple[str, ...]] = {
-    "Script Mod": (
-        "script",
-        "scripts",
-        "scriptmod",
-        "scriptmods",
-        "mccc",
-        "mccommand",
-        "commandcenter",
-        "xml",
-        "injector",
-        "xmlinjector",
-        "uicheats",
-        "cheats",
-    ),
-    "CAS": (
-        "hair",
-        "skin",
-        "makeup",
-        "tattoo",
-        "preset",
-        "slider",
-        "clothes",
-        "nails",
-        "lash",
-        "brow",
-        "outfit",
-        "dress",
-        "shoes",
-        "top",
-        "bottom",
-    ),
-    "BuildBuy": (
-        "sofa",
-        "couch",
-        "chair",
-        "desk",
-        "wardrobe",
-        "lamp",
-        "bed",
-        "tv",
-        "sink",
-        "shower",
-        "window",
-        "door",
-        "rug",
-        "table",
-        "counter",
-        "cabinet",
-        "plant",
-        "painting",
-        "light",
-    ),
-    "Pose or Animation": (
-        "pose",
-        "poses",
-        "animation",
-        "animations",
-        "a2o",
-        "a2a",
-        "clip",
-    ),
-    "Tuning": (
-        "tuning",
-        "trait",
-        "loot",
-        "autonomy",
-        "interaction",
-    ),
-}
-
-
 def _resolve_name_tokens(category: str) -> Tuple[str, ...]:
-    fallback_tokens = _prepare_keyword_tokens(_DEFAULT_NAME_TOKENS.get(category, ()))
-    data_tokens: Iterable[object] = ()
+    data_tokens: List[object] = []
     name_section = _KEYWORDS_DATA.get("name_tokens")
     if isinstance(name_section, dict):
         key_map = {
@@ -387,17 +314,16 @@ def _resolve_name_tokens(category: str) -> Tuple[str, ...]:
         if mapped_key:
             maybe_tokens = name_section.get(mapped_key, [])
             if isinstance(maybe_tokens, list):
-                data_tokens = maybe_tokens
+                data_tokens.extend(maybe_tokens)
         if category != "Script Mod":
             generic_tokens = name_section.get("generic", [])
             if isinstance(generic_tokens, list):
-                data_tokens = list(data_tokens) + list(generic_tokens)
+                data_tokens.extend(generic_tokens)
     if category == "Script Mod":
         script_tokens = _KEYWORDS_DATA.get("script", [])
         if isinstance(script_tokens, list):
-            data_tokens = list(data_tokens) + script_tokens
-    resolved = _prepare_keyword_tokens(data_tokens)
-    return _merge_tokens(fallback_tokens, resolved)
+            data_tokens.extend(script_tokens)
+    return _prepare_keyword_tokens(data_tokens)
 
 
 NAME_KEYWORD_BUCKETS: Tuple[Tuple[str, Tuple[str, ...]], ...] = tuple(
@@ -431,16 +357,6 @@ NAME_REASON_MAP = {
 
 
 def _resolve_script_ids() -> set[str]:
-    fallback = {
-        "mc-command-center",
-        "mc_command_center",
-        "mccc",
-        "xmlinjector",
-        "xml-injector",
-        "ui-cheats-extension",
-        "ui-cheats",
-        "uicheats",
-    }
     script_tokens = _KEYWORDS_DATA.get("script", [])
     normalized: set[str] = set()
     if isinstance(script_tokens, list):
@@ -448,10 +364,6 @@ def _resolve_script_ids() -> set[str]:
             norm = normalize_key(str(token))
             if norm:
                 normalized.add(norm)
-    if not normalized:
-        normalized = {normalize_key(token) for token in fallback if normalize_key(token)}
-    else:
-        normalized.update(normalize_key(token) for token in fallback if normalize_key(token))
     return normalized
 
 
@@ -459,12 +371,10 @@ SCRIPT_NORMALIZED_IDS = _resolve_script_ids()
 
 
 def _resolve_adult_strong_keywords() -> set[str]:
-    fallback = ("wickedwhims", "deviousdesires", "basemental", "turbodriver", "dd")
-    tokens = set(_prepare_keyword_tokens(fallback))
     strong_keywords = _KEYWORDS_DATA.get("adult_strong", [])
-    if isinstance(strong_keywords, list):
-        tokens.update(_prepare_keyword_tokens(strong_keywords))
-    return tokens
+    if not isinstance(strong_keywords, list):
+        return set()
+    return set(_prepare_keyword_tokens(strong_keywords))
 
 
 ADULT_STRONG_KEYWORDS = _resolve_adult_strong_keywords()
