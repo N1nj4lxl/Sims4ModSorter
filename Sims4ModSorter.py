@@ -976,7 +976,7 @@ class Sims4ModSorterApp(tk.Tk):
         self._update_download_filename: Optional[str] = None
         self._update_available: bool = False
         self._update_release_notes: Optional[str] = None
-        self._update_overlay: Optional[tk.Toplevel] = None
+        self._update_overlay: Optional[tk.Frame] = None
         self._update_overlay_message = tk.StringVar(value="")
         self._update_overlay_headline = tk.StringVar(value="Sims4 Mod Sorter Update")
         self._update_overlay_status_icon = tk.StringVar(value="⬆️")
@@ -999,6 +999,7 @@ class Sims4ModSorterApp(tk.Tk):
         self._update_overlay_icon_font: Optional[tkfont.Font] = None
         self._update_overlay_visible: bool = False
         self._update_overlay_origin: str = "general"
+        self._update_overlay_container: Optional[ttk.Frame] = None
         self._update_download_mode = tk.StringVar(value="simple")
         self._update_mode_description = tk.StringVar(
             value="Downloads and installs every updated file automatically."
@@ -3755,23 +3756,26 @@ class Sims4ModSorterApp(tk.Tk):
             else:
                 self._version_display_var.set(f"App Version: {APP_VERSION}")
 
-    def _ensure_update_overlay(self) -> tk.Toplevel:
+    def _ensure_update_overlay(self) -> tk.Frame:
         overlay = self._update_overlay
         if overlay and overlay.winfo_exists():
             self._refresh_update_overlay_theme()
             return overlay
 
-        overlay = tk.Toplevel(self)
-        overlay.withdraw()
-        overlay.title("Checking for Updates")
-        overlay.transient(self)
-        overlay.resizable(False, False)
-        overlay.protocol("WM_DELETE_WINDOW", lambda: None)
         palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
-        overlay.configure(bg=palette.get("bg", "#111316"))
+        overlay = tk.Frame(
+            self,
+            bg=_scrim_color(palette.get("bg", "#111316")),
+            highlightthickness=0,
+            bd=0,
+        )
+        overlay.place_forget()
+        overlay.grid_rowconfigure(0, weight=1)
+        overlay.grid_columnconfigure(0, weight=1)
+        overlay.bind("<Escape>", lambda _e: self._hide_update_overlay())
 
         container = ttk.Frame(overlay, padding=(16, 20, 16, 20), style="UpdateOverlay.TFrame")
-        container.pack(fill="both", expand=True)
+        container.place(relx=0.5, rely=0.5, anchor="center")
         container.columnconfigure(0, weight=1)
 
         hero = ttk.Frame(container, style="UpdateOverlayHero.TFrame")
@@ -3946,6 +3950,7 @@ class Sims4ModSorterApp(tk.Tk):
             self._update_overlay_progress_frame.grid_remove()
 
         self._update_overlay = overlay
+        self._update_overlay_container = container
         self._update_overlay_progress = progress
         self._update_overlay_download_btn = download_btn
         self._update_overlay_manual_btn = manual_btn
@@ -3959,7 +3964,7 @@ class Sims4ModSorterApp(tk.Tk):
         overlay = getattr(self, "_update_overlay", None)
         if overlay and overlay.winfo_exists():
             palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
-            overlay.configure(bg=palette.get("bg", "#111316"))
+            overlay.configure(bg=_scrim_color(palette.get("bg", "#111316")))
             style = ttk.Style()
             style.configure("UpdateOverlay.TFrame", background=palette["alt"])
             style.configure("UpdateOverlayHero.TFrame", background=palette["alt"])
@@ -4000,22 +4005,25 @@ class Sims4ModSorterApp(tk.Tk):
                     self._update_mode_frame.configure(style="TLabelframe")
                 except Exception:
                     pass
+            container = getattr(self, "_update_overlay_container", None)
+            if container and container.winfo_exists():
+                container.place_configure(relx=0.5, rely=0.5, anchor="center")
 
     def _center_update_overlay(self) -> None:
         overlay = getattr(self, "_update_overlay", None)
-        if not overlay or not overlay.winfo_exists():
+        container = getattr(self, "_update_overlay_container", None)
+        if (
+            not overlay
+            or not overlay.winfo_exists()
+            or not container
+            or not container.winfo_exists()
+        ):
             return
         self.update_idletasks()
         try:
-            ow = overlay.winfo_width()
-            oh = overlay.winfo_height()
-            if ow <= 1 and oh <= 1:
-                overlay.update_idletasks()
-                ow = overlay.winfo_width()
-                oh = overlay.winfo_height()
-            x = self.winfo_rootx() + max((self.winfo_width() - ow) // 2, 0)
-            y = self.winfo_rooty() + max((self.winfo_height() - oh) // 2, 0)
-            overlay.geometry(f"+{x}+{y}")
+            overlay.update_idletasks()
+            container.update_idletasks()
+            container.place_configure(relx=0.5, rely=0.5, anchor="center")
         except Exception:
             pass
 
@@ -4136,8 +4144,8 @@ class Sims4ModSorterApp(tk.Tk):
                 advanced_state = "disabled"
             self._update_mode_advanced_radio.configure(state=advanced_state)
 
-        overlay.deiconify()
-        overlay.lift()
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        overlay.tkraise()
         try:
             overlay.grab_set()
         except tk.TclError:
@@ -4155,7 +4163,11 @@ class Sims4ModSorterApp(tk.Tk):
         if focus_target and focus_target.winfo_exists():
             focus_target.focus_set()
         else:
-            overlay.focus_set()
+            container = getattr(self, "_update_overlay_container", None)
+            if container and container.winfo_exists():
+                container.focus_set()
+            else:
+                self.focus_set()
 
         self._center_update_overlay()
         self._update_overlay_visible = True
@@ -4167,7 +4179,7 @@ class Sims4ModSorterApp(tk.Tk):
                 overlay.grab_release()
             except tk.TclError:
                 pass
-            overlay.withdraw()
+            overlay.place_forget()
         if self._update_overlay_progress:
             self._update_overlay_progress.stop()
             self._update_overlay_progress.configure(mode="indeterminate", value=0)
