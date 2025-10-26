@@ -120,11 +120,13 @@ class PipelineEntry:
     path_tokens: Tuple[str, ...]
     base_name: str
     normalized_key: str
+    collapsed_key: str
     decision: ClassificationDecision = field(default_factory=ClassificationDecision)
     header_types: Optional[Dict[int, int]] = None
     soft_routed: bool = False
     decided_by_header: bool = False
     link_target: str = ""
+    split_note: str = ""
 
 
 ProgressCallback = Callable[[int, int, Path, str], None]
@@ -180,6 +182,11 @@ def normalize_key(value: str) -> str:
     lowered = value.lower()
     collapsed = NORMALISE_KEY_RE.sub("-", lowered)
     return collapsed.strip("-")
+
+
+def collapse_key(value: str) -> str:
+    lowered = value.lower()
+    return NORMALISE_KEY_RE.sub("", lowered)
 
 
 def pretty_display_name(filename: str) -> str:
@@ -364,6 +371,7 @@ def _resolve_script_ids() -> set[str]:
             norm = normalize_key(str(token))
             if norm:
                 normalized.add(norm)
+                normalized.add(norm.replace("-", ""))
     return normalized
 
 
@@ -378,6 +386,27 @@ def _resolve_adult_strong_keywords() -> set[str]:
 
 
 ADULT_STRONG_KEYWORDS = _resolve_adult_strong_keywords()
+
+
+def _build_segmentation_tokens() -> Tuple[str, ...]:
+    bucket_tokens: List[Tuple[str, ...]] = [keywords for _, keywords in NAME_KEYWORD_BUCKETS]
+    script_tokens = _prepare_keyword_tokens(_KEYWORDS_DATA.get("script", []))
+    adult_tokens = _prepare_keyword_tokens(_KEYWORDS_DATA.get("adult_strong", []))
+    extra_tokens = ("ui", "mc", "dd", "ww")
+    return _merge_tokens(*bucket_tokens, script_tokens, adult_tokens, extra_tokens)
+
+
+SEGMENTATION_TOKENS = _build_segmentation_tokens()
+SEGMENTATION_DICTIONARY: set[str] = {token for token in SEGMENTATION_TOKENS if token}
+SEGMENTATION_BY_FIRST: Dict[str, List[str]] = {}
+for _token in SEGMENTATION_DICTIONARY:
+    if not _token:
+        continue
+    first = _token[0]
+    SEGMENTATION_BY_FIRST.setdefault(first, []).append(_token)
+for _tokens in SEGMENTATION_BY_FIRST.values():
+    _tokens.sort(key=len, reverse=True)
+SEGMENTATION_SORTED = tuple(sorted(SEGMENTATION_DICTIONARY, key=len, reverse=True))
 
 
 def normalize_extension(ext: str) -> Tuple[str, bool]:
@@ -406,9 +435,187 @@ def _effective_extension(path: Path) -> Tuple[str, bool]:
     return ext, disabled
 
 
-def _tokenise(text: str) -> Tuple[str, ...]:
+def _tokenise_with_note(text: str) -> Tuple[Tuple[str, ...], Optional[str]]:
     normalised = text.replace("_", " ").replace("-", " ")
-    return tuple(TOKEN_RE.findall(normalised.lower()))
+    raw_tokens = TOKEN_RE.findall(normalised.lower())
+    tokens: List[str] = []
+    display: List[str] = []
+    changed = False
+    for raw in raw_tokens:
+        pieces = _split_token(raw)
+        if len(pieces) != 1 or pieces[0] != raw:
+            changed = True
+        tokens.extend(pieces)
+        display.extend(pieces)
+    note = " ".join(display) if changed and display else None
+    return tuple(tokens), note
+
+
+def _split_token(raw: str) -> List[str]:
+    if raw.isdigit():
+        return [raw]
+    parts = re.findall(r"[a-z]+|\d+", raw)
+    if len(parts) == 1 and parts[0] == raw:
+        if raw.isdigit():
+            return [raw]
+        return _segment_alpha_sequence(raw)
+    pieces: List[str] = []
+    for part in parts:
+        if part.isdigit():
+            pieces.append(part)
+        else:
+            pieces.extend(_segment_alpha_sequence(part))
+    return pieces
+
+
+def _segment_alpha_sequence(token: str, *, _seen: Optional[set[str]] = None) -> List[str]:
+    if not token:
+        return []
+    if _seen is None:
+        _seen = set()
+    if token in _seen:
+        return [token]
+    _seen.add(token)
+    if token in SEGMENTATION_DICTIONARY:
+        if len(token) >= 8:
+            pieces = _segment_long_alpha(token, allow_self=False)
+            if pieces and pieces != [token]:
+                if any(piece not in SEGMENTATION_DICTIONARY and len(piece) < 3 for piece in pieces):
+                    return [token]
+                refined: List[str] = []
+                for piece in pieces:
+                    refined.extend(_segment_alpha_sequence(piece, _seen=_seen))
+                return refined
+        return [token]
+    if len(token) < 6:
+        fuzzy = _find_fuzzy_match(token)
+        return [fuzzy] if fuzzy else [token]
+    pieces = _segment_long_alpha(token)
+    refined: List[str] = []
+    for piece in pieces:
+        if piece == token:
+            refined.append(piece)
+        elif piece in SEGMENTATION_DICTIONARY or len(piece) >= 7:
+            refined.extend(_segment_alpha_sequence(piece, _seen=_seen))
+        else:
+            refined.append(piece)
+    return refined
+
+
+def _segment_long_alpha(token: str, *, allow_self: bool = True) -> List[str]:
+    result: List[str] = []
+    index = 0
+    length = len(token)
+    while index < length:
+        allow_full = allow_self or index > 0
+        match, consumed = _match_dictionary_prefix(token, index, allow_full=allow_full)
+        if match:
+            result.append(match)
+            index += consumed
+            continue
+        fallback = _fallback_chunk(token, index)
+        if not fallback:
+            break
+        result.append(fallback)
+        index += len(fallback)
+    if index < length:
+        result.append(token[index:])
+    return result
+
+
+def _match_dictionary_prefix(token: str, start: int, allow_full: bool = True) -> Tuple[Optional[str], int]:
+    end = len(token)
+    fuzzy_candidate: Optional[Tuple[str, int]] = None
+    while end > start:
+        piece = token[start:end]
+        if not allow_full and end == len(token) and piece in SEGMENTATION_DICTIONARY:
+            pass
+        elif piece in SEGMENTATION_DICTIONARY:
+            return piece, len(piece)
+        if fuzzy_candidate is None and (allow_full or end < len(token)):
+            fuzzy = _find_fuzzy_match(piece)
+            if fuzzy:
+                fuzzy_candidate = (fuzzy, len(piece))
+        end -= 1
+    if fuzzy_candidate:
+        return fuzzy_candidate
+    return None, 0
+
+
+def _fallback_chunk(token: str, start: int) -> str:
+    remaining = token[start:]
+    if not remaining:
+        return ""
+    best_index = len(remaining)
+    for word in SEGMENTATION_SORTED:
+        if len(word) < 3:
+            continue
+        idx = remaining.find(word, 1)
+        if idx > 0 and idx < best_index:
+            best_index = idx
+            if idx == 1:
+                break
+    if best_index < len(remaining):
+        return remaining[:best_index]
+    if len(remaining) >= 8:
+        return remaining[:4]
+    if len(remaining) >= 6:
+        return remaining[:3]
+    return remaining
+
+
+def _find_fuzzy_match(piece: str) -> Optional[str]:
+    if piece in SEGMENTATION_DICTIONARY:
+        return piece
+    if len(piece) < 5:
+        return None
+    first = piece[0]
+    candidates = SEGMENTATION_BY_FIRST.get(first)
+    if not candidates and len(piece) > 1:
+        candidates = SEGMENTATION_BY_FIRST.get(piece[1])
+    for candidate in candidates or ():
+        if abs(len(candidate) - len(piece)) > 1:
+            continue
+        if _edit_distance_leq_one(piece, candidate):
+            return candidate
+    return None
+
+
+def _edit_distance_leq_one(a: str, b: str) -> bool:
+    if a == b:
+        return True
+    len_a = len(a)
+    len_b = len(b)
+    if abs(len_a - len_b) > 1:
+        return False
+    if len_a == len_b:
+        mismatches = 0
+        for char_a, char_b in zip(a, b):
+            if char_a != char_b:
+                mismatches += 1
+                if mismatches > 1:
+                    return False
+        return True
+    if len_a > len_b:
+        a, b = b, a
+        len_a, len_b = len_b, len_a
+    index_a = index_b = 0
+    mismatches = 0
+    while index_a < len_a and index_b < len_b:
+        if a[index_a] == b[index_b]:
+            index_a += 1
+            index_b += 1
+            continue
+        mismatches += 1
+        if mismatches > 1:
+            return False
+        index_b += 1
+    return True
+
+
+def _tokenise(text: str) -> Tuple[str, ...]:
+    tokens, _ = _tokenise_with_note(text)
+    return tokens
 
 
 def _tokenise_path(path: Path, depth: int = 3) -> Tuple[str, ...]:
@@ -503,6 +710,7 @@ def run_classification_pipeline(
     pair_map = _build_pair_map(entries)
     _apply_name_classification(entries)
     _apply_pair_enforcement(entries, pair_map)
+    _rescue_script_like_packages(entries)
     soft_authors = _prepare_keyword_tokens((rules or {}).get("adult_soft_authors", []))
     _apply_adult_gating(entries, set(soft_authors))
     header_budget = min(int(budgets.get(".package", 131072)), 131072)
@@ -523,9 +731,10 @@ def _collect_pipeline_entries(paths: Sequence[Path]) -> List[PipelineEntry]:
         except OSError:
             size_bytes = 0
         base_name = _base_name_for_entry(path, ext, disabled)
-        tokens = _tokenise(base_name)
+        tokens, split_note = _tokenise_with_note(base_name)
         path_tokens = _tokenise_path(path.parent)
         normalized_key = normalize_key(base_name) or normalize_key(path.stem)
+        collapsed_key = collapse_key(base_name) or collapse_key(path.stem)
         soft_routed = _is_soft_routed_entry(path)
         entries.append(
             PipelineEntry(
@@ -538,7 +747,9 @@ def _collect_pipeline_entries(paths: Sequence[Path]) -> List[PipelineEntry]:
                 path_tokens=path_tokens,
                 base_name=base_name,
                 normalized_key=normalized_key,
+                collapsed_key=collapsed_key,
                 soft_routed=soft_routed,
+                split_note=split_note or "",
             )
         )
     return entries
@@ -618,7 +829,11 @@ def _classify_entry_by_name(entry: PipelineEntry) -> ClassificationDecision:
             best_category = category
             best_score = score
 
-    script_hint = entry.normalized_key in SCRIPT_NORMALIZED_IDS or scores.get("Script Mod", 0) > 0
+    script_hint = (
+        entry.normalized_key in SCRIPT_NORMALIZED_IDS
+        or entry.collapsed_key in SCRIPT_NORMALIZED_IDS
+        or scores.get("Script Mod", 0) > 0
+    )
     if script_hint:
         best_category = "Script Mod"
         best_score = max(best_score, 1)
@@ -628,7 +843,10 @@ def _classify_entry_by_name(entry: PipelineEntry) -> ClassificationDecision:
 
     confidence = 0.7 + min(0.15, 0.05 * (best_score - 1))
     if best_category == "Script Mod":
-        confidence = 0.95 if entry.normalized_key in SCRIPT_NORMALIZED_IDS else max(confidence, 0.85)
+        if entry.normalized_key in SCRIPT_NORMALIZED_IDS or entry.collapsed_key in SCRIPT_NORMALIZED_IDS:
+            confidence = 0.95
+        else:
+            confidence = max(confidence, 0.85)
     reason = NAME_REASON_MAP.get(best_category, "")
     return ClassificationDecision(best_category, confidence, reason)
 
@@ -655,6 +873,18 @@ def _apply_pair_enforcement(
                 package_entry.decision = ClassificationDecision(
                     "Script Mod", 0.95, NAME_REASON_MAP["Script Mod"]
                 )
+
+
+def _rescue_script_like_packages(entries: Sequence[PipelineEntry]) -> None:
+    for entry in entries:
+        if entry.ext not in PACKAGE_EXTS:
+            continue
+        if entry.decision.category != "Unknown":
+            continue
+        if entry.collapsed_key in SCRIPT_NORMALIZED_IDS:
+            entry.decision = ClassificationDecision(
+                "Script Mod", 0.9, NAME_REASON_MAP["Script Mod"]
+            )
 
 
 def _apply_adult_gating(
@@ -711,6 +941,8 @@ def _finalize_entry(entry: PipelineEntry, routing: Dict[str, str]) -> FileItem:
     tooltips = _build_reason(reason)
     if reason == "link:script-pair":
         tooltips["reason"] = f"Linked to script mod: {entry.link_target or entry.base_name}"
+    if entry.split_note:
+        tooltips["split"] = f"split: {entry.split_note}"
     item = FileItem(
         path=entry.path,
         name=entry.path.name,
@@ -983,17 +1215,22 @@ def guess_type_for_name(name: str, ext: str) -> Tuple[str, float, str]:
     norm_ext, disabled = normalize_extension(ext)
     path_obj = Path(name)
     base_name = _base_name_for_entry(path_obj, norm_ext, disabled)
+    tokens, split_note = _tokenise_with_note(base_name)
+    normalized_key = normalize_key(base_name)
+    collapsed_key = collapse_key(base_name)
     entry = PipelineEntry(
         path=path_obj,
         ext=norm_ext,
         disabled=disabled,
         original_ext=norm_ext,
         size_bytes=0,
-        tokens=_tokenise(base_name),
+        tokens=tokens,
         path_tokens=(),
         base_name=base_name,
-        normalized_key=normalize_key(base_name),
+        normalized_key=normalized_key,
+        collapsed_key=collapsed_key,
         soft_routed=_is_soft_routed_entry(path_obj),
+        split_note=split_note or "",
     )
     decision = _classify_entry_by_name(entry)
     return decision.category, decision.confidence, decision.reason
@@ -1010,17 +1247,22 @@ def classify_from_types(
     path_obj = Path(filename)
     norm_ext, disabled = normalize_extension(path_obj.suffix)
     base_name = _base_name_for_entry(path_obj, norm_ext, disabled)
+    tokens, split_note = _tokenise_with_note(base_name)
+    normalized_key = normalize_key(base_name)
+    collapsed_key = collapse_key(base_name)
     entry = PipelineEntry(
         path=path_obj,
         ext=norm_ext,
         disabled=disabled,
         original_ext=norm_ext,
         size_bytes=0,
-        tokens=_tokenise(base_name),
+        tokens=tokens,
         path_tokens=(),
         base_name=base_name,
-        normalized_key=normalize_key(base_name),
+        normalized_key=normalized_key,
+        collapsed_key=collapsed_key,
         soft_routed=_is_soft_routed_entry(path_obj),
+        split_note=split_note or "",
     )
     decision = _classify_entry_by_name(entry)
     reason = decision.reason or reason
