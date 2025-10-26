@@ -32,7 +32,7 @@ from typing import Callable, Dict, Iterable, Iterator, List, Literal, Optional, 
 
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, simpledialog, ttk
 
 from launch_utils import UpdateResult, check_for_update
 from command_center import CommandCenter
@@ -1001,6 +1001,23 @@ class Sims4ModSorterApp(tk.Tk):
         self._update_mode_description_label: Optional[ttk.Label] = None
         self._auto_size_pending = False
 
+        self._dialog_overlay: Optional[tk.Toplevel] = None
+        self._dialog_overlay_scrim: Optional[tk.Frame] = None
+        self._dialog_overlay_container: Optional[ttk.Frame] = None
+        self._dialog_overlay_button_frame: Optional[ttk.Frame] = None
+        self._dialog_overlay_icon_label: Optional[ttk.Label] = None
+        self._dialog_overlay_headline_label: Optional[ttk.Label] = None
+        self._dialog_overlay_message_label: Optional[ttk.Label] = None
+        self._dialog_overlay_icon = tk.StringVar(value="")
+        self._dialog_overlay_headline = tk.StringVar(value="")
+        self._dialog_overlay_message = tk.StringVar(value="")
+        self._dialog_overlay_icon_font: Optional[tkfont.Font] = None
+        self._dialog_overlay_headline_font: Optional[tkfont.Font] = None
+        self._dialog_overlay_visible: bool = False
+        self._dialog_overlay_default: str = ""
+        self._dialog_overlay_cancel: str = ""
+        self._dialog_overlay_wait_var: Optional[tk.StringVar] = None
+
         self._history_window: Optional[tk.Toplevel] = None
         self._history_tree: Optional[ttk.Treeview] = None
         self._history_entries: Dict[str, Dict[str, object]] = {}
@@ -1035,6 +1052,7 @@ class Sims4ModSorterApp(tk.Tk):
         self.after(1000, self._check_updates_on_launch)
         self.after(0, lambda: center_window(self))
         self.after(120, self._maybe_show_command_center)
+        self.bind("<Configure>", self._on_root_configure, add="+")
 
     # ------------------------------------------------------------------
     # Settings persistence
@@ -1485,7 +1503,7 @@ class Sims4ModSorterApp(tk.Tk):
         if not name:
             return
         if name in self.loadouts:
-            messagebox.showerror("New Loadout", f"A loadout named '{name}' already exists.", parent=self)
+            self._show_error_overlay("New Loadout", f"A loadout named '{name}' already exists.")
             return
         self.loadouts[name] = {str(item.path): bool(item.include) for item in self.items}
         self._active_loadout_name = name
@@ -1512,7 +1530,7 @@ class Sims4ModSorterApp(tk.Tk):
         if not new_name or new_name == current:
             return
         if new_name in self.loadouts:
-            messagebox.showerror("Rename Loadout", f"A loadout named '{new_name}' already exists.", parent=self)
+            self._show_error_overlay("Rename Loadout", f"A loadout named '{new_name}' already exists.")
             return
         self.loadouts[new_name] = self.loadouts.pop(current)
         if self._active_loadout_name == current:
@@ -1529,7 +1547,7 @@ class Sims4ModSorterApp(tk.Tk):
         target = self.loadout_var.get() or self._active_loadout_name
         if not target or target not in self.loadouts:
             return
-        if not messagebox.askyesno("Delete Loadout", f"Delete loadout '{target}'?", parent=self):
+        if not self._ask_yes_no_overlay("Delete Loadout", f"Delete loadout '{target}'?"):
             return
         was_active = target == self._active_loadout_name
         self.loadouts.pop(target, None)
@@ -1548,10 +1566,10 @@ class Sims4ModSorterApp(tk.Tk):
     def on_apply_loadout(self) -> None:
         target = (self.loadout_var.get() or "").strip()
         if not target:
-            messagebox.showinfo("Apply Loadout", "Select a loadout to apply first.", parent=self)
+            self._show_info_overlay("Apply Loadout", "Select a loadout to apply first.")
             return
         if target not in self.loadouts:
-            messagebox.showerror("Apply Loadout", f"Loadout '{target}' is no longer available.", parent=self)
+            self._show_error_overlay("Apply Loadout", f"Loadout '{target}' is no longer available.")
             self._refresh_loadout_controls()
             return
         self._record_loadout(save=True)
@@ -1608,6 +1626,11 @@ class Sims4ModSorterApp(tk.Tk):
             background=palette["accent"],
             troughcolor=palette["bg"],
         )
+        style.configure("DialogOverlay.TFrame", background=palette["alt"])
+        style.configure("DialogOverlayIcon.TLabel", background=palette["alt"], foreground=palette["accent"])
+        style.configure("DialogOverlayHeadline.TLabel", background=palette["alt"], foreground=palette["fg"])
+        style.configure("DialogOverlayMessage.TLabel", background=palette["alt"], foreground=palette["fg"])
+        style.configure("DialogOverlayButtons.TFrame", background=palette["alt"])
         sidebar_bg = palette["alt"]
         style.configure("Sidebar.TFrame", background=sidebar_bg)
         style.configure(
@@ -2946,6 +2969,306 @@ class Sims4ModSorterApp(tk.Tk):
     def _on_update_overlay_skip(self) -> None:
         self._hide_update_overlay()
 
+    # Dialog overlay --------------------------------------------------
+
+    def _ensure_dialog_overlay(self) -> tk.Toplevel:
+        overlay = self._dialog_overlay
+        if overlay and overlay.winfo_exists():
+            self._refresh_dialog_overlay_theme()
+            self._layout_dialog_overlay()
+            return overlay
+
+        overlay = tk.Toplevel(self)
+        overlay.withdraw()
+        overlay.overrideredirect(True)
+        overlay.transient(self)
+        overlay.lift()
+        overlay.attributes("-topmost", True)
+        scrim_color = _scrim_color(self._theme_cache.get("bg", "#111316"))
+        overlay.configure(bg=scrim_color)
+
+        scrim = tk.Frame(overlay, bg=scrim_color, borderwidth=0, highlightthickness=0)
+        scrim.pack(fill="both", expand=True)
+
+        container = ttk.Frame(scrim, padding=(24, 28, 24, 24), style="DialogOverlay.TFrame")
+        container.place(relx=0.5, rely=0.5, anchor="center")
+        container.columnconfigure(1, weight=1)
+
+        icon_label = ttk.Label(container, textvariable=self._dialog_overlay_icon, style="DialogOverlayIcon.TLabel")
+        icon_label.grid(row=0, column=0, rowspan=2, sticky="nw", padx=(0, 16))
+
+        headline_label = ttk.Label(
+            container,
+            textvariable=self._dialog_overlay_headline,
+            style="DialogOverlayHeadline.TLabel",
+            anchor="w",
+            justify="left",
+        )
+        headline_label.grid(row=0, column=1, sticky="nw")
+
+        message_label = ttk.Label(
+            container,
+            textvariable=self._dialog_overlay_message,
+            style="DialogOverlayMessage.TLabel",
+            justify="left",
+            wraplength=520,
+            anchor="w",
+        )
+        message_label.grid(row=1, column=1, sticky="nw", pady=(8, 0))
+
+        button_frame = ttk.Frame(container, style="DialogOverlayButtons.TFrame")
+        button_frame.grid(row=2, column=0, columnspan=2, sticky="e", pady=(24, 0))
+
+        if not self._dialog_overlay_icon_font:
+            try:
+                self._dialog_overlay_icon_font = tkfont.Font(size=34, weight="bold")
+            except tk.TclError:
+                self._dialog_overlay_icon_font = tkfont.Font()
+        icon_label.configure(font=self._dialog_overlay_icon_font)
+
+        if not self._dialog_overlay_headline_font:
+            try:
+                self._dialog_overlay_headline_font = tkfont.Font(size=15, weight="bold")
+            except tk.TclError:
+                self._dialog_overlay_headline_font = tkfont.Font(weight="bold")
+        headline_label.configure(font=self._dialog_overlay_headline_font)
+
+        overlay.bind("<Map>", lambda _e: self._layout_dialog_overlay(), add="+")
+
+        self._dialog_overlay = overlay
+        self._dialog_overlay_scrim = scrim
+        self._dialog_overlay_container = container
+        self._dialog_overlay_button_frame = button_frame
+        self._dialog_overlay_icon_label = icon_label
+        self._dialog_overlay_headline_label = headline_label
+        self._dialog_overlay_message_label = message_label
+
+        self._refresh_dialog_overlay_theme()
+        self._layout_dialog_overlay()
+        return overlay
+
+    def _refresh_dialog_overlay_theme(self) -> None:
+        overlay = getattr(self, "_dialog_overlay", None)
+        if not overlay or not overlay.winfo_exists():
+            return
+        palette = self._theme_cache
+        scrim_color = _scrim_color(palette.get("bg", "#111316"))
+        try:
+            overlay.configure(bg=scrim_color)
+        except tk.TclError:
+            return
+        scrim = getattr(self, "_dialog_overlay_scrim", None)
+        if scrim and scrim.winfo_exists():
+            scrim.configure(bg=scrim_color)
+
+        style = ttk.Style()
+        style.configure("DialogOverlay.TFrame", background=palette.get("alt", palette.get("bg", "#111316")))
+        style.configure("DialogOverlayIcon.TLabel", background=palette.get("alt", "#161A1E"), foreground=palette.get("accent", "#4C8BF5"))
+        style.configure("DialogOverlayHeadline.TLabel", background=palette.get("alt", "#161A1E"), foreground=palette.get("fg", "#E6E6E6"))
+        style.configure("DialogOverlayMessage.TLabel", background=palette.get("alt", "#161A1E"), foreground=palette.get("fg", "#E6E6E6"))
+        style.configure("DialogOverlayButtons.TFrame", background=palette.get("alt", "#161A1E"))
+
+        button_frame = getattr(self, "_dialog_overlay_button_frame", None)
+        if button_frame and button_frame.winfo_exists():
+            button_frame.configure(style="DialogOverlayButtons.TFrame")
+
+    def _layout_dialog_overlay(self) -> None:
+        overlay = getattr(self, "_dialog_overlay", None)
+        if not overlay or not overlay.winfo_exists():
+            return
+        try:
+            self.update_idletasks()
+            overlay.update_idletasks()
+        except tk.TclError:
+            return
+        width = max(self.winfo_width(), 1)
+        height = max(self.winfo_height(), 1)
+        x = self.winfo_rootx()
+        y = self.winfo_rooty()
+        try:
+            overlay.geometry(f"{width}x{height}+{x}+{y}")
+        except tk.TclError:
+            return
+        container = getattr(self, "_dialog_overlay_container", None)
+        if container and container.winfo_exists():
+            container.place_configure(relx=0.5, rely=0.5, anchor="center")
+
+    def _on_root_configure(self, _event=None) -> None:
+        if self._dialog_overlay_visible:
+            self._layout_dialog_overlay()
+
+    def _show_dialog_overlay(
+        self,
+        *,
+        icon: str,
+        title: str,
+        message: str,
+        buttons: Sequence[Tuple[str, str, bool]],
+        default: Optional[str] = None,
+        cancel: Optional[str] = None,
+    ) -> str:
+        overlay = self._ensure_dialog_overlay()
+        self._dialog_overlay_icon.set(icon or "")
+        self._dialog_overlay_headline.set(title or "")
+        self._dialog_overlay_message.set(message or "")
+        button_specs = list(buttons)
+        if not button_specs:
+            button_specs = [("OK", "ok", True)]
+        if default is None and button_specs:
+            default = button_specs[0][1]
+        self._dialog_overlay_default = default or ""
+        self._dialog_overlay_cancel = cancel or ""
+
+        button_frame = getattr(self, "_dialog_overlay_button_frame", None)
+        if button_frame and button_frame.winfo_exists():
+            for child in button_frame.winfo_children():
+                child.destroy()
+
+        result_var = tk.StringVar(value="")
+        self._dialog_overlay_wait_var = result_var
+
+        def _finish(value: str) -> None:
+            if result_var.get():
+                return
+            result_var.set(value)
+
+        button_widgets: Dict[str, ttk.Button] = {}
+        if button_frame and button_frame.winfo_exists():
+            total = len(button_specs)
+            for index, (text, value, accent) in enumerate(button_specs):
+                style_name = "Accent.TButton" if accent else "TButton"
+                btn = ttk.Button(
+                    button_frame,
+                    text=text,
+                    style=style_name,
+                    command=lambda v=value: _finish(v),
+                )
+                pad = (0, 8) if index < total - 1 else 0
+                btn.pack(side="left", padx=pad)
+                button_widgets[value] = btn
+
+        def _handle_escape(_event=None) -> None:
+            target = self._dialog_overlay_cancel or self._dialog_overlay_default or ""
+            _finish(target)
+
+        def _handle_return(_event=None) -> None:
+            _finish(self._dialog_overlay_default or "")
+
+        overlay.bind("<Escape>", _handle_escape, add="+")
+        overlay.bind("<Return>", _handle_return, add="+")
+
+        previous_grab_widget: Optional[tk.Widget] = None
+        try:
+            current_grab = self.grab_current()
+        except tk.TclError:
+            current_grab = None
+        if current_grab and current_grab is not overlay:
+            previous_grab_widget = current_grab
+            try:
+                current_grab.grab_release()
+            except tk.TclError:
+                previous_grab_widget = None
+
+        self._refresh_dialog_overlay_theme()
+        self._layout_dialog_overlay()
+        overlay.deiconify()
+        overlay.lift()
+        try:
+            overlay.grab_set()
+        except tk.TclError:
+            pass
+        self._dialog_overlay_visible = True
+
+        focus_target: Optional[ttk.Button] = None
+        if self._dialog_overlay_default and self._dialog_overlay_default in button_widgets:
+            focus_target = button_widgets[self._dialog_overlay_default]
+        elif button_specs:
+            first_value = button_specs[0][1]
+            focus_target = button_widgets.get(first_value)
+        try:
+            if focus_target and focus_target.winfo_exists():
+                focus_target.focus_set()
+            else:
+                overlay.focus_set()
+        except tk.TclError:
+            pass
+
+        try:
+            self.wait_variable(result_var)
+        except tk.TclError:
+            if not result_var.get():
+                fallback = self._dialog_overlay_cancel or self._dialog_overlay_default or ""
+                result_var.set(fallback)
+        finally:
+            self._dialog_overlay_visible = False
+            self._dialog_overlay_wait_var = None
+            try:
+                overlay.grab_release()
+            except tk.TclError:
+                pass
+            overlay.unbind("<Escape>")
+            overlay.unbind("<Return>")
+            try:
+                overlay.withdraw()
+            except tk.TclError:
+                pass
+            if previous_grab_widget is not None and previous_grab_widget.winfo_exists():
+                try:
+                    previous_grab_widget.grab_set()
+                except tk.TclError:
+                    pass
+                try:
+                    previous_grab_widget.focus_set()
+                except tk.TclError:
+                    pass
+
+        return result_var.get()
+
+    def _show_info_overlay(self, title: str, message: str) -> None:
+        self._show_dialog_overlay(
+            icon="ℹ️",
+            title=title,
+            message=message,
+            buttons=[("OK", "ok", True)],
+            default="ok",
+            cancel="ok",
+        )
+
+    def _show_warning_overlay(self, title: str, message: str) -> None:
+        self._show_dialog_overlay(
+            icon="⚠️",
+            title=title,
+            message=message,
+            buttons=[("OK", "ok", True)],
+            default="ok",
+            cancel="ok",
+        )
+
+    def _show_error_overlay(self, title: str, message: str) -> None:
+        self._show_dialog_overlay(
+            icon="❌",
+            title=title,
+            message=message,
+            buttons=[("OK", "ok", True)],
+            default="ok",
+            cancel="ok",
+        )
+
+    def _ask_yes_no_overlay(self, title: str, message: str, *, default: str = "yes") -> bool:
+        default = default.lower()
+        if default not in {"yes", "no"}:
+            default = "yes"
+        cancel = "no"
+        result = self._show_dialog_overlay(
+            icon="❓",
+            title=title,
+            message=message,
+            buttons=[("Yes", "yes", True), ("No", "no", False)],
+            default="yes" if default == "yes" else "no",
+            cancel=cancel,
+        )
+        return result.lower() == "yes"
+
     def _start_update_download(
         self, *, mode: Literal["auto-install", "manual-download"]
     ) -> None:
@@ -2954,10 +3277,9 @@ class Sims4ModSorterApp(tk.Tk):
             if self._update_release_page_url:
                 self._open_release_page()
             else:
-                messagebox.showinfo(
+                self._show_info_overlay(
                     "Update Available",
                     "Download information is not configured.",
-                    parent=self,
                 )
             if mode == "auto-install":
                 self._hide_update_overlay()
@@ -3136,30 +3458,25 @@ class Sims4ModSorterApp(tk.Tk):
         self._hide_update_overlay()
         self.log(f"Update downloaded to {target_path}")
         if mode == "manual-download":
-            messagebox.showinfo(
+            self._show_info_overlay(
                 "Update Downloaded",
-                (
-                    "The update package was downloaded successfully.\n"
-                    f"Saved to: {target_path}"
-                ),
-                parent=self,
+                "The update package was downloaded successfully.\n"
+                f"Saved to: {target_path}",
             )
             return
         selected_entries: Optional[Set[PurePosixPath]] = None
         if self._update_download_mode.get() == "advanced":
             selection = self._prompt_advanced_file_selection(target_path)
             if selection is None:
-                messagebox.showinfo(
+                self._show_info_overlay(
                     "Update Cancelled",
                     "The update installation was cancelled before copying any files.",
-                    parent=self,
                 )
                 return
             if not selection:
-                messagebox.showinfo(
+                self._show_info_overlay(
                     "Update Cancelled",
                     "No files were selected for installation. The update was not applied.",
-                    parent=self,
                 )
                 return
             selected_entries = selection
@@ -3170,18 +3487,16 @@ class Sims4ModSorterApp(tk.Tk):
             )
         except zipfile.BadZipFile as exc:
             self.log(f"Downloaded update is not a valid ZIP archive: {exc}", level="error")
-            messagebox.showerror(
+            self._show_error_overlay(
                 "Update Installation Failed",
                 "The downloaded update could not be installed because it is not a valid ZIP archive.",
-                parent=self,
             )
             return
         except Exception as exc:
             self.log(f"Failed to install downloaded update: {exc}", level="error")
-            messagebox.showerror(
+            self._show_error_overlay(
                 "Update Installation Failed",
                 f"Unable to install the downloaded update: {exc}",
-                parent=self,
             )
             return
 
@@ -3190,19 +3505,16 @@ class Sims4ModSorterApp(tk.Tk):
             f"Copied {copied} file{'s' if copied != 1 else ''} into the new installation.\n"
             "The new version will launch automatically and this window will close."
         )
-        messagebox.showinfo("Update Installed", summary, parent=self)
+        self._show_info_overlay("Update Installed", summary)
 
         if self._launch_new_installation(new_install_path):
             self._schedule_update_cleanup(Path(__file__).resolve().parent, new_install_path)
             self.after(500, self._shutdown_after_update)
         else:
-            messagebox.showwarning(
+            self._show_warning_overlay(
                 "Update Installed",
-                (
-                    "The update was installed but the new version could not be launched automatically.\n"
-                    "Please start the new installation manually."
-                ),
-                parent=self,
+                "The update was installed but the new version could not be launched automatically.\n"
+                "Please start the new installation manually.",
             )
 
     def _install_update_package(
@@ -3361,10 +3673,9 @@ class Sims4ModSorterApp(tk.Tk):
                     if not info.is_dir()
                 ]
         except Exception as exc:
-            messagebox.showerror(
+            self._show_error_overlay(
                 "Advanced Download",
                 f"Unable to inspect the update package: {exc}",
-                parent=self,
             )
             return None
 
@@ -3377,10 +3688,9 @@ class Sims4ModSorterApp(tk.Tk):
             filtered_entries.append(entry)
 
         if not filtered_entries:
-            messagebox.showwarning(
+            self._show_warning_overlay(
                 "Advanced Download",
                 "The update package did not contain any installable files.",
-                parent=self,
             )
             return set()
 
@@ -3430,10 +3740,9 @@ class Sims4ModSorterApp(tk.Tk):
         def confirm_selection() -> None:
             indices = tuple(map(int, listbox.curselection()))
             if not indices:
-                if not messagebox.askyesno(
+                if not self._ask_yes_no_overlay(
                     "No Files Selected",
                     "No files are selected. This will skip installing the update. Continue?",
-                    parent=dialog,
                 ):
                     return
             selected_state["cancelled"] = False
@@ -3670,24 +3979,23 @@ for _ in range(10):
         reason = error
         if isinstance(error, urllib.error.URLError) and hasattr(error, "reason"):
             reason = error.reason  # type: ignore[assignment]
-        messagebox.showerror("Update Download Failed", f"Unable to download update: {reason}", parent=self)
+        self._show_error_overlay("Update Download Failed", f"Unable to download update: {reason}")
         self.log(f"Update download failed: {error}", level="error")
-        if mode == "manual-download" and self._update_release_page_url and messagebox.askyesno(
+        if mode == "manual-download" and self._update_release_page_url and self._ask_yes_no_overlay(
             "Update Download Failed",
             "Would you like to open the release page instead?",
-            parent=self,
         ):
             self._open_release_page()
 
     def _open_release_page(self) -> None:
         url = self._update_release_page_url or self._update_download_url
         if not url:
-            messagebox.showinfo("Update Available", "Release information is not configured.", parent=self)
+            self._show_info_overlay("Update Available", "Release information is not configured.")
             return
         try:
             webbrowser.open(url)
         except Exception as exc:
-            messagebox.showerror("Update Available", f"Unable to open release page: {exc}", parent=self)
+            self._show_error_overlay("Update Available", f"Unable to open release page: {exc}")
 
     def _open_path(self, path: Path) -> None:
         try:
@@ -3709,7 +4017,7 @@ for _ in range(10):
     def _start_update_check(self, *, manual: bool, from_settings: bool = False) -> None:
         if self._update_check_in_progress:
             if manual:
-                messagebox.showinfo("Update Check", "An update check is already running.", parent=self)
+                self._show_info_overlay("Update Check", "An update check is already running.")
             return
         self._update_check_in_progress = True
         button = getattr(self, "check_updates_button", None)
@@ -3761,7 +4069,7 @@ for _ in range(10):
             self._update_release_page_url = None
             self._update_download_filename = None
             if manual:
-                messagebox.showerror("Update Check", error_message, parent=self)
+                self._show_error_overlay("Update Check", error_message)
             else:
                 self.log(error_message, level="error")
                 self._show_update_overlay(
@@ -3788,7 +4096,7 @@ for _ in range(10):
             self._update_release_page_url = None
             self._update_download_filename = None
             if manual:
-                messagebox.showerror("Update Check", result.message, parent=self)
+                self._show_error_overlay("Update Check", result.message)
             else:
                 self.log(result.message, level="warn")
                 self._show_update_overlay(
@@ -3855,12 +4163,11 @@ for _ in range(10):
             elif manual:
                 if download_available:
                     prompt = base_message + "\nWould you like to download the update now?"
-                    if messagebox.askyesno("Update Available", prompt, parent=self):
+                    if self._ask_yes_no_overlay("Update Available", prompt):
                         self._start_update_download(mode="auto-install")
-                    elif self._update_release_page_url and messagebox.askyesno(
+                    elif self._update_release_page_url and self._ask_yes_no_overlay(
                         "Update Available",
                         "Would you like to open the release page instead?",
-                        parent=self,
                     ):
                         self._open_release_page()
                 elif release_available:
@@ -3868,19 +4175,17 @@ for _ in range(10):
                         base_message
                         + "\nDownload information is not configured. Would you like to view the release page?"
                     )
-                    if messagebox.askyesno("Update Available", info, parent=self):
+                    if self._ask_yes_no_overlay("Update Available", info):
                         self._open_release_page()
                     else:
-                        messagebox.showinfo(
+                        self._show_info_overlay(
                             "Update Available",
                             "Download information is not configured for this release.",
-                            parent=self,
                         )
                 else:
-                    messagebox.showinfo(
+                    self._show_info_overlay(
                         "Update Available",
                         "Download information is not configured for this release.",
-                        parent=self,
                     )
             else:
                 self._show_update_overlay(
@@ -3899,10 +4204,9 @@ for _ in range(10):
             self._update_release_page_url = None
             self._update_download_filename = None
             if manual:
-                messagebox.showinfo(
+                self._show_info_overlay(
                     "Update Check",
                     f"You are using the latest version ({APP_VERSION}).",
-                    parent=self,
                 )
             else:
                 self._hide_update_overlay()
@@ -3948,7 +4252,7 @@ for _ in range(10):
     # ------------------------------------------------------------------
     def show_mod_status_popup(self) -> None:
         if not self.plugin_manager:
-            messagebox.showinfo("Plugin Status", "No plugins loaded.", parent=self)
+            self._show_info_overlay("Plugin Status", "No plugins loaded.")
             return
         if self._mod_status_window and self._mod_status_window.winfo_exists():
             self._populate_mod_status_popup()
@@ -4053,6 +4357,7 @@ for _ in range(10):
         if scrim:
             scrim.configure(bg=_scrim_color(palette.get("bg", "#111316")))
         self._refresh_update_overlay_theme()
+        self._refresh_dialog_overlay_theme()
         self._update_theme_preview_highlight()
         dashboard = getattr(self, "command_center", None)
         if dashboard is not None:
@@ -4071,7 +4376,7 @@ for _ in range(10):
         try:
             subprocess.Popen([sys.executable, str(script)])
         except Exception as exc:
-            messagebox.showerror("Plugin Manager", f"Unable to launch Plugin Manager: {exc}", parent=self)
+            self._show_error_overlay("Plugin Manager", f"Unable to launch Plugin Manager: {exc}")
             self.log(f"Plugin Manager launch failed: {exc}", level="error")
 
     def on_scan(self) -> None:
@@ -4082,7 +4387,7 @@ for _ in range(10):
             return
         allowed_exts_preview = self._resolve_allowed_extensions()
         if allowed_exts_preview is not None and not allowed_exts_preview:
-            messagebox.showwarning("Scan", "Enable at least one file type before scanning.", parent=self)
+            self._show_warning_overlay("Scan", "Enable at least one file type before scanning.")
             return
         include_adult_flag = self.include_adult_var.get()
         selected_folders_preview: Optional[List[str]] = None
@@ -4385,10 +4690,9 @@ for _ in range(10):
             self.log(error)
         if failed:
             error_body = "\n".join(errors[:10]) if errors else "Unknown error"
-            messagebox.showerror(
+            self._show_error_overlay(
                 "Undo Issues",
                 f"Unable to restore {failed} file(s).\n{error_body}",
-                parent=self,
             )
         self.on_scan()
 
@@ -4398,10 +4702,9 @@ for _ in range(10):
         if not entries and (
             not self._history_window or not self._history_window.winfo_exists()
         ):
-            messagebox.showinfo(
+            self._show_info_overlay(
                 "Move History",
                 "No move batches have been recorded yet.",
-                parent=self,
             )
             return
         if not self._history_window or not self._history_window.winfo_exists():
@@ -4508,10 +4811,9 @@ for _ in range(10):
             return
         selection = self._history_tree.selection()
         if not selection:
-            messagebox.showinfo(
+            self._show_info_overlay(
                 "Preview Move Batch",
                 "Select a move batch to preview.",
-                parent=self._history_window or self,
             )
             return
         entry = self._history_entries.get(selection[0])
@@ -4563,26 +4865,23 @@ for _ in range(10):
             return
         selection = self._history_tree.selection()
         if not selection:
-            messagebox.showinfo(
+            self._show_info_overlay(
                 "Undo Move Batch",
                 "Select a move batch to undo.",
-                parent=self._history_window or self,
             )
             return
         entry = self._history_entries.get(selection[0])
         if not entry:
-            messagebox.showerror(
+            self._show_error_overlay(
                 "Undo Move Batch",
                 "The selected history entry could not be located.",
-                parent=self._history_window or self,
             )
             return
         moved_count = entry.get("moved_count", 0)
         label = entry.get("display_time", "this batch")
-        if not messagebox.askyesno(
+        if not self._ask_yes_no_overlay(
             "Undo Move Batch",
             f"Restore {moved_count} file(s) from {label}?",
-            parent=self._history_window or self,
         ):
             return
         mods_root = Path(self.mods_root.get())
@@ -4633,7 +4932,7 @@ for _ in range(10):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except Exception as exc:
-            messagebox.showerror("Import Plan", f"Unable to import plan: {exc}", parent=self)
+            self._show_error_overlay("Import Plan", f"Unable to import plan: {exc}")
             self.log(f"Import failed: {exc}", level="error")
             return
 
@@ -4653,7 +4952,7 @@ for _ in range(10):
         elif isinstance(payload, list):
             entries = [entry for entry in payload if isinstance(entry, dict)]
         else:
-            messagebox.showerror("Import Plan", "The selected file is not a valid plan export.", parent=self)
+            self._show_error_overlay("Import Plan", "The selected file is not a valid plan export.")
             return
 
         imported_loadouts = 0
