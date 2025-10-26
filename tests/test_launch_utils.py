@@ -37,6 +37,7 @@ def _build_release_payload() -> dict[str, object]:
         "tag_name": "v2.0.0",
         "name": "v2.0.0",
         "html_url": "https://github.com/example/Example/releases/tag/v2.0.0",
+        "body": "New features\n- Added windows installer\n- Improved stability",
         "assets": [
             {
                 "browser_download_url": "https://github.com/example/Example/releases/download/v2/Example-mismatch.zip",
@@ -77,6 +78,10 @@ class CheckForUpdateTests(TestCase):
         self.assertEqual(result.asset_size, 1024)
         self.assertEqual(result.asset_content_type, "application/zip")
         self.assertEqual(result.latest_version, "2.0.0")
+        self.assertEqual(
+            result.release_notes,
+            "New features\n- Added windows installer\n- Improved stability",
+        )
 
     def test_platform_heuristic_prefers_windows_asset(self) -> None:
         payload = {
@@ -314,6 +319,7 @@ class UpdateOverlayWorkflowTests(TestCase):
         app.log = mock.Mock()
         app._show_update_overlay = mock.Mock()
         app._hide_update_overlay = mock.Mock()
+        app._update_release_notes = None
         app.settings_sidebar = mock.Mock()
         app.settings_sidebar.winfo_exists.return_value = True
         app.settings_sidebar.focus_set = mock.Mock()
@@ -328,6 +334,7 @@ class UpdateOverlayWorkflowTests(TestCase):
             message=None,
             release_page_url="https://example.com/release",
             asset_name="update.zip",
+            release_notes="Fixed bugs\nAdded UI improvements",
         )
 
         with mock.patch("tkinter.messagebox.askyesno") as mock_ask, mock.patch(
@@ -343,6 +350,8 @@ class UpdateOverlayWorkflowTests(TestCase):
         self.assertTrue(kwargs["enable_manual"])
         self.assertEqual(kwargs["origin"], "settings")
         self.assertEqual(app.check_updates_button.state, "normal")
+        self.assertEqual(app._update_release_notes, "Fixed bugs\nAdded UI improvements")
+        self.assertEqual(kwargs["changelog"], app._format_update_changelog())
 
     def test_overlay_buttons_dispatch_modes(self) -> None:
         app = Sims4ModSorterApp.__new__(Sims4ModSorterApp)
@@ -368,4 +377,32 @@ class UpdateOverlayWorkflowTests(TestCase):
 
         app._open_release_page.assert_called_once()
         app._start_update_download.assert_not_called()
+
+    def test_auto_install_displays_release_notes(self) -> None:
+        app = Sims4ModSorterApp.__new__(Sims4ModSorterApp)
+        app._update_download_mode = mock.Mock()
+        app._update_download_mode.get.return_value = "simple"
+        app._install_update_package = mock.Mock(return_value=(Path("/new"), 4))
+        app._latest_version = "2.0.0"
+        app._update_available = True
+        app._update_release_notes = "Feature A\nFeature B"
+        app._update_release_page_url = "https://example.com/release"
+        app._show_update_overlay = mock.Mock()
+        app._show_info_overlay = mock.Mock()
+        app._hide_update_overlay = mock.Mock()
+        app._show_error_overlay = mock.Mock()
+        app._show_warning_overlay = mock.Mock()
+        app._launch_new_installation = mock.Mock(return_value=True)
+        app._schedule_update_cleanup = mock.Mock()
+        app.after = mock.Mock()
+        app._shutdown_after_update = mock.Mock()
+        app.log = mock.Mock()
+
+        app._handle_update_download_success(Path("/download/update.zip"), mode="auto-install")
+
+        self.assertGreaterEqual(len(app._show_update_overlay.call_args_list), 2)
+        final_call = app._show_update_overlay.call_args_list[-1]
+        self.assertEqual(final_call.kwargs.get("status_icon"), "✅")
+        self.assertEqual(final_call.kwargs.get("changelog"), app._format_update_changelog())
+        app._show_info_overlay.assert_not_called()
 
