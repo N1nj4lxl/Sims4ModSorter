@@ -4460,7 +4460,10 @@ class Sims4ModSorterApp(tk.Tk):
         self._update_overlay_message.set(message)
 
         if self._update_overlay_progress_frame:
-            if progress or (progress_subtext and progress_subtext.strip()) or (changelog and changelog.strip()):
+            progress_detail_text = (progress_subtext or "").strip()
+            changelog_text = (changelog or "").strip()
+            show_progress_section = progress or bool(progress_detail_text) or bool(changelog_text)
+            if show_progress_section:
                 self._update_overlay_progress_frame.grid()
             else:
                 self._update_overlay_progress_frame.grid_remove()
