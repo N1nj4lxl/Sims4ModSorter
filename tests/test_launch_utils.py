@@ -302,6 +302,41 @@ class _DummyButton:
         return True
 
 
+class _DummyStringVar:
+    def __init__(self) -> None:
+        self.value = None
+
+    def set(self, value) -> None:
+        self.value = value
+
+
+class _DummyProgressFrame:
+    def __init__(self) -> None:
+        self.grid_called = False
+        self.grid_remove_called = False
+
+    def grid(self, *args, **kwargs) -> None:
+        self.grid_called = True
+
+    def grid_remove(self) -> None:
+        self.grid_remove_called = True
+
+
+class _DummyOverlay:
+    def place(self, *args, **kwargs) -> None:
+        return None
+
+    def tkraise(self) -> None:
+        return None
+
+    def grab_set(self) -> None:
+        return None
+
+
+class _DummyContainer:
+    def winfo_exists(self) -> bool:
+        return False
+
 class UpdateOverlayWorkflowTests(TestCase):
     def _make_app(self) -> Sims4ModSorterApp:
         app = Sims4ModSorterApp.__new__(Sims4ModSorterApp)
@@ -434,4 +469,46 @@ class UpdateOverlayWorkflowTests(TestCase):
         self.assertEqual(final_call.kwargs.get("status_icon"), "✅")
         self.assertEqual(final_call.kwargs.get("changelog"), app._format_update_changelog())
         app._show_info_overlay.assert_not_called()
+
+    def test_update_overlay_displays_changelog_without_progress(self) -> None:
+        app = Sims4ModSorterApp.__new__(Sims4ModSorterApp)
+        app._ensure_update_overlay = mock.Mock(return_value=_DummyOverlay())
+        app._update_overlay_origin = "general"
+        app._update_overlay_headline = _DummyStringVar()
+        app._update_overlay_status_icon = _DummyStringVar()
+        app._update_overlay_message = _DummyStringVar()
+        app._update_overlay_progress_frame = _DummyProgressFrame()
+        app._update_overlay_progress_title = _DummyStringVar()
+        app._update_overlay_progress_detail = _DummyStringVar()
+        app._update_overlay_progress_title_label = None
+        app._update_overlay_progress_detail_label = None
+        app._update_overlay_progress = None
+        app._update_overlay_download_btn = None
+        app._update_overlay_manual_btn = None
+        app._update_overlay_details_btn = None
+        app._update_overlay_skip_btn = None
+        app._update_mode_simple_radio = None
+        app._update_mode_advanced_radio = None
+        app._update_overlay_set_changelog = mock.Mock()
+        app._update_overlay_container = _DummyContainer()
+        app.focus_set = mock.Mock()
+        app._center_update_overlay = mock.Mock()
+        app._update_overlay_visible = False
+        app._update_download_url = None
+        app._update_release_page_url = None
+
+        app._show_update_overlay(
+            "Update available",
+            progress=False,
+            enable_download=False,
+            enable_skip=True,
+            enable_details=False,
+            enable_manual=False,
+            progress_subtext=None,
+            changelog="Patch notes",
+        )
+
+        self.assertTrue(app._update_overlay_progress_frame.grid_called)
+        self.assertFalse(app._update_overlay_progress_frame.grid_remove_called)
+        app._update_overlay_set_changelog.assert_called_once_with("Patch notes")
 
