@@ -228,6 +228,9 @@ class CommandCenter:
         ).grid(row=3, column=0, sticky="w", pady=(16, 0))
         row += 1
 
+        self._build_automation_section(container, row)
+        row += 1
+
         self._build_recent_section(container, row)
         row += 1
 
@@ -335,6 +338,47 @@ class CommandCenter:
                 command=lambda value=name: self._apply_loadout(value),
                 style=style_name,
             ).grid(row=start_row + index, column=0, sticky="ew", pady=(0, 6))
+        ttk.Button(
+            frame,
+            text="Open gallery",
+            command=self._open_gallery,
+            style="CommandCenter.Secondary.TButton",
+        ).grid(row=start_row + len(names), column=0, sticky="w", pady=(10, 0))
+
+    def _build_automation_section(self, container: ttk.Frame, row: int) -> None:
+        frame = ttk.LabelFrame(
+            container,
+            text="Automation deck",
+            padding=(16, 14, 16, 16),
+            style="CommandCenter.Section.TLabelframe",
+        )
+        frame.grid(row=row, column=0, sticky="ew", pady=(18, 0))
+        frame.columnconfigure(0, weight=1)
+        macros = getattr(self.app, "automation_macros", [])
+        if not macros:
+            ttk.Label(
+                frame,
+                text="No macros defined yet. Publish one from the in-app gallery.",
+                style="CommandCenter.Muted.TLabel",
+                wraplength=440,
+            ).grid(row=0, column=0, sticky="w")
+            return
+        for index, macro in enumerate(macros):
+            macro_id = str(macro.get("id") or index)
+            title = str(macro.get("name") or f"Macro {index + 1}")
+            description = str(macro.get("description") or "")
+            ttk.Button(
+                frame,
+                text=title,
+                style="CommandCenter.List.TButton",
+                command=lambda ident=macro_id: self._run_macro(ident),
+            ).grid(row=index * 2, column=0, sticky="ew", pady=(0, 4))
+            ttk.Label(
+                frame,
+                text=description or "No description provided.",
+                style="CommandCenter.Muted.TLabel",
+                wraplength=440,
+            ).grid(row=index * 2 + 1, column=0, sticky="w", pady=(0, 10))
 
     # ------------------------------------------------------------------
     # Action callbacks
@@ -375,6 +419,18 @@ class CommandCenter:
         command = getattr(self.app, "on_apply_loadout", None)
         if callable(command):
             self.app.after(0, command)
+
+    def _open_gallery(self) -> None:
+        self.hide()
+        command = getattr(self.app, "show_loadout_gallery", None)
+        if callable(command):
+            self.app.after(0, command)
+
+    def _run_macro(self, macro_id: str) -> None:
+        self.hide()
+        command = getattr(self.app, "run_automation_macro", None)
+        if callable(command):
+            self.app.after(0, lambda: command(macro_id))
 
     # ------------------------------------------------------------------
     # Data helpers
