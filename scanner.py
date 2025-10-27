@@ -779,8 +779,6 @@ def _is_soft_routed_entry(path: Path) -> bool:
 def _build_pair_map(entries: Sequence[PipelineEntry]) -> Dict[str, Dict[str, List[PipelineEntry]]]:
     pair_map: Dict[str, Dict[str, List[PipelineEntry]]] = {}
     for entry in entries:
-        if entry.disabled:
-            continue
         if entry.ext not in SCRIPT_EXTS and entry.ext not in PACKAGE_EXTS:
             continue
         key = entry.normalized_key
@@ -798,8 +796,6 @@ def _apply_name_classification(entries: Sequence[PipelineEntry]) -> None:
 
 
 def _classify_entry_by_name(entry: PipelineEntry) -> ClassificationDecision:
-    if entry.disabled:
-        return ClassificationDecision("Disabled", 1.0, "disabled:ext")
     if entry.soft_routed:
         return ClassificationDecision("Resources", 0.6, "resource")
     if entry.ext in SCRIPT_EXTS:
@@ -1168,11 +1164,7 @@ def scan_folder(
         fingerprint = _fingerprint_file(path)
         if fingerprint:
             item.extras[FINGERPRINT_EXTRA_KEY] = fingerprint
-        if item.disabled:
-            item.include = False
-            disabled_items.append(item)
-        else:
-            items.append(item)
+        items.append(item)
         if progress_cb:
             progress_cb(index + 1, total, path, "scanned")
 

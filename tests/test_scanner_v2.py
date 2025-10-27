@@ -73,10 +73,10 @@ def test_pose_detection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
 def test_disabled_suffix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = _make_dummy(tmp_path / "SomeMod.package.off")
     item = _classify(path, monkeypatch, manifest={})
-    assert item.guess_type == "Disabled"
-    assert item.include is False
-    assert item.tooltips.get("reason") == "disabled:ext"
-    assert item.target_folder == scanner.DEFAULT_FOLDER_MAP["Disabled"].rstrip("/") + "/"
+    assert item.guess_type != "Disabled"
+    assert item.include is True
+    assert item.disabled is False
+    assert item.target_folder != scanner.DEFAULT_FOLDER_MAP["Disabled"].rstrip("/") + "/"
 
 
 def test_header_nondeterministic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
