@@ -1578,14 +1578,21 @@ class Sims4ModSorterApp(tk.Tk):
                         name = str(entry.get("name") or "").strip()
                         if not plugin_id or not name:
                             continue
+                        folder_name = str(entry.get("folder") or plugin_id).strip()
+                        bundle_name = str(
+                            entry.get("bundle")
+                            or entry.get("package")
+                            or folder_name
+                            or plugin_id
+                        ).strip()
                         entries.append(
                             {
                                 "id": plugin_id,
                                 "name": name,
                                 "description": str(entry.get("description") or "").strip(),
                                 "version": str(entry.get("version") or "").strip(),
-                                "folder": str(entry.get("folder") or plugin_id),
-                                "bundle": str(entry.get("bundle") or entry.get("package") or plugin_id),
+                                "folder": folder_name,
+                                "bundle": bundle_name,
                                 "author": str(entry.get("author") or "Unknown"),
                                 "tags": [str(tag).strip() for tag in entry.get("tags", []) if str(tag).strip()],
                                 "rating": float(entry.get("rating")) if isinstance(entry.get("rating"), (int, float)) else 0.0,
