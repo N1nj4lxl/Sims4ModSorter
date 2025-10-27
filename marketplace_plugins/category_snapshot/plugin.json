@@ -1,0 +1,6 @@
+{
+  "name": "Category Snapshot",
+  "entry": "plugin.py",
+  "version": "1.0.0",
+  "description": "Summarises category distribution after each scan so you can see what dominates."
+}

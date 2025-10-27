@@ -1,6 +1,6 @@
 {
   "name": "Duplicate Spotlight",
   "entry": "plugin.py",
-  "version": "1.1.0",
-  "description": "Reports how many duplicate mods were detected after each scan so you can act fast."
+  "version": "1.2.0",
+  "description": "Provides rich summaries of duplicate groups after each scan so you can prioritise clean-up."
 }

@@ -1,0 +1,6 @@
+{
+  "name": "Review Buddy",
+  "entry": "plugin.py",
+  "version": "1.0.0",
+  "description": "Lists mods that still need manual review so nothing slips through the cracks."
+}
