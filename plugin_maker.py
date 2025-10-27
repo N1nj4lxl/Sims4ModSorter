@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
 from textwrap import dedent
 
@@ -70,9 +71,20 @@ def register(api) -> None:
     return plugin_dir
 
 
+def _prompt(message: str, *, default: str | None = None) -> str:
+    try:
+        response = input(message)
+    except (EOFError, KeyboardInterrupt):
+        raise SystemExit(1)
+    response = response.strip()
+    if not response and default is not None:
+        return default
+    return response
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("name", help="Display name for the plugin")
+    parser.add_argument("name", nargs="?", help="Display name for the plugin")
     parser.add_argument("--folder", help="Folder name for the plugin (defaults to a sanitised name)")
     parser.add_argument("--description", help="Plugin description for the manifest")
     parser.add_argument("--version", help="Initial plugin version", default="0.1.0")
@@ -86,11 +98,52 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_arguments(namespace: argparse.Namespace, parser: argparse.ArgumentParser) -> dict[str, object]:
+    values = vars(namespace).copy()
+    name = values.get("name")
+    if name:
+        return values
+
+    if not sys.stdin.isatty():
+        parser.error("Plugin name is required")
+
+    print("Sims4 Mod Sorter Plugin Maker")
+    print("==============================")
+
+    name = _prompt("Plugin name: ")
+    if not name:
+        parser.error("Plugin name is required")
+    values["name"] = name
+
+    folder_default = _sanitize(name)
+    folder_prompt = f"Plugin folder [{folder_default}]: "
+    values["folder"] = _prompt(folder_prompt, default=folder_default)
+
+    description_default = values.get("description") or "Custom Sims4 Mod Sorter plugin."
+    values["description"] = _prompt(
+        f"Description [{description_default}]: ", default=description_default
+    )
+
+    version_default = values.get("version") or "0.1.0"
+    values["version"] = _prompt(f"Version [{version_default}]: ", default=version_default)
+
+    author_default = values.get("author") or "Unknown Author"
+    values["author"] = _prompt(f"Author [{author_default}]: ", default=author_default)
+
+    output_default = values.get("output_dir") or str(DEFAULT_OUTPUT_DIR)
+    values["output_dir"] = _prompt(
+        f"Output directory [{output_default}]: ", default=output_default
+    )
+
+    return values
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    resolved_args = _resolve_arguments(args, parser)
     try:
-        plugin_dir = create_plugin(**vars(args))
+        plugin_dir = create_plugin(**resolved_args)
     except FileExistsError as error:
         parser.error(str(error))
         return 2

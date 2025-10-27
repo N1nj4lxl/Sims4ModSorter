@@ -3,6 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import io
+
+import pytest
+
+import plugin_maker
 from plugin_maker import DEFAULT_OUTPUT_DIR, _sanitize, create_plugin
 
 
@@ -38,3 +43,53 @@ def test_create_plugin_scaffolds_files(tmp_path: Path) -> None:
 
 def test_default_output_dir_points_to_user_plugins() -> None:
     assert DEFAULT_OUTPUT_DIR.name == "user_plugins"
+
+
+def test_resolve_arguments_requires_name_without_tty(monkeypatch) -> None:
+    parser = plugin_maker._build_parser()
+    namespace = parser.parse_args([])
+
+    dummy_stdin = io.StringIO()
+    monkeypatch.setattr(dummy_stdin, "isatty", lambda: False)
+    monkeypatch.setattr(plugin_maker.sys, "stdin", dummy_stdin)
+
+    with pytest.raises(SystemExit):
+        plugin_maker._resolve_arguments(namespace, parser)
+
+
+def test_resolve_arguments_prompts_for_missing_fields(monkeypatch) -> None:
+    parser = plugin_maker._build_parser()
+    namespace = parser.parse_args([])
+
+    class DummyStdin:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    monkeypatch.setattr(plugin_maker.sys, "stdin", DummyStdin())
+
+    defaults = {
+        "Plugin name: ": "Ocean Breeze",
+        "Plugin folder [Ocean-Breeze]: ": "__default__",
+        "Description [Custom Sims4 Mod Sorter plugin.]: ": "Adds sea sounds",
+        "Version [0.1.0]: ": "1.2.3",
+        "Author [Unknown Author]: ": "Luna",
+        f"Output directory [{DEFAULT_OUTPUT_DIR}]: ": "__default__",
+    }
+
+    def fake_prompt(message: str, *, default: str | None = None) -> str:
+        value = defaults.get(message, "")
+        if value == "__default__":
+            return default or ""
+        return value
+
+    monkeypatch.setattr(plugin_maker, "_prompt", fake_prompt)
+
+    resolved = plugin_maker._resolve_arguments(namespace, parser)
+
+    assert resolved["name"] == "Ocean Breeze"
+    assert resolved["folder"] == "Ocean-Breeze"
+    assert resolved["description"] == "Adds sea sounds"
+    assert resolved["version"] == "1.2.3"
+    assert resolved["author"] == "Luna"
+    assert resolved["output_dir"] == str(DEFAULT_OUTPUT_DIR)
