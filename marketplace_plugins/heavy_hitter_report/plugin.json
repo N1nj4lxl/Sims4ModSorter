@@ -1,0 +1,6 @@
+{
+  "name": "Heavy Hitter Report",
+  "entry": "plugin.py",
+  "version": "1.0.0",
+  "description": "Flags especially large mods so you can review storage-hungry downloads."
+}

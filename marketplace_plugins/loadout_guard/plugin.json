@@ -1,6 +1,6 @@
 {
   "name": "Loadout Guard",
   "entry": "plugin.py",
-  "version": "1.0.1",
-  "description": "Warns when more files are excluded than included so loadouts stay balanced."
+  "version": "1.1.0",
+  "description": "Warns about unbalanced or disabled files and highlights loadout activity ratios."
 }
