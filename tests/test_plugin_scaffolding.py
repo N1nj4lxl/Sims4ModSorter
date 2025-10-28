@@ -7,13 +7,13 @@ import io
 
 import pytest
 
-import plugin_maker
-from plugin_maker import DEFAULT_OUTPUT_DIR, _sanitize, create_plugin
+import plugin_manager
+from plugin_manager import DEFAULT_OUTPUT_DIR, create_plugin, sanitize_name
 
 
 def test_sanitize_generates_safe_names() -> None:
-    assert _sanitize("My Plugin!!") == "My-Plugin"
-    assert _sanitize("   ###   ") == "plugin"
+    assert sanitize_name("My Plugin!!") == "My-Plugin"
+    assert sanitize_name("   ###   ") == "plugin"
 
 
 def test_create_plugin_scaffolds_files(tmp_path: Path) -> None:
@@ -46,27 +46,27 @@ def test_default_output_dir_points_to_user_plugins() -> None:
 
 
 def test_resolve_arguments_requires_name_without_tty(monkeypatch) -> None:
-    parser = plugin_maker._build_parser()
-    namespace = parser.parse_args([])
+    parser = plugin_manager._build_parser()
+    namespace = parser.parse_args(["--scaffold"])
 
     dummy_stdin = io.StringIO()
     monkeypatch.setattr(dummy_stdin, "isatty", lambda: False)
-    monkeypatch.setattr(plugin_maker.sys, "stdin", dummy_stdin)
+    monkeypatch.setattr(plugin_manager.sys, "stdin", dummy_stdin)
 
     with pytest.raises(SystemExit):
-        plugin_maker._resolve_arguments(namespace, parser)
+        plugin_manager._resolve_arguments(namespace, parser)
 
 
 def test_resolve_arguments_prompts_for_missing_fields(monkeypatch) -> None:
-    parser = plugin_maker._build_parser()
-    namespace = parser.parse_args([])
+    parser = plugin_manager._build_parser()
+    namespace = parser.parse_args(["--scaffold"])
 
     class DummyStdin:
         @staticmethod
         def isatty() -> bool:
             return True
 
-    monkeypatch.setattr(plugin_maker.sys, "stdin", DummyStdin())
+    monkeypatch.setattr(plugin_manager.sys, "stdin", DummyStdin())
 
     defaults = {
         "Plugin name: ": "Ocean Breeze",
@@ -83,9 +83,9 @@ def test_resolve_arguments_prompts_for_missing_fields(monkeypatch) -> None:
             return default or ""
         return value
 
-    monkeypatch.setattr(plugin_maker, "_prompt", fake_prompt)
+    monkeypatch.setattr(plugin_manager, "_prompt", fake_prompt)
 
-    resolved = plugin_maker._resolve_arguments(namespace, parser)
+    resolved = plugin_manager._resolve_arguments(namespace, parser)
 
     assert resolved["name"] == "Ocean Breeze"
     assert resolved["folder"] == "Ocean-Breeze"
