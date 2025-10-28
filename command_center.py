@@ -14,9 +14,10 @@ _DEFAULT_PALETTE = {
     "sel": "#2A2F3A",
 }
 
-_CONTENT_MIN_WIDTH = 760
+_SIDEBAR_WIDTH = 520
+_CONTENT_MIN_WIDTH = _SIDEBAR_WIDTH
 _CONTENT_MIN_HEIGHT = 520
-_CONTENT_WRAP_LENGTH = 620
+_CONTENT_WRAP_LENGTH = _SIDEBAR_WIDTH - 80
 
 
 def _parse_hex_color(value: str) -> tuple[int, int, int] | None:
@@ -148,18 +149,18 @@ class CommandCenter:
             bd=0,
         )
         overlay.place_forget()
-        overlay.grid_rowconfigure(0, weight=1)
-        overlay.grid_columnconfigure(0, weight=1)
         overlay.bind("<Escape>", lambda _e: self.hide())
-        overlay.bind("<Button-1>", lambda _event: overlay.focus_set())
+        overlay.bind("<Button-1>", lambda event: self.hide() if event.widget is overlay else overlay.focus_set())
 
         shell = ttk.Frame(
             overlay,
             padding=0,
             style="CommandCenter.OverlayShell.TFrame",
         )
-        shell.grid(row=0, column=0, padx=48, pady=48, sticky="nsew")
-        shell.columnconfigure(0, weight=1, minsize=_CONTENT_MIN_WIDTH)
+        shell.place(relx=1.0, rely=0.0, anchor="ne", relheight=1.0)
+        shell.configure(width=_SIDEBAR_WIDTH)
+        shell.grid_propagate(False)
+        shell.columnconfigure(0, weight=1)
         shell.columnconfigure(1, weight=0)
         shell.rowconfigure(0, weight=1, minsize=_CONTENT_MIN_HEIGHT)
         shell.bind("<Escape>", lambda _e: self.hide())

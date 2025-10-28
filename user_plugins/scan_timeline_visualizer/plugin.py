@@ -36,7 +36,6 @@ class _SessionEntry:
 class ScanTimelineVisualizerPlugin:
     def __init__(self, api) -> None:
         self.api = api
-        self.window: Optional[tk.Toplevel] = None
         self.tree: Optional[ttk.Treeview] = None
         self.log_text: Optional[tk.Text] = None
         self.summary_var = tk.StringVar(value="No scans yet.")
@@ -49,6 +48,7 @@ class ScanTimelineVisualizerPlugin:
         getter = getattr(self.api, "is_feature_enabled", None)
         self._live_updates = bool(getter("live_updates", default=True)) if callable(getter) else True
         self._selected_key: Optional[Tuple[str, int]] = None
+        self._overlay_app: Optional[tk.Tk] = None
 
     # ------------------------------------------------------------------
     def register(self) -> None:
@@ -68,128 +68,138 @@ class ScanTimelineVisualizerPlugin:
 
     # ------------------------------------------------------------------
     def _open_window(self, app: tk.Tk) -> None:
-        window = self._ensure_window(app)
-        if not window:
-            return
-        window.deiconify()
-        window.lift()
+        def builder(container: ttk.Frame, footer: ttk.Frame) -> None:
+            self._overlay_app = app
+
+            style = ttk.Style(app)
+            try:
+                style.theme_use("clam")
+            except Exception:
+                pass
+            style.configure("Scan.TFrame", background=_BACKGROUND)
+            style.configure("Scan.TLabel", background=_BACKGROUND, foreground=_FOREGROUND)
+            style.configure(
+                "Scan.Treeview",
+                background=_BACKGROUND,
+                foreground=_FOREGROUND,
+                fieldbackground=_BACKGROUND,
+                rowheight=24,
+                bordercolor=_BACKGROUND,
+                borderwidth=0,
+            )
+            style.configure("Scan.Treeview.Heading", background=_BACKGROUND, foreground=_HEADER_FG)
+            style.map("Scan.Treeview", background=[("selected", "#2f2f2f")])
+            style.configure("Scan.TButton", background="#2a2a2a", foreground=_FOREGROUND, padding=6)
+            style.map("Scan.TButton", background=[("active", "#3a3a3a")])
+            style.configure("Scan.TCombobox", fieldbackground=_BACKGROUND, foreground=_FOREGROUND)
+
+            container.columnconfigure(0, weight=1)
+            container.rowconfigure(4, weight=1)
+
+            header = ttk.Frame(container, style="Scan.TFrame")
+            header.grid(row=0, column=0, sticky="ew")
+            ttk.Label(
+                header,
+                text="Scan Insights",
+                style="Scan.TLabel",
+                font=("TkDefaultFont", 14, "bold"),
+            ).pack(side="left")
+
+            controls = ttk.Frame(container, style="Scan.TFrame")
+            controls.grid(row=1, column=0, sticky="ew", pady=(12, 8))
+            ttk.Label(controls, text="Session", style="Scan.TLabel").pack(side="left")
+            self.session_cb = ttk.Combobox(
+                controls,
+                textvariable=self.session_var,
+                state="readonly",
+                width=28,
+            )
+            self.session_cb.pack(side="left", padx=(8, 12))
+            self.session_cb.bind("<<ComboboxSelected>>", lambda _e: self._on_session_changed())
+            ttk.Button(
+                controls,
+                text="Export JSON",
+                style="Scan.TButton",
+                command=lambda: self._export_current("json"),
+            ).pack(side="right")
+            ttk.Button(
+                controls,
+                text="Export CSV",
+                style="Scan.TButton",
+                command=lambda: self._export_current("csv"),
+            ).pack(side="right", padx=(0, 8))
+
+            table_frame = ttk.Frame(container, style="Scan.TFrame")
+            table_frame.grid(row=2, column=0, sticky="ew")
+            columns = ("plugin", "time", "files", "warnings", "status")
+            self.tree = ttk.Treeview(
+                table_frame,
+                columns=columns,
+                show="headings",
+                style="Scan.Treeview",
+                height=6,
+            )
+            headings = {
+                "plugin": "Plugin",
+                "time": "Time (s)",
+                "files": "Files",
+                "warnings": "Warnings",
+                "status": "Status",
+            }
+            anchors = {"plugin": "w", "time": "e", "files": "center", "warnings": "center", "status": "w"}
+            widths = {"plugin": 220, "time": 90, "files": 80, "warnings": 90, "status": 160}
+            for column in columns:
+                self.tree.heading(column, text=headings[column])
+                self.tree.column(column, anchor=anchors[column], width=widths[column])
+            self.tree.tag_configure("odd", background=_BACKGROUND)
+            self.tree.tag_configure("even", background=_TABLE_ALT)
+            self.tree.pack(fill="x")
+
+            summary = ttk.Label(container, textvariable=self.summary_var, style="Scan.TLabel")
+            summary.grid(row=3, column=0, sticky="w", pady=(8, 4))
+
+            log_frame = ttk.Frame(container, style="Scan.TFrame")
+            log_frame.grid(row=4, column=0, sticky="nsew")
+            log_frame.columnconfigure(0, weight=1)
+            log_frame.rowconfigure(1, weight=1)
+            ttk.Label(log_frame, text="Timeline", style="Scan.TLabel").grid(row=0, column=0, sticky="w")
+            self.log_text = tk.Text(
+                log_frame,
+                height=12,
+                bg=_BACKGROUND,
+                fg=_FOREGROUND,
+                insertbackground=_FOREGROUND,
+                state="disabled",
+                wrap="word",
+                relief="flat",
+            )
+            self.log_text.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+
+            ttk.Button(
+                footer,
+                text="Close",
+                command=lambda: self._hide_overlay(app),
+            ).pack(side="right")
+
+        def on_hide() -> None:
+            self._overlay_app = None
+            self.tree = None
+            self.log_text = None
+            self.session_cb = None
+
+        app._show_overlay_panel(
+            "scan_timeline_visualizer",
+            "Scan Insights",
+            builder,
+            width=920,
+            on_hide=on_hide,
+        )
         self._refresh_sessions()
 
-    def _ensure_window(self, app: tk.Tk) -> Optional[tk.Toplevel]:
-        if self.window and self.window.winfo_exists():
-            return self.window
-        window = tk.Toplevel(app)
-        window.title("Scan Insights")
-        window.geometry("820x540")
-        window.configure(bg=_BACKGROUND)
-        window.resizable(False, False)
-        window.transient(app)
-        window.protocol("WM_DELETE_WINDOW", window.withdraw)
-        self.window = window
-
-        style = ttk.Style(window)
-        try:
-            style.theme_use("clam")
-        except Exception:
-            pass
-        style.configure("Scan.TFrame", background=_BACKGROUND)
-        style.configure("Scan.TLabel", background=_BACKGROUND, foreground=_FOREGROUND)
-        style.configure(
-            "Scan.Treeview",
-            background=_BACKGROUND,
-            foreground=_FOREGROUND,
-            fieldbackground=_BACKGROUND,
-            rowheight=24,
-            bordercolor=_BACKGROUND,
-            borderwidth=0,
-        )
-        style.configure("Scan.Treeview.Heading", background=_BACKGROUND, foreground=_HEADER_FG)
-        style.map("Scan.Treeview", background=[("selected", "#2f2f2f")])
-        style.configure("Scan.TButton", background="#2a2a2a", foreground=_FOREGROUND, padding=6)
-        style.map("Scan.TButton", background=[("active", "#3a3a3a")])
-        style.configure("Scan.TCombobox", fieldbackground=_BACKGROUND, foreground=_FOREGROUND)
-
-        container = ttk.Frame(window, style="Scan.TFrame", padding=16)
-        container.pack(fill="both", expand=True)
-
-        header = ttk.Frame(container, style="Scan.TFrame")
-        header.pack(fill="x")
-        ttk.Label(
-            header,
-            text="Scan Insights",
-            style="Scan.TLabel",
-            font=("TkDefaultFont", 14, "bold"),
-        ).pack(side="left")
-
-        controls = ttk.Frame(container, style="Scan.TFrame")
-        controls.pack(fill="x", pady=(12, 8))
-        ttk.Label(controls, text="Session", style="Scan.TLabel").pack(side="left")
-        self.session_cb = ttk.Combobox(
-            controls,
-            textvariable=self.session_var,
-            state="readonly",
-            width=28,
-        )
-        self.session_cb.pack(side="left", padx=(8, 12))
-        self.session_cb.bind("<<ComboboxSelected>>", lambda _e: self._on_session_changed())
-        ttk.Button(
-            controls,
-            text="Export JSON",
-            style="Scan.TButton",
-            command=lambda: self._export_current("json"),
-        ).pack(side="right")
-        ttk.Button(
-            controls,
-            text="Export CSV",
-            style="Scan.TButton",
-            command=lambda: self._export_current("csv"),
-        ).pack(side="right", padx=(0, 8))
-
-        table_frame = ttk.Frame(container, style="Scan.TFrame")
-        table_frame.pack(fill="x")
-        columns = ("plugin", "time", "files", "warnings", "status")
-        self.tree = ttk.Treeview(
-            table_frame,
-            columns=columns,
-            show="headings",
-            style="Scan.Treeview",
-            height=6,
-        )
-        headings = {
-            "plugin": "Plugin",
-            "time": "Time (s)",
-            "files": "Files",
-            "warnings": "Warnings",
-            "status": "Status",
-        }
-        anchors = {"plugin": "w", "time": "e", "files": "center", "warnings": "center", "status": "w"}
-        widths = {"plugin": 220, "time": 90, "files": 80, "warnings": 90, "status": 160}
-        for column in columns:
-            self.tree.heading(column, text=headings[column])
-            self.tree.column(column, anchor=anchors[column], width=widths[column])
-        self.tree.tag_configure("odd", background=_BACKGROUND)
-        self.tree.tag_configure("even", background=_TABLE_ALT)
-        self.tree.pack(fill="x")
-
-        summary = ttk.Label(container, textvariable=self.summary_var, style="Scan.TLabel")
-        summary.pack(anchor="w", pady=(8, 4))
-
-        log_frame = ttk.Frame(container, style="Scan.TFrame")
-        log_frame.pack(fill="both", expand=True)
-        ttk.Label(log_frame, text="Timeline", style="Scan.TLabel").pack(anchor="w")
-        self.log_text = tk.Text(
-            log_frame,
-            height=12,
-            bg=_BACKGROUND,
-            fg=_FOREGROUND,
-            insertbackground=_FOREGROUND,
-            state="disabled",
-            wrap="word",
-            relief="flat",
-        )
-        self.log_text.pack(fill="both", expand=True, pady=(6, 0))
-
-        return window
+    def _hide_overlay(self, app: tk.Tk) -> None:
+        hide = getattr(app, "_hide_overlay_panel", None)
+        if callable(hide):
+            hide("scan_timeline_visualizer")
 
     # ------------------------------------------------------------------
     def _on_metrics_event(self, payload: Dict[str, object]) -> None:
@@ -354,12 +364,13 @@ class ScanTimelineVisualizerPlugin:
 
     # ------------------------------------------------------------------
     def _export_current(self, fmt: str) -> None:
+        parent = self._overlay_app
         if not self._selected_key:
-            messagebox.showinfo("Scan Insights", "No session selected.", parent=self.window)
+            messagebox.showinfo("Scan Insights", "No session selected.", parent=parent)
             return
         snapshot = self._session_lookup.get(self._selected_key)
         if not snapshot:
-            messagebox.showinfo("Scan Insights", "No session data available.", parent=self.window)
+            messagebox.showinfo("Scan Insights", "No session data available.", parent=parent)
             return
         if fmt == "json":
             path = filedialog.asksaveasfilename(
@@ -372,7 +383,7 @@ class ScanTimelineVisualizerPlugin:
             try:
                 Path(path).write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
             except Exception as exc:
-                messagebox.showerror("Export Failed", str(exc), parent=self.window)
+                messagebox.showerror("Export Failed", str(exc), parent=parent)
                 return
         elif fmt == "csv":
             path = filedialog.asksaveasfilename(
@@ -397,11 +408,11 @@ class ScanTimelineVisualizerPlugin:
                             ]
                         )
             except Exception as exc:
-                messagebox.showerror("Export Failed", str(exc), parent=self.window)
+                messagebox.showerror("Export Failed", str(exc), parent=parent)
                 return
         else:
             return
-        messagebox.showinfo("Scan Insights", f"Exported session to {path}", parent=self.window)
+        messagebox.showinfo("Scan Insights", f"Exported session to {path}", parent=parent)
 
 
 PLUGIN: Optional[ScanTimelineVisualizerPlugin] = None

@@ -966,6 +966,7 @@ class Sims4ModSorterApp(tk.Tk):
         self._tooltip_target: Tuple[str, str] = ("", "")
         self._toolbar_widgets: Dict[str, tk.Widget] = {}
         self._mod_status_overlay: Optional[tk.Frame] = None
+        self._mod_status_shell: Optional[ttk.Frame] = None
         self._mod_status_container: Optional[ttk.Frame] = None
         self._status_trees: Dict[str, ttk.Treeview] = {}
         self._status_summary_var = tk.StringVar(value="")
@@ -999,6 +1000,7 @@ class Sims4ModSorterApp(tk.Tk):
         self._update_overlay_body_label: Optional[ttk.Label] = None
         self._update_overlay_headline_font: Optional[tkfont.Font] = None
         self._update_overlay_icon_font: Optional[tkfont.Font] = None
+        self._update_overlay_shell: Optional[ttk.Frame] = None
         self._update_changelog_body_font: Optional[tkfont.Font] = None
         self._update_changelog_bold_font: Optional[tkfont.Font] = None
         self._update_changelog_italic_font: Optional[tkfont.Font] = None
@@ -1018,8 +1020,8 @@ class Sims4ModSorterApp(tk.Tk):
         self._update_mode_description_label: Optional[ttk.Label] = None
         self._auto_size_pending = False
 
-        self._dialog_overlay: Optional[tk.Toplevel] = None
-        self._dialog_overlay_scrim: Optional[tk.Frame] = None
+        self._dialog_overlay: Optional[tk.Frame] = None
+        self._dialog_overlay_shell: Optional[ttk.Frame] = None
         self._dialog_overlay_container: Optional[ttk.Frame] = None
         self._dialog_overlay_button_frame: Optional[ttk.Frame] = None
         self._dialog_overlay_icon_label: Optional[ttk.Label] = None
@@ -3034,6 +3036,7 @@ class Sims4ModSorterApp(tk.Tk):
             borderwidth=1,
             relief="solid",
         )
+        style.configure("PluginStatus.OverlayShell.TFrame", background=palette["sel"])
         style.configure("PluginStatus.Header.TFrame", background=palette["alt"])
         style.configure(
             "PluginStatus.Title.TLabel",
@@ -3944,26 +3947,60 @@ class Sims4ModSorterApp(tk.Tk):
             else:
                 self._version_display_var.set(f"App Version: {APP_VERSION}")
 
+    def _create_sidebar_shell(
+        self,
+        *,
+        width: int,
+        close_callback: Optional[Callable[[], None]] = None,
+        style: str = "SidebarOverlay.Shell.TFrame",
+    ) -> tuple[tk.Frame, ttk.Frame]:
+        palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
+        scrim = tk.Frame(
+            self,
+            bg=_scrim_color(palette.get("bg", "#111316")),
+            highlightthickness=0,
+            bd=0,
+        )
+        scrim.place_forget()
+
+        if close_callback is not None:
+            scrim.bind("<Escape>", lambda _e: close_callback())
+
+            def _on_click(event: tk.Event) -> str:
+                if event.widget is scrim:
+                    close_callback()
+                    return "break"
+                return ""
+
+            scrim.bind("<Button-1>", _on_click)
+        else:
+            scrim.bind("<Escape>", lambda _e: scrim.focus_set())
+
+        shell = ttk.Frame(scrim, padding=0, style=style)
+        shell.place(relx=1.0, rely=0.0, anchor="ne", relheight=1.0)
+        try:
+            shell.configure(width=width)
+        except tk.TclError:
+            pass
+        shell.grid_propagate(False)
+        shell.columnconfigure(0, weight=1)
+        shell.rowconfigure(0, weight=1)
+        return scrim, shell
+
     def _ensure_update_overlay(self) -> tk.Frame:
         overlay = self._update_overlay
         if overlay and overlay.winfo_exists():
             self._refresh_update_overlay_theme()
             return overlay
 
-        palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
-        overlay = tk.Frame(
-            self,
-            bg=_scrim_color(palette.get("bg", "#111316")),
-            highlightthickness=0,
-            bd=0,
+        overlay, shell = self._create_sidebar_shell(
+            width=520,
+            close_callback=self._hide_update_overlay,
+            style="SidebarOverlay.Shell.TFrame",
         )
-        overlay.place_forget()
-        overlay.grid_rowconfigure(0, weight=1)
-        overlay.grid_columnconfigure(0, weight=1)
-        overlay.bind("<Escape>", lambda _e: self._hide_update_overlay())
 
-        container = ttk.Frame(overlay, padding=(28, 32, 28, 32), style="UpdateOverlay.TFrame")
-        container.grid(row=0, column=0, padx=48, pady=48, sticky="nsew")
+        container = ttk.Frame(shell, padding=(24, 28, 24, 32), style="UpdateOverlay.TFrame")
+        container.grid(row=0, column=0, sticky="nsew")
         container.columnconfigure(0, weight=1)
         container.rowconfigure(1, weight=1)
 
@@ -4148,6 +4185,7 @@ class Sims4ModSorterApp(tk.Tk):
             self._update_overlay_progress_frame.grid_remove()
 
         self._update_overlay = overlay
+        self._update_overlay_shell = shell
         self._update_overlay_container = container
         self._update_overlay_progress = progress
         self._update_overlay_download_btn = download_btn
@@ -4208,19 +4246,13 @@ class Sims4ModSorterApp(tk.Tk):
 
     def _center_update_overlay(self) -> None:
         overlay = getattr(self, "_update_overlay", None)
-        container = getattr(self, "_update_overlay_container", None)
-        if (
-            not overlay
-            or not overlay.winfo_exists()
-            or not container
-            or not container.winfo_exists()
-        ):
+        shell = getattr(self, "_update_overlay_shell", None)
+        if not overlay or not shell or not overlay.winfo_exists():
             return
-        self.update_idletasks()
         try:
-            overlay.update_idletasks()
-            container.update_idletasks()
-        except Exception:
+            shell.configure(width=520)
+            shell.place_configure(relx=1.0, rely=0.0, anchor="ne", relheight=1.0)
+        except tk.TclError:
             pass
 
     def _format_update_changelog(self) -> str:
@@ -4677,27 +4709,17 @@ class Sims4ModSorterApp(tk.Tk):
 
     # Dialog overlay --------------------------------------------------
 
-    def _ensure_dialog_overlay(self) -> tk.Toplevel:
+    def _ensure_dialog_overlay(self) -> tk.Frame:
         overlay = self._dialog_overlay
         if overlay and overlay.winfo_exists():
             self._refresh_dialog_overlay_theme()
             self._layout_dialog_overlay()
             return overlay
 
-        overlay = tk.Toplevel(self)
-        overlay.withdraw()
-        overlay.overrideredirect(True)
-        overlay.transient(self)
-        overlay.lift()
-        overlay.attributes("-topmost", True)
-        scrim_color = _scrim_color(self._theme_cache.get("bg", "#111316"))
-        overlay.configure(bg=scrim_color)
+        overlay, shell = self._create_sidebar_shell(width=420, style="DialogOverlayShell.TFrame")
 
-        scrim = tk.Frame(overlay, bg=scrim_color, borderwidth=0, highlightthickness=0)
-        scrim.pack(fill="both", expand=True)
-
-        container = ttk.Frame(scrim, padding=(24, 28, 24, 24), style="DialogOverlay.TFrame")
-        container.place(relx=0.5, rely=0.5, anchor="center")
+        container = ttk.Frame(shell, padding=(24, 28, 24, 24), style="DialogOverlay.TFrame")
+        container.grid(row=0, column=0, sticky="nsew")
         container.columnconfigure(1, weight=1)
 
         icon_label = ttk.Label(container, textvariable=self._dialog_overlay_icon, style="DialogOverlayIcon.TLabel")
@@ -4739,10 +4761,8 @@ class Sims4ModSorterApp(tk.Tk):
                 self._dialog_overlay_headline_font = tkfont.Font(weight="bold")
         headline_label.configure(font=self._dialog_overlay_headline_font)
 
-        overlay.bind("<Map>", lambda _e: self._layout_dialog_overlay(), add="+")
-
         self._dialog_overlay = overlay
-        self._dialog_overlay_scrim = scrim
+        self._dialog_overlay_shell = shell
         self._dialog_overlay_container = container
         self._dialog_overlay_button_frame = button_frame
         self._dialog_overlay_icon_label = icon_label
@@ -4763,11 +4783,18 @@ class Sims4ModSorterApp(tk.Tk):
             overlay.configure(bg=scrim_color)
         except tk.TclError:
             return
-        scrim = getattr(self, "_dialog_overlay_scrim", None)
-        if scrim and scrim.winfo_exists():
-            scrim.configure(bg=scrim_color)
+        shell = getattr(self, "_dialog_overlay_shell", None)
+        if shell and shell.winfo_exists():
+            try:
+                shell.configure(width=shell.winfo_width())
+            except tk.TclError:
+                pass
 
         style = ttk.Style()
+        style.configure(
+            "DialogOverlayShell.TFrame",
+            background=palette.get("sel", palette.get("alt", "#161A1E")),
+        )
         style.configure("DialogOverlay.TFrame", background=palette.get("alt", palette.get("bg", "#111316")))
         style.configure("DialogOverlayIcon.TLabel", background=palette.get("alt", "#161A1E"), foreground=palette.get("accent", "#4C8BF5"))
         style.configure("DialogOverlayHeadline.TLabel", background=palette.get("alt", "#161A1E"), foreground=palette.get("fg", "#E6E6E6"))
@@ -4782,22 +4809,13 @@ class Sims4ModSorterApp(tk.Tk):
         overlay = getattr(self, "_dialog_overlay", None)
         if not overlay or not overlay.winfo_exists():
             return
-        try:
-            self.update_idletasks()
-            overlay.update_idletasks()
-        except tk.TclError:
+        shell = getattr(self, "_dialog_overlay_shell", None)
+        if not shell or not shell.winfo_exists():
             return
-        width = max(self.winfo_width(), 1)
-        height = max(self.winfo_height(), 1)
-        x = self.winfo_rootx()
-        y = self.winfo_rooty()
         try:
-            overlay.geometry(f"{width}x{height}+{x}+{y}")
+            shell.place_configure(relx=1.0, rely=0.0, anchor="ne", relheight=1.0)
         except tk.TclError:
-            return
-        container = getattr(self, "_dialog_overlay_container", None)
-        if container and container.winfo_exists():
-            container.place_configure(relx=0.5, rely=0.5, anchor="center")
+            pass
 
     def _on_root_configure(self, _event=None) -> None:
         if self._dialog_overlay_visible:
@@ -4866,6 +4884,14 @@ class Sims4ModSorterApp(tk.Tk):
         overlay.bind("<Escape>", _handle_escape, add="+")
         overlay.bind("<Return>", _handle_return, add="+")
 
+        def _handle_click(event: tk.Event) -> str:
+            if event.widget is overlay:
+                _handle_escape()
+                return "break"
+            return ""
+
+        overlay.bind("<Button-1>", _handle_click, add="+")
+
         previous_grab_widget: Optional[tk.Widget] = None
         try:
             current_grab = self.grab_current()
@@ -4880,7 +4906,7 @@ class Sims4ModSorterApp(tk.Tk):
 
         self._refresh_dialog_overlay_theme()
         self._layout_dialog_overlay()
-        overlay.deiconify()
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
         overlay.lift()
         try:
             overlay.grab_set()
@@ -4917,10 +4943,8 @@ class Sims4ModSorterApp(tk.Tk):
                 pass
             overlay.unbind("<Escape>")
             overlay.unbind("<Return>")
-            try:
-                overlay.withdraw()
-            except tk.TclError:
-                pass
+            overlay.unbind("<Button-1>")
+            overlay.place_forget()
             if previous_grab_widget is not None and previous_grab_widget.winfo_exists():
                 try:
                     previous_grab_widget.grab_set()
@@ -4996,28 +5020,16 @@ class Sims4ModSorterApp(tk.Tk):
             title_var = entry.get("title_var")
             if isinstance(title_var, tk.StringVar):
                 title_var.set(title)
-            entry["size"] = (width, height)
+            entry["width"] = width
+            entry["height"] = height
             return entry
 
-        palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
-        overlay = tk.Frame(self, bg=_scrim_color(palette.get("bg", "#111316")))
+        overlay, shell = self._create_sidebar_shell(
+            width=width,
+            close_callback=lambda: self._hide_overlay_panel(key),
+            style="Overlay.Shell.TFrame",
+        )
         overlay.configure(takefocus=True)
-        overlay.place_forget()
-        overlay.grid_rowconfigure(0, weight=1)
-        overlay.grid_columnconfigure(0, weight=1)
-        def _on_scrim_click(event: tk.Event) -> str:
-            if event.widget is overlay:
-                self._hide_overlay_panel(key)
-            return "break"
-
-        overlay.bind("<Button-1>", _on_scrim_click)
-
-        shell = ttk.Frame(overlay, style="Overlay.Shell.TFrame", padding=0)
-        shell.place(relx=0.5, rely=0.5, anchor="center")
-        shell.grid_rowconfigure(0, weight=1)
-        shell.grid_columnconfigure(0, weight=1)
-        shell.configure(width=width, height=height)
-        shell.grid_propagate(False)
 
         container = ttk.Frame(shell, style="Overlay.Container.TFrame", padding=(24, 22, 24, 24))
         container.grid(row=0, column=0, sticky="nsew")
@@ -5056,7 +5068,9 @@ class Sims4ModSorterApp(tk.Tk):
             "body": body,
             "footer": footer,
             "visible": False,
-            "size": (width, height),
+            "width": width,
+            "height": height,
+            "on_hide": None,
         }
         self._overlay_registry[key] = record
         self._apply_overlay_theme(record)
@@ -5071,21 +5085,17 @@ class Sims4ModSorterApp(tk.Tk):
         shell = record.get("shell")
         if not scrim or not shell or not scrim.winfo_exists():
             return
-        width, height = record.get("size", (shell.winfo_width(), shell.winfo_height()))
+        width = record.get("width", shell.winfo_width())
         try:
-            shell.configure(width=width, height=height)
+            shell.configure(width=width)
+            shell.place_configure(relx=1.0, rely=0.0, anchor="ne", relheight=1.0)
         except tk.TclError:
             pass
-        scrim.update_idletasks()
         if record.get("visible"):
             try:
                 scrim.place_configure(relx=0, rely=0, relwidth=1, relheight=1)
             except tk.TclError:
                 pass
-        try:
-            shell.place_configure(relx=0.5, rely=0.5, anchor="center")
-        except tk.TclError:
-            pass
 
     def _show_overlay_panel(
         self,
@@ -5095,6 +5105,7 @@ class Sims4ModSorterApp(tk.Tk):
         *,
         width: int = 760,
         height: int = 520,
+        on_hide: Optional[Callable[[], None]] = None,
     ) -> None:
         record = self._ensure_overlay_panel(key, title, width=width, height=height)
         body = record.get("body")
@@ -5122,6 +5133,7 @@ class Sims4ModSorterApp(tk.Tk):
             except tk.TclError:
                 pass
         record["visible"] = True
+        record["on_hide"] = on_hide
         self._layout_overlay_panel(key)
 
     def _hide_overlay_panel(self, key: str) -> None:
@@ -5133,6 +5145,13 @@ class Sims4ModSorterApp(tk.Tk):
             try:
                 scrim.place_forget()
             except tk.TclError:
+                pass
+        on_hide = record.get("on_hide")
+        record["on_hide"] = None
+        if callable(on_hide):
+            try:
+                on_hide()
+            except Exception:
                 pass
         try:
             self.focus_set()
@@ -5153,9 +5172,11 @@ class Sims4ModSorterApp(tk.Tk):
         bg = palette.get("bg", "#111316")
         fg = palette.get("fg", "#E6E6E6")
         alt = palette.get("alt", "#1f2328")
+        sel = palette.get("sel", "#2A2F3A")
         muted = _scrim_color(palette.get("fg", "#E6E6E6"), strength=0.65)
         accent = palette.get("accent", "#4C8BF5")
         style = ttk.Style(self)
+        style.configure("SidebarOverlay.Shell.TFrame", background=sel)
         style.configure("Overlay.Shell.TFrame", background=bg)
         style.configure("Overlay.Container.TFrame", background=alt)
         style.configure("Overlay.Header.TFrame", background=alt)
@@ -6280,28 +6301,18 @@ for _ in range(10):
             self._refresh_mod_status_overlay_theme()
             return overlay
 
-        palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
-        overlay = tk.Frame(
-            self,
-            bg=_scrim_color(palette.get("bg", "#111316")),
-            highlightthickness=0,
-            bd=0,
-        )
-        overlay.place_forget()
-        overlay.grid_rowconfigure(0, weight=1)
-        overlay.grid_columnconfigure(0, weight=1)
-        overlay.bind("<Escape>", lambda _e: self._close_mod_status_popup())
-        overlay.bind(
-            "<Button-1>",
-            lambda event: self._close_mod_status_popup() if event.widget is overlay else None,
+        overlay, shell = self._create_sidebar_shell(
+            width=620,
+            close_callback=self._close_mod_status_popup,
+            style="PluginStatus.OverlayShell.TFrame",
         )
 
         container = ttk.Frame(
-            overlay,
+            shell,
             padding=16,
             style="PluginStatus.Overlay.TFrame",
         )
-        container.grid(row=0, column=0, padx=40, pady=40, sticky="nsew")
+        container.grid(row=0, column=0, sticky="nsew")
         container.columnconfigure(0, weight=1)
         container.rowconfigure(1, weight=1)
         container.bind("<Escape>", lambda _e: self._close_mod_status_popup())
@@ -6362,6 +6373,7 @@ for _ in range(10):
         ).grid(row=2, column=0, sticky="w", pady=(12, 0))
 
         self._mod_status_overlay = overlay
+        self._mod_status_shell = shell
         self._mod_status_container = container
         self._refresh_mod_status_overlay_theme()
         return overlay
@@ -6372,6 +6384,12 @@ for _ in range(10):
             return
         palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
         overlay.configure(bg=_scrim_color(palette.get("bg", "#111316")))
+        shell = getattr(self, "_mod_status_shell", None)
+        if shell and shell.winfo_exists():
+            try:
+                shell.configure(style="PluginStatus.OverlayShell.TFrame")
+            except tk.TclError:
+                pass
         container = getattr(self, "_mod_status_container", None)
         if container and container.winfo_exists():
             try:
