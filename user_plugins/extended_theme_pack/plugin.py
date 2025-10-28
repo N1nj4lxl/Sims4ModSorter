@@ -1,4 +1,4 @@
-"""Example plugin for Sims4ModSorter demonstrating the plugin API."""
+"""Extended theme pack plugin demonstrating the Sims4ModSorter API."""
 
 from __future__ import annotations
 
@@ -31,11 +31,39 @@ THEMES = {
         "accent": "#4ec27f",
         "sel": "#295a3a",
     },
+    "Aurora Frost": {
+        "bg": "#0f1a2a",
+        "fg": "#e4f1ff",
+        "alt": "#1b2c42",
+        "accent": "#6ad5ff",
+        "sel": "#2d4f73",
+    },
+    "Desert Mirage": {
+        "bg": "#2c1a0f",
+        "fg": "#f6ebde",
+        "alt": "#3f2616",
+        "accent": "#ffb45e",
+        "sel": "#7a4b23",
+    },
+    "Retro Neon": {
+        "bg": "#130f26",
+        "fg": "#f1f0ff",
+        "alt": "#231c3a",
+        "accent": "#ff5fd2",
+        "sel": "#503f7c",
+    },
+    "Woodland Campfire": {
+        "bg": "#1a1109",
+        "fg": "#f9efe2",
+        "alt": "#2c1d12",
+        "accent": "#ff7a3c",
+        "sel": "#5b3520",
+    },
 }
 
 
 def register(api):
-    api.log("Example plugin loaded. Example themes available from settings.")
+    api.log("Extended theme pack loaded. Extra themes available from settings.")
     for name, palette in THEMES.items():
         api.register_theme(name, palette)
 
@@ -43,7 +71,7 @@ def register(api):
         ignore_exts = set(str(ext).strip() for ext in context.get("ignore_exts", set()) if str(ext).strip())
         ignore_exts.update({".bak", ".tmp"})
         context["ignore_exts"] = ignore_exts
-        _api.log("Example plugin: added .bak and .tmp to ignored extensions for scans.")
+        _api.log("Extended theme pack: added .bak and .tmp to ignored extensions for scans.")
 
     def post_scan(items, context, _api):
         flagged = 0
@@ -51,10 +79,10 @@ def register(api):
             name_lower = getattr(item, "name", "").lower()
             if name_lower.endswith(".package") and "preview" in name_lower:
                 note = getattr(item, "notes", "")
-                item.notes = (note + "; Marked by example plugin").strip("; ")
+                item.notes = (note + "; Marked by extended theme pack").strip("; ")
                 flagged += 1
         if flagged:
-            _api.log(f"Example plugin: flagged {flagged} preview package(s) for review.")
+            _api.log(f"Extended theme pack: flagged {flagged} preview package(s) for review.")
 
     api.register_pre_scan_hook(pre_scan)
     api.register_post_scan_hook(post_scan)

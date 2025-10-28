@@ -111,15 +111,15 @@ The window lists every plugin in `user_plugins/`, highlights whether it is enabl
 
 The status bar confirms actions and the **Open Folder** button jumps straight to the plugin directory so you can make manual edits if required.
 
-### Included example plugin
+### Included extended theme plugin
 
-The repository ships with an enabled sample plugin in `user_plugins/example_theme_plugin`. It demonstrates how to:
+The repository ships with an enabled sample plugin in `user_plugins/extended_theme_pack`. It demonstrates how to:
 
-* Register a custom "Ocean Breeze" theme that appears in the settings overlay previews.
+* Register multiple custom themes ("Ocean Breeze", "Sunset Citrus", "Moonlit Lavender", "Verdant Grove", "Aurora Frost", "Desert Mirage", "Retro Neon", and "Woodland Campfire") that appear in the settings overlay previews.
 * Extend the scan by adding `.bak` and `.tmp` files to the ignored extension list.
 * Annotate `.package` files that contain "preview" in their filename so they are easy to review in the results grid.
 
-Launch the sorter normally (`python Sims4ModSorter.py`) and you will see log entries confirming that the example plugin loaded. You can disable or remove it later with `python plugin_manager.py disable example_theme_plugin` once you are ready to build your own plugins.
+Launch the sorter normally (`python Sims4ModSorter.py`) and you will see log entries confirming that the extended theme pack loaded. You can disable or remove it later with `python plugin_manager.py disable extended_theme_pack` once you are ready to build your own plugins.
 
 ### Dependency Tracker plugin
 
