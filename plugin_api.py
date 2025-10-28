@@ -360,7 +360,11 @@ class ScanMetrics:
                 data = json.loads(path.read_text(encoding="utf-8"))
             except Exception:
                 continue
-            session_id = int(data.get("session_id", 0))
+            raw_id = data.get("session_id", 0)
+            try:
+                session_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
             if session_id > self._session_counter:
                 self._session_counter = session_id
 
