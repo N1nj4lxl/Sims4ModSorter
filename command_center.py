@@ -46,15 +46,6 @@ def _mix_colors(foreground: str, background: str, ratio: float) -> str:
         value = int(round(left * (1.0 - ratio) + right * ratio))
         blend.append(max(0, min(255, value)))
     return f"#{blend[0]:02x}{blend[1]:02x}{blend[2]:02x}"
-
-
-def _scrim_color(bg_hex: str) -> str:
-    """Blend the background colour with black for an overlay scrim."""
-
-    darkened = _mix_colors("#000000", bg_hex, 0.55)
-    return darkened or "#000000"
-
-
 class CommandCenter:
     """Lightweight modal dashboard that aggregates launch shortcuts."""
 
@@ -144,7 +135,7 @@ class CommandCenter:
         palette = self._palette()
         overlay = tk.Frame(
             self.app,
-            bg=_scrim_color(palette.get("bg", _DEFAULT_PALETTE["bg"])),
+            bg="",
             highlightthickness=0,
             bd=0,
         )
@@ -683,7 +674,7 @@ class CommandCenter:
             background=[("active", hover_accent), ("pressed", hover_accent)],
         )
 
-        self.window.configure(bg=_scrim_color(bg))
+        self.window.configure(bg="")
         if self._shell is not None and self._shell.winfo_exists():
             try:
                 self._shell.configure(style="CommandCenter.OverlayShell.TFrame")
