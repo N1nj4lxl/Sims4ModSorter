@@ -471,6 +471,12 @@ class PluginManagerApp(tk.Tk):
             on_apply=self._apply_settings_overlay,
             on_cancel=self._cancel_settings_overlay,
         )
+        self.import_overlay = ImportOverlay(
+            self,
+            on_submit=self._complete_import_overlay,
+            on_cancel=self._cancel_import_overlay,
+        )
+        self._pending_import_path: Optional[Path] = None
         self.refresh()
         self.after(0, self._center_on_screen)
 
@@ -624,11 +630,15 @@ class PluginManagerApp(tk.Tk):
         self._handle_import(Path(path))
 
     def _handle_import(self, path: Path) -> None:
-        dialog = ImportDialog(self, default_name=path.stem)
-        self.wait_window(dialog)
-        if not dialog.result:
+        self._pending_import_path = path
+        self.import_overlay.present(default_name=path.stem)
+
+    def _complete_import_overlay(self, payload: tuple[str, str, str, bool, bool]) -> None:
+        path = self._pending_import_path
+        self._pending_import_path = None
+        if not path:
             return
-        name, entry, callable_name, disable, overwrite = dialog.result
+        name, entry, callable_name, disable, overwrite = payload
         try:
             entry_obj = self.library.import_from_source(
                 path,
@@ -643,6 +653,11 @@ class PluginManagerApp(tk.Tk):
             return
         self.refresh()
         self.status_var.set(f"Imported {entry_obj.name}")
+
+    def _cancel_import_overlay(self) -> None:
+        if self._pending_import_path is not None:
+            self.status_var.set("Import cancelled")
+        self._pending_import_path = None
 
     def on_toggle(self, enabled: bool) -> None:
         identifier = self._selected_folder()
@@ -794,58 +809,6 @@ class PluginManagerApp(tk.Tk):
             self.btn_copy_error.state(["disabled"])
         self.btn_diagnose.state(["!disabled"])
 
-
-class ImportDialog(tk.Toplevel):
-    def __init__(self, parent: PluginManagerApp, default_name: str) -> None:
-        super().__init__(parent)
-        self.title("Import Plugin")
-        self.configure(bg="#1f1f24")
-        self.resizable(False, False)
-        self.transient(parent)
-        self.grab_set()
-        self.result: Optional[tuple[str, str, str, bool, bool]] = None
-
-        ttk.Frame(self, padding=16).pack(fill="both", expand=True)
-        container = self.children[list(self.children.keys())[0]]
-
-        ttk.Label(container, text="Plugin name:").grid(row=0, column=0, sticky="w")
-        self.name_var = tk.StringVar(value=default_name)
-        ttk.Entry(container, textvariable=self.name_var).grid(row=0, column=1, sticky="ew", padx=(8, 0))
-
-        ttk.Label(container, text="Entry file (optional):").grid(row=1, column=0, sticky="w", pady=(10, 0))
-        self.entry_var = tk.StringVar()
-        ttk.Entry(container, textvariable=self.entry_var).grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(10, 0))
-
-        ttk.Label(container, text="Callable (default register):").grid(row=2, column=0, sticky="w", pady=(10, 0))
-        self.callable_var = tk.StringVar(value="register")
-        ttk.Entry(container, textvariable=self.callable_var).grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(10, 0))
-
-        self.disable_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(container, text="Import disabled", variable=self.disable_var).grid(row=3, column=1, sticky="w", pady=(12, 0))
-
-        self.overwrite_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(container, text="Overwrite if exists", variable=self.overwrite_var).grid(row=4, column=1, sticky="w", pady=(6, 0))
-
-        buttons = ttk.Frame(container)
-        buttons.grid(row=5, column=0, columnspan=2, sticky="e", pady=(18, 0))
-        ttk.Button(buttons, text="Cancel", command=self.destroy).pack(side="right")
-        ttk.Button(buttons, text="Import", command=self._on_accept).pack(side="right", padx=(0, 8))
-
-        container.columnconfigure(1, weight=1)
-        self.bind("<Return>", lambda _e: self._on_accept())
-        self.bind("<Escape>", lambda _e: self.destroy())
-
-    def _on_accept(self) -> None:
-        self.result = (
-            self.name_var.get().strip(),
-            self.entry_var.get().strip(),
-            self.callable_var.get().strip(),
-            self.disable_var.get(),
-            self.overwrite_var.get(),
-        )
-        self.destroy()
-
-
 class PluginSettingsOverlay(tk.Frame):
     def __init__(
         self,
@@ -863,11 +826,25 @@ class PluginSettingsOverlay(tk.Frame):
         self._feature_vars: Dict[str, tk.BooleanVar] = {}
 
         self.place_forget()
+        self.configure(takefocus=True)
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
-        self._card = ttk.Frame(self, padding=24, style="Overlay.TFrame")
-        self._card.place(relx=0.5, rely=0.5, anchor="center")
+        self._sidebar_width = 380
+        self._sidebar = tk.Frame(
+            self,
+            bg="#2d2d34",
+            width=self._sidebar_width,
+            highlightthickness=0,
+            bd=0,
+        )
+        self._sidebar.place(relx=1.0, rely=0.0, anchor="ne", relheight=1.0)
+        self._sidebar.grid_propagate(False)
+        self._sidebar.columnconfigure(0, weight=1)
+        self._sidebar.rowconfigure(0, weight=1)
+
+        self._card = ttk.Frame(self._sidebar, padding=24, style="Overlay.TFrame")
+        self._card.grid(row=0, column=0, sticky="nsew")
 
         self._title_var = tk.StringVar(value="")
         header = ttk.Frame(self._card)
@@ -947,9 +924,16 @@ class PluginSettingsOverlay(tk.Frame):
         self._on_content_configure(None)
 
         self.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._sidebar.place_configure(
+            relx=1.0,
+            rely=0.0,
+            anchor="ne",
+            relheight=1.0,
+            width=self._sidebar_width,
+        )
         self.lift()
         self.visible = True
-        self.focus_set()
+        self._sidebar.focus_set()
         self.bind_all("<Escape>", self._handle_escape)
         self.parent._update_buttons()
 
@@ -994,6 +978,142 @@ class PluginSettingsOverlay(tk.Frame):
     def _on_backdrop_click(self, _event) -> None:
         self._handle_cancel()
 
+
+class ImportOverlay(tk.Frame):
+    def __init__(
+        self,
+        parent: PluginManagerApp,
+        *,
+        on_submit: Callable[[tuple[str, str, str, bool, bool]], None],
+        on_cancel: Callable[[], None],
+    ) -> None:
+        super().__init__(parent, bg="#000000", highlightthickness=0)
+        self.parent = parent
+        self._on_submit = on_submit
+        self._on_cancel = on_cancel
+        self.visible = False
+        self._sidebar_width = 380
+
+        self.place_forget()
+        self.configure(takefocus=True)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        self._sidebar = tk.Frame(
+            self,
+            bg="#2d2d34",
+            width=self._sidebar_width,
+            highlightthickness=0,
+            bd=0,
+        )
+        self._sidebar.place(relx=1.0, rely=0.0, anchor="ne", relheight=1.0)
+        self._sidebar.grid_propagate(False)
+        self._sidebar.columnconfigure(0, weight=1)
+        self._sidebar.rowconfigure(0, weight=1)
+
+        self._card = ttk.Frame(self._sidebar, padding=24, style="Overlay.TFrame")
+        self._card.grid(row=0, column=0, sticky="nsew")
+        self._card.columnconfigure(1, weight=1)
+
+        ttk.Label(self._card, text="Import Plugin", style="OverlayTitle.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w"
+        )
+
+        ttk.Label(self._card, text="Plugin name:").grid(row=1, column=0, sticky="w", pady=(16, 0))
+        self.name_var = tk.StringVar()
+        ttk.Entry(self._card, textvariable=self.name_var).grid(
+            row=1, column=1, sticky="ew", padx=(10, 0), pady=(16, 0)
+        )
+
+        ttk.Label(self._card, text="Entry file (optional):").grid(
+            row=2, column=0, sticky="w", pady=(12, 0)
+        )
+        self.entry_var = tk.StringVar()
+        ttk.Entry(self._card, textvariable=self.entry_var).grid(
+            row=2, column=1, sticky="ew", padx=(10, 0), pady=(12, 0)
+        )
+
+        ttk.Label(self._card, text="Callable name:").grid(row=3, column=0, sticky="w", pady=(12, 0))
+        self.callable_var = tk.StringVar(value="register")
+        ttk.Entry(self._card, textvariable=self.callable_var).grid(
+            row=3, column=1, sticky="ew", padx=(10, 0), pady=(12, 0)
+        )
+
+        self.disable_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            self._card,
+            text="Import disabled",
+            variable=self.disable_var,
+        ).grid(row=4, column=1, sticky="w", pady=(14, 0))
+
+        self.overwrite_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            self._card,
+            text="Overwrite if plugin exists",
+            variable=self.overwrite_var,
+        ).grid(row=5, column=1, sticky="w", pady=(6, 0))
+
+        buttons = ttk.Frame(self._card)
+        buttons.grid(row=6, column=0, columnspan=2, sticky="e", pady=(24, 0))
+        ttk.Button(buttons, text="Cancel", command=self._handle_cancel).pack(side="right")
+        ttk.Button(buttons, text="Import", command=self._handle_submit).pack(
+            side="right", padx=(0, 8)
+        )
+
+        for index in range(7):
+            self._card.grid_rowconfigure(index, weight=0)
+        self._card.grid_rowconfigure(7, weight=1)
+
+        self.bind("<Button-1>", self._on_backdrop_click)
+        self._sidebar.bind("<Button-1>", lambda _e: "break")
+
+    def present(self, *, default_name: str) -> None:
+        self.name_var.set(default_name)
+        self.entry_var.set("")
+        self.callable_var.set("register")
+        self.disable_var.set(False)
+        self.overwrite_var.set(False)
+        self.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._sidebar.place_configure(
+            relx=1.0,
+            rely=0.0,
+            anchor="ne",
+            relheight=1.0,
+            width=self._sidebar_width,
+        )
+        self.visible = True
+        self._card.focus_set()
+        self.bind_all("<Escape>", self._handle_escape)
+
+    def hide(self) -> None:
+        if not self.visible:
+            return
+        self.visible = False
+        self.place_forget()
+        self.unbind_all("<Escape>")
+
+    def _handle_submit(self) -> None:
+        payload = (
+            self.name_var.get().strip(),
+            self.entry_var.get().strip(),
+            self.callable_var.get().strip(),
+            self.disable_var.get(),
+            self.overwrite_var.get(),
+        )
+        self.hide()
+        self._on_submit(payload)
+
+    def _handle_cancel(self) -> None:
+        self.hide()
+        self._on_cancel()
+
+    def _handle_escape(self, _event=None) -> str:
+        self._handle_cancel()
+        return "break"
+
+    def _on_backdrop_click(self, event) -> None:
+        if event.widget is self:
+            self._handle_cancel()
 
 def main() -> None:
     app = PluginManagerApp()

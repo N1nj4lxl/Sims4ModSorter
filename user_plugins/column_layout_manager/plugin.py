@@ -58,10 +58,10 @@ class ColumnLayoutManagerPlugin:
         self._default_order: List[str] = []
         self._default_display: List[str] = []
         self._initialised = False
+        self._dialog_editor: Optional[_ColumnLayoutEditor] = None
         self._stop_event = threading.Event()
         self._watcher: Optional[threading.Thread] = None
         self._editors: List[_ColumnLayoutEditor] = []
-        self._dialog: Optional[tk.Toplevel] = None
 
     # ------------------------------------------------------------------
     # Plugin lifecycle
@@ -438,33 +438,40 @@ class ColumnLayoutManagerPlugin:
         editor.frame.pack(fill="both", expand=True)
 
     def _open_dialog(self, app) -> None:
-        if self._dialog is not None and self._dialog.winfo_exists():
-            self._dialog.deiconify()
-            self._dialog.lift()
-            return
-        window = tk.Toplevel(app)
-        window.title("Column Layout Manager")
-        window.geometry("540x420")
-        window.transient(app)
-        try:
-            window.grab_set()
-        except Exception:
-            pass
-        editor = _ColumnLayoutEditor(self, window, standalone=True)
-        self._register_editor(editor)
-        editor.frame.pack(fill="both", expand=True, padx=12, pady=12)
+        def builder(container: ttk.Frame, footer: ttk.Frame) -> None:
+            container.columnconfigure(0, weight=1)
+            container.rowconfigure(0, weight=1)
+            editor = _ColumnLayoutEditor(self, container, standalone=True)
+            self._register_editor(editor)
+            self._dialog_editor = editor
+            editor.frame.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
 
-        def _on_close() -> None:
-            self._unregister_editor(editor)
-            try:
-                window.grab_release()
-            except Exception:
-                pass
-            window.destroy()
-            self._dialog = None
+            ttk.Button(
+                footer,
+                text="Close",
+                command=lambda: self._close_overlay(app, "column_layout_manager"),
+            ).pack(side="right")
 
-        window.protocol("WM_DELETE_WINDOW", _on_close)
-        self._dialog = window
+        def on_hide() -> None:
+            if self._dialog_editor is not None:
+                self._unregister_editor(self._dialog_editor)
+                self._dialog_editor = None
+
+        app._show_overlay_panel(
+            "column_layout_manager",
+            "Column Layout Manager",
+            builder,
+            width=720,
+            on_hide=on_hide,
+        )
+
+    def _close_overlay(self, app, key: str) -> None:
+        if self._dialog_editor is not None:
+            self._unregister_editor(self._dialog_editor)
+            self._dialog_editor = None
+        hide = getattr(app, "_hide_overlay_panel", None)
+        if callable(hide):
+            hide(key)
 
     def _register_editor(self, editor: "_ColumnLayoutEditor") -> None:
         if editor not in self._editors:
