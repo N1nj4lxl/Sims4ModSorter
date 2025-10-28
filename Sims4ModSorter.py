@@ -3489,6 +3489,12 @@ class Sims4ModSorterApp(tk.Tk):
             command=self.show_plugin_marketplace,
             style="Sidebar.TButton",
         ).pack(fill="x", pady=(6, 0))
+        ttk.Button(
+            plugin_gallery_section,
+            text="Plugin Manager…",
+            command=self.open_plugin_manager_ui,
+            style="Sidebar.TButton",
+        ).pack(fill="x", pady=(6, 0))
 
         if sidebar_buttons:
             plugin_section = ttk.LabelFrame(
@@ -3966,7 +3972,7 @@ class Sims4ModSorterApp(tk.Tk):
         palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
         scrim = tk.Frame(
             self,
-            bg=_scrim_color(palette.get("bg", "#111316")),
+            bg="",
             highlightthickness=0,
             bd=0,
         )
@@ -4213,7 +4219,7 @@ class Sims4ModSorterApp(tk.Tk):
         overlay = getattr(self, "_update_overlay", None)
         if overlay and overlay.winfo_exists():
             palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
-            overlay.configure(bg=_scrim_color(palette.get("bg", "#111316")))
+            overlay.configure(bg="")
             style = ttk.Style()
             style.configure("UpdateOverlay.TFrame", background=palette["alt"])
             style.configure("UpdateOverlayHero.TFrame", background=palette["alt"])
@@ -4787,9 +4793,8 @@ class Sims4ModSorterApp(tk.Tk):
         if not overlay or not overlay.winfo_exists():
             return
         palette = self._theme_cache
-        scrim_color = _scrim_color(palette.get("bg", "#111316"))
         try:
-            overlay.configure(bg=scrim_color)
+            overlay.configure(bg="")
         except tk.TclError:
             return
         shell = getattr(self, "_dialog_overlay_shell", None)
@@ -5173,7 +5178,7 @@ class Sims4ModSorterApp(tk.Tk):
         if not scrim or not scrim.winfo_exists():
             return
         palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
-        scrim.configure(bg=_scrim_color(palette.get("bg", "#111316")))
+        scrim.configure(bg="")
         self._refresh_overlay_styles()
 
     def _refresh_overlay_styles(self) -> None:
@@ -6395,7 +6400,7 @@ for _ in range(10):
         if not overlay or not overlay.winfo_exists():
             return
         palette = self._theme_cache or THEMES.get(self.theme_name.get(), THEMES["Dark Mode"])
-        overlay.configure(bg=_scrim_color(palette.get("bg", "#111316")))
+        overlay.configure(bg="")
         shell = getattr(self, "_mod_status_shell", None)
         if shell and shell.winfo_exists():
             try:
