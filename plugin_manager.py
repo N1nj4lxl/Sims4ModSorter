@@ -590,17 +590,33 @@ class PluginLibrary:
 # ---------------------------------------------------------------------------
 
 
-class PluginManagerApp(tk.Tk):
-    def __init__(self) -> None:
-        super().__init__()
+class PluginManagerWindow(tk.Toplevel):
+    def __init__(
+        self,
+        parent: tk.Misc | None = None,
+        *,
+        on_state_change: Optional[Callable[[PluginEntry, bool], None]] = None,
+        on_close: Optional[Callable[[], None]] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._parent = parent
+        self._on_state_change = on_state_change
+        self._on_close = on_close
+        self._closed = False
+
         self.title("Plugin Manager")
         self.geometry("760x520")
         self.minsize(680, 440)
         self.configure(bg="#1f1f24")
+        if parent is not None:
+            try:
+                self.transient(parent)
+            except Exception:
+                pass
 
         self.library = PluginLibrary(USER_PLUGINS_DIR)
         self.entries: List[PluginEntry] = []
-        self.status_var = tk.StringVar(value="Ready")
+        self.status_var = tk.StringVar(master=self, value="Ready")
 
         self._build_style()
         self._build_ui()
@@ -617,6 +633,20 @@ class PluginManagerApp(tk.Tk):
         self._pending_import_path: Optional[Path] = None
         self.refresh()
         self.after(0, self._center_on_screen)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+    def destroy(self) -> None:  # type: ignore[override]
+        if not self._closed:
+            self._closed = True
+            if self._on_close:
+                try:
+                    self._on_close()
+                except Exception:
+                    pass
+        try:
+            super().destroy()
+        except Exception:
+            pass
 
     # UI construction ---------------------------------------------------
     def _build_style(self) -> None:
@@ -723,6 +753,25 @@ class PluginManagerApp(tk.Tk):
             height = self.winfo_height()
             if width <= 1 or height <= 1:
                 width, height = 760, 520
+            parent = getattr(self, "_parent", None)
+            if parent is not None:
+                try:
+                    parent.update_idletasks()
+                except Exception:
+                    pass
+                try:
+                    if parent.winfo_viewable():
+                        parent_w = parent.winfo_width()
+                        parent_h = parent.winfo_height()
+                        if parent_w > 1 and parent_h > 1:
+                            parent_x = parent.winfo_rootx()
+                            parent_y = parent.winfo_rooty()
+                            x = parent_x + max(int((parent_w - width) / 2), 0)
+                            y = parent_y + max(int((parent_h - height) / 2), 0)
+                            self.geometry(f"{width}x{height}+{x}+{y}")
+                            return
+                except Exception:
+                    pass
             screen_w = self.winfo_screenwidth()
             screen_h = self.winfo_screenheight()
             x = max(int((screen_w - width) / 2), 0)
@@ -809,6 +858,11 @@ class PluginManagerApp(tk.Tk):
         self.refresh()
         state = "enabled" if enabled else "disabled"
         self.status_var.set(f"Plugin {entry.name} {state}")
+        if self._on_state_change:
+            try:
+                self._on_state_change(entry, enabled)
+            except Exception:
+                pass
 
     def on_settings(self) -> None:
         identifier = self._selected_folder()
@@ -950,7 +1004,7 @@ class PluginManagerApp(tk.Tk):
 class PluginSettingsOverlay(tk.Frame):
     def __init__(
         self,
-        parent: PluginManagerApp,
+        parent: PluginManagerWindow,
         *,
         on_apply: Callable[[PluginEntry, Dict[str, bool]], bool],
         on_cancel: Callable[[Optional[PluginEntry]], None],
@@ -1120,7 +1174,7 @@ class PluginSettingsOverlay(tk.Frame):
 class ImportOverlay(tk.Frame):
     def __init__(
         self,
-        parent: PluginManagerApp,
+        parent: PluginManagerWindow,
         *,
         on_submit: Callable[[tuple[str, str, str, bool, bool]], None],
         on_cancel: Callable[[], None],
@@ -1158,7 +1212,7 @@ class ImportOverlay(tk.Frame):
         )
 
         ttk.Label(self._card, text="Plugin name:").grid(row=1, column=0, sticky="w", pady=(16, 0))
-        self.name_var = tk.StringVar()
+        self.name_var = tk.StringVar(master=self)
         ttk.Entry(self._card, textvariable=self.name_var).grid(
             row=1, column=1, sticky="ew", padx=(10, 0), pady=(16, 0)
         )
@@ -1166,25 +1220,25 @@ class ImportOverlay(tk.Frame):
         ttk.Label(self._card, text="Entry file (optional):").grid(
             row=2, column=0, sticky="w", pady=(12, 0)
         )
-        self.entry_var = tk.StringVar()
+        self.entry_var = tk.StringVar(master=self)
         ttk.Entry(self._card, textvariable=self.entry_var).grid(
             row=2, column=1, sticky="ew", padx=(10, 0), pady=(12, 0)
         )
 
         ttk.Label(self._card, text="Callable name:").grid(row=3, column=0, sticky="w", pady=(12, 0))
-        self.callable_var = tk.StringVar(value="register")
+        self.callable_var = tk.StringVar(master=self, value="register")
         ttk.Entry(self._card, textvariable=self.callable_var).grid(
             row=3, column=1, sticky="ew", padx=(10, 0), pady=(12, 0)
         )
 
-        self.disable_var = tk.BooleanVar(value=False)
+        self.disable_var = tk.BooleanVar(master=self, value=False)
         ttk.Checkbutton(
             self._card,
             text="Import disabled",
             variable=self.disable_var,
         ).grid(row=4, column=1, sticky="w", pady=(14, 0))
 
-        self.overwrite_var = tk.BooleanVar(value=False)
+        self.overwrite_var = tk.BooleanVar(master=self, value=False)
         ttk.Checkbutton(
             self._card,
             text="Overwrite if plugin exists",
@@ -1252,6 +1306,19 @@ class ImportOverlay(tk.Frame):
     def _on_backdrop_click(self, event) -> None:
         if event.widget is self:
             self._handle_cancel()
+
+
+class PluginManagerApp(tk.Tk):
+    """Standalone launcher for :class:`PluginManagerWindow`."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.withdraw()
+        self._window = PluginManagerWindow(self, on_close=self.destroy)
+        try:
+            self._window.focus_set()
+        except Exception:
+            pass
 
 def main(argv: List[str] | None = None) -> int:
     parser = _build_parser()

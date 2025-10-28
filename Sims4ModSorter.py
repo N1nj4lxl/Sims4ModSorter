@@ -28,7 +28,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from types import MethodType
-from typing import Callable, Dict, Iterable, Iterator, List, Literal, Optional, Sequence, Set, Tuple, Union
+from typing import TYPE_CHECKING, Callable, Dict, Iterable, Iterator, List, Literal, Optional, Sequence, Set, Tuple, Union
 
 import tkinter as tk
 import tkinter.font as tkfont
@@ -37,6 +37,10 @@ from tkinter import filedialog, scrolledtext, simpledialog, ttk
 from launch_utils import UpdateResult, check_for_update
 from command_center import CommandCenter
 from plugin_api import scan_metrics
+from plugin_manager import PluginManagerWindow
+
+if TYPE_CHECKING:
+    from plugin_manager import PluginEntry
 from scanner import (
     ARCHIVE_EXTS,
     CATEGORY_INDEX,
@@ -953,6 +957,8 @@ class Sims4ModSorterApp(tk.Tk):
         self._settings_path: Path = _default_settings_path()
         self._settings_version: int = SETTINGS_VERSION
         self._desired_plugin_states: Dict[str, bool] = {}
+        self._plugin_manager_window: Optional[PluginManagerWindow] = None
+        self._plugin_reload_pending = False
         self._load_app_settings()
         self.plugin_manager = load_user_plugins()
         if self.plugin_manager:
@@ -2668,6 +2674,7 @@ class Sims4ModSorterApp(tk.Tk):
         else:
             self._plugin_columns = []
             self._plugin_toolbar_buttons = []
+        self._plugin_reload_pending = False
         overlay = getattr(self, "_mod_status_overlay", None)
         if overlay and overlay.winfo_exists():
             self._populate_mod_status_popup()
@@ -6293,7 +6300,10 @@ for _ in range(10):
                         status.message,
                     ),
                 )
-        self._status_summary_var.set(f"Loaded: {len(loaded)} | Blocked: {len(blocked)}")
+        summary = f"Loaded: {len(loaded)} | Blocked: {len(blocked)}"
+        if getattr(self, "_plugin_reload_pending", False):
+            summary = f"{summary} | Restart required"
+        self._status_summary_var.set(summary)
 
     def _ensure_mod_status_overlay(self) -> tk.Frame | None:
         overlay = getattr(self, "_mod_status_overlay", None)
@@ -6528,8 +6538,52 @@ for _ in range(10):
                 subprocess.Popen(["xdg-open", str(target)])
         except Exception as exc:
             self._show_error_overlay("Plugin Folder", f"Unable to open plugin directory: {exc}")
+
     def open_plugin_manager_ui(self) -> None:
-        self.show_plugin_marketplace()
+        existing = self._plugin_manager_window
+        if existing and existing.winfo_exists():
+            try:
+                existing.deiconify()
+                existing.lift()
+                existing.focus_set()
+            except Exception:
+                pass
+            return
+
+        def _handle_close() -> None:
+            self._plugin_manager_window = None
+
+        def _handle_state_change(entry: "PluginEntry", enabled: bool) -> None:
+            self._handle_plugin_state_change(entry, enabled)
+
+        window = PluginManagerWindow(
+            self,
+            on_state_change=_handle_state_change,
+            on_close=_handle_close,
+        )
+        self._plugin_manager_window = window
+        try:
+            window.focus_set()
+        except Exception:
+            pass
+
+    def _handle_plugin_state_change(self, entry: "PluginEntry", enabled: bool) -> None:
+        plugin_name = getattr(entry, "name", "plugin")
+        state_text = "enabled" if enabled else "disabled"
+        message = (
+            f"Restart Sims4 Mod Sorter to finish {state_text} '{plugin_name}'. "
+            "Changes will take effect after restart."
+        )
+        self._plugin_reload_pending = True
+
+        def _prompt() -> None:
+            self._show_info_overlay("Restart Required", message)
+
+        self.log(
+            f"Plugin '{plugin_name}' marked for {state_text}; restart required to apply changes.",
+            level="plugin_warning",
+        )
+        self.after(0, _prompt)
 
     def on_scan(self) -> None:
         mods_path = Path(self.mods_root.get())
