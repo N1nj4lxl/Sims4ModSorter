@@ -590,7 +590,7 @@ class PluginLibrary:
 # ---------------------------------------------------------------------------
 
 
-class PluginManagerWindow(tk.Toplevel):
+class PluginManagerWindow(tk.Frame):
     def __init__(
         self,
         parent: tk.Misc | None = None,
@@ -598,21 +598,11 @@ class PluginManagerWindow(tk.Toplevel):
         on_state_change: Optional[Callable[[PluginEntry, bool], None]] = None,
         on_close: Optional[Callable[[], None]] = None,
     ) -> None:
-        super().__init__(parent)
+        super().__init__(parent, bg="#1f1f24", highlightthickness=0)
         self._parent = parent
         self._on_state_change = on_state_change
         self._on_close = on_close
         self._closed = False
-
-        self.title("Plugin Manager")
-        self.geometry("760x520")
-        self.minsize(680, 440)
-        self.configure(bg="#1f1f24")
-        if parent is not None:
-            try:
-                self.transient(parent)
-            except Exception:
-                pass
 
         self.library = PluginLibrary(USER_PLUGINS_DIR)
         self.entries: List[PluginEntry] = []
@@ -632,21 +622,27 @@ class PluginManagerWindow(tk.Toplevel):
         )
         self._pending_import_path: Optional[Path] = None
         self.refresh()
-        self.after(0, self._center_on_screen)
-        self.protocol("WM_DELETE_WINDOW", self.destroy)
 
-    def destroy(self) -> None:  # type: ignore[override]
-        if not self._closed:
-            self._closed = True
-            if self._on_close:
-                try:
-                    self._on_close()
-                except Exception:
-                    pass
+    # ------------------------------------------------------------------
+    # Public helpers
+    # ------------------------------------------------------------------
+    def focus_initial(self) -> None:
         try:
-            super().destroy()
+            self.tree.focus_set()
         except Exception:
             pass
+
+    def _dialog_parent(self) -> tk.Misc:
+        try:
+            parent = self.winfo_toplevel()
+            if parent is not None:
+                return parent
+        except Exception:
+            pass
+        return self
+
+    def destroy(self) -> None:  # type: ignore[override]
+        super().destroy()
 
     # UI construction ---------------------------------------------------
     def _build_style(self) -> None:
@@ -702,13 +698,19 @@ class PluginManagerWindow(tk.Toplevel):
         )
 
     def _build_ui(self) -> None:
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
         self.body = ttk.Frame(self, padding=16)
-        self.body.pack(fill="both", expand=True)
+        self.body.grid(row=0, column=0, sticky="nsew")
 
         header = ttk.Frame(self.body)
         header.pack(fill="x")
         ttk.Label(header, text="Installed Plugins", font=("Segoe UI", 14, "bold")).pack(side="left")
-        ttk.Button(header, text="Open Folder", command=self.on_open_folder).pack(side="right")
+        actions = ttk.Frame(header)
+        actions.pack(side="right")
+        ttk.Button(actions, text="Close", command=self.request_close).pack(side="right")
+        ttk.Button(actions, text="Open Folder", command=self.on_open_folder).pack(side="right", padx=(0, 8))
 
         toolbar = ttk.Frame(self.body)
         toolbar.pack(fill="x", pady=(12, 8))
@@ -746,39 +748,18 @@ class PluginManagerWindow(tk.Toplevel):
         status_bar.pack(fill="x")
         ttk.Label(status_bar, textvariable=self.status_var, style="Status.TLabel").pack(side="left")
 
-    def _center_on_screen(self) -> None:
-        try:
-            self.update_idletasks()
-            width = self.winfo_width()
-            height = self.winfo_height()
-            if width <= 1 or height <= 1:
-                width, height = 760, 520
-            parent = getattr(self, "_parent", None)
-            if parent is not None:
-                try:
-                    parent.update_idletasks()
-                except Exception:
-                    pass
-                try:
-                    if parent.winfo_viewable():
-                        parent_w = parent.winfo_width()
-                        parent_h = parent.winfo_height()
-                        if parent_w > 1 and parent_h > 1:
-                            parent_x = parent.winfo_rootx()
-                            parent_y = parent.winfo_rooty()
-                            x = parent_x + max(int((parent_w - width) / 2), 0)
-                            y = parent_y + max(int((parent_h - height) / 2), 0)
-                            self.geometry(f"{width}x{height}+{x}+{y}")
-                            return
-                except Exception:
-                    pass
-            screen_w = self.winfo_screenwidth()
-            screen_h = self.winfo_screenheight()
-            x = max(int((screen_w - width) / 2), 0)
-            y = max(int((screen_h - height) / 2), 0)
-            self.geometry(f"{width}x{height}+{x}+{y}")
-        except Exception:
-            pass
+    def request_close(self) -> None:
+        if self._closed:
+            return
+        if self._on_close:
+            self._closed = True
+            try:
+                self._on_close()
+            finally:
+                self._closed = True
+        else:
+            self._closed = True
+            self.destroy()
 
     # Actions ------------------------------------------------------------
     def refresh(self) -> None:
@@ -787,7 +768,7 @@ class PluginManagerWindow(tk.Toplevel):
             self._reload_tree()
             self.status_var.set(f"Loaded {len(self.entries)} plugin(s)")
         except Exception as exc:
-            messagebox.showerror("Refresh failed", str(exc), parent=self)
+            messagebox.showerror("Refresh failed", str(exc), parent=self._dialog_parent())
             self.status_var.set("Refresh failed")
         self._update_buttons()
 
@@ -795,7 +776,7 @@ class PluginManagerWindow(tk.Toplevel):
         try:
             self.library.open_folder()
         except Exception as exc:
-            messagebox.showerror("Unable to open", str(exc), parent=self)
+            messagebox.showerror("Unable to open", str(exc), parent=self._dialog_parent())
 
     def on_import_file(self) -> None:
         path = filedialog.askopenfilename(
@@ -836,7 +817,7 @@ class PluginManagerWindow(tk.Toplevel):
                 overwrite=overwrite,
             )
         except Exception as exc:
-            messagebox.showerror("Import failed", str(exc), parent=self)
+            messagebox.showerror("Import failed", str(exc), parent=self._dialog_parent())
             return
         self.refresh()
         self.status_var.set(f"Imported {entry_obj.name}")
@@ -853,7 +834,7 @@ class PluginManagerWindow(tk.Toplevel):
         try:
             entry = self.library.set_enabled(identifier, enabled)
         except Exception as exc:
-            messagebox.showerror("Update failed", str(exc), parent=self)
+            messagebox.showerror("Update failed", str(exc), parent=self._dialog_parent())
             return
         self.refresh()
         state = "enabled" if enabled else "disabled"
@@ -873,7 +854,7 @@ class PluginManagerWindow(tk.Toplevel):
             messagebox.showinfo(
                 "Plugin Settings",
                 "Selected plugin does not expose configurable features.",
-                parent=self,
+                parent=self._dialog_parent(),
             )
             return
         self.settings_overlay.present(entry)
@@ -884,11 +865,11 @@ class PluginManagerWindow(tk.Toplevel):
             return
         entry = next((e for e in self.entries if e.folder == identifier), None)
         name = entry.name if entry else identifier
-        if messagebox.askyesno("Remove Plugin", f"Remove '{name}'?", parent=self):
+        if messagebox.askyesno("Remove Plugin", f"Remove '{name}'?", parent=self._dialog_parent()):
             try:
                 self.library.remove(identifier)
             except Exception as exc:
-                messagebox.showerror("Remove failed", str(exc), parent=self)
+                messagebox.showerror("Remove failed", str(exc), parent=self._dialog_parent())
                 return
             self.refresh()
             self.status_var.set(f"Removed {name}")
@@ -897,7 +878,7 @@ class PluginManagerWindow(tk.Toplevel):
         try:
             updated = self.library.set_features(entry.folder, states)
         except Exception as exc:
-            messagebox.showerror("Update failed", str(exc), parent=self)
+            messagebox.showerror("Update failed", str(exc), parent=self._dialog_parent())
             return False
         self.refresh()
         self.status_var.set(f"Updated settings for {updated.name}")
@@ -915,14 +896,22 @@ class PluginManagerWindow(tk.Toplevel):
             return
         entry = next((e for e in self.entries if e.folder == identifier), None)
         if not entry or not entry.message:
-            messagebox.showinfo("Copy Error", "Selected plugin has no error details to copy.", parent=self)
+            messagebox.showinfo(
+                "Copy Error",
+                "Selected plugin has no error details to copy.",
+                parent=self._dialog_parent(),
+            )
             return
         payload = f"{entry.name} [{entry.status}] - {entry.message}".strip()
         try:
             self.clipboard_clear()
             self.clipboard_append(payload)
         except Exception as exc:
-            messagebox.showerror("Copy Error", f"Unable to copy details: {exc}", parent=self)
+            messagebox.showerror(
+                "Copy Error",
+                f"Unable to copy details: {exc}",
+                parent=self._dialog_parent(),
+            )
             return
         self.status_var.set(f"Copied error for {entry.name}")
 
@@ -933,7 +922,7 @@ class PluginManagerWindow(tk.Toplevel):
         try:
             report = self.library.diagnose(identifier)
         except Exception as exc:
-            messagebox.showerror("Diagnosis Failed", str(exc), parent=self)
+            messagebox.showerror("Diagnosis Failed", str(exc), parent=self._dialog_parent())
             return
         entry = next((e for e in self.entries if e.folder == identifier), None)
         title = entry.name if entry else identifier
@@ -950,9 +939,9 @@ class PluginManagerWindow(tk.Toplevel):
             lines.append("No blocking issues detected.")
         message = "\n".join(lines)
         if report.has_errors:
-            messagebox.showerror("Plugin Diagnosis", message, parent=self)
+            messagebox.showerror("Plugin Diagnosis", message, parent=self._dialog_parent())
         else:
-            messagebox.showinfo("Plugin Diagnosis", message, parent=self)
+            messagebox.showinfo("Plugin Diagnosis", message, parent=self._dialog_parent())
         self.status_var.set(f"Diagnosis completed for {title}")
 
     # Helpers ------------------------------------------------------------
@@ -1313,10 +1302,18 @@ class PluginManagerApp(tk.Tk):
 
     def __init__(self) -> None:
         super().__init__()
-        self.withdraw()
+        self.title("Plugin Manager")
+        self.geometry("760x520")
+        self.minsize(680, 440)
+        self.configure(bg="#1f1f24")
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
         self._window = PluginManagerWindow(self, on_close=self.destroy)
+        self._window.grid(row=0, column=0, sticky="nsew")
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
         try:
-            self._window.focus_set()
+            self._window.focus_initial()
         except Exception:
             pass
 

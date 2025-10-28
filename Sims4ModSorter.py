@@ -957,6 +957,8 @@ class Sims4ModSorterApp(tk.Tk):
         self._settings_path: Path = _default_settings_path()
         self._settings_version: int = SETTINGS_VERSION
         self._desired_plugin_states: Dict[str, bool] = {}
+        self._plugin_manager_overlay: Optional[tk.Frame] = None
+        self._plugin_manager_shell: Optional[ttk.Frame] = None
         self._plugin_manager_window: Optional[PluginManagerWindow] = None
         self._plugin_reload_pending = False
         self._load_app_settings()
@@ -6540,32 +6542,69 @@ for _ in range(10):
             self._show_error_overlay("Plugin Folder", f"Unable to open plugin directory: {exc}")
 
     def open_plugin_manager_ui(self) -> None:
-        existing = self._plugin_manager_window
-        if existing and existing.winfo_exists():
-            try:
-                existing.deiconify()
-                existing.lift()
-                existing.focus_set()
-            except Exception:
-                pass
+        overlay = self._plugin_manager_overlay
+        panel = self._plugin_manager_window
+        if overlay and overlay.winfo_exists():
+            overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+            overlay.tkraise()
+            if panel and panel.winfo_exists():
+                panel.focus_initial()
             return
 
         def _handle_close() -> None:
-            self._plugin_manager_window = None
+            self._close_plugin_manager_overlay()
 
         def _handle_state_change(entry: "PluginEntry", enabled: bool) -> None:
             self._handle_plugin_state_change(entry, enabled)
 
+        overlay, shell = self._create_sidebar_shell(
+            width=760,
+            close_callback=self._close_plugin_manager_overlay,
+            style="SidebarOverlay.Shell.TFrame",
+        )
+
         window = PluginManagerWindow(
-            self,
+            shell,
             on_state_change=_handle_state_change,
             on_close=_handle_close,
         )
+        window.grid(row=0, column=0, sticky="nsew")
+
+        self._plugin_manager_overlay = overlay
+        self._plugin_manager_shell = shell
         self._plugin_manager_window = window
-        try:
-            window.focus_set()
-        except Exception:
-            pass
+
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        overlay.tkraise()
+        window.focus_initial()
+
+    def _close_plugin_manager_overlay(self) -> None:
+        overlay = self._plugin_manager_overlay
+        shell = self._plugin_manager_shell
+        panel = self._plugin_manager_window
+        self._plugin_manager_overlay = None
+        self._plugin_manager_shell = None
+        self._plugin_manager_window = None
+        if panel and panel.winfo_exists():
+            try:
+                panel.grid_forget()
+                panel.destroy()
+            except Exception:
+                pass
+        if shell and shell.winfo_exists():
+            try:
+                shell.destroy()
+            except Exception:
+                pass
+        if overlay and overlay.winfo_exists():
+            try:
+                overlay.place_forget()
+            except Exception:
+                pass
+            try:
+                overlay.destroy()
+            except Exception:
+                pass
 
     def _handle_plugin_state_change(self, entry: "PluginEntry", enabled: bool) -> None:
         plugin_name = getattr(entry, "name", "plugin")
