@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from difflib import SequenceMatcher
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
@@ -715,6 +716,7 @@ def run_classification_pipeline(
     _apply_adult_gating(entries, set(soft_authors))
     header_budget = min(int(budgets.get(".package", 131072)), 131072)
     decisive_headers = _apply_fallback_peek(entries, header_budget)
+    _resolve_review_pool(entries, routing)
     items = [_finalize_entry(entry, routing) for entry in entries]
     elapsed_ms = (time.perf_counter() - start) * 1000.0
     metrics = _build_metrics(entries, elapsed_ms, decisive_headers)
@@ -922,6 +924,83 @@ def _apply_fallback_peek(entries: Sequence[PipelineEntry], budget: int) -> int:
         elif not types:
             entry.decision.reason = "header:fail"
     return decisive
+
+
+def _resolve_review_pool(entries: Sequence[PipelineEntry], routing: Dict[str, str]) -> None:
+    if not entries:
+        return
+
+    review_target = routing.get("Unknown", UNKNOWN_DEFAULT_FOLDER).rstrip("/").lower()
+
+    def _entry_target(entry: PipelineEntry) -> str:
+        category = entry.decision.category or "Unknown"
+        return route_category(category, routing).rstrip("/").lower()
+
+    def _needs_review(entry: PipelineEntry) -> bool:
+        return _entry_target(entry) == review_target
+
+    remaining = [entry for entry in entries if _needs_review(entry)]
+    if not remaining:
+        return
+
+    resolved = [
+        entry
+        for entry in entries
+        if not _needs_review(entry)
+        and entry.decision.category
+        and entry.decision.category != "Unknown"
+    ]
+
+    if not resolved:
+        return
+
+    def _score_match(lhs: str, rhs: str) -> float:
+        if not lhs or not rhs:
+            return 0.0
+        if lhs == rhs:
+            return 1.0
+        return SequenceMatcher(None, lhs, rhs).ratio()
+
+    while remaining:
+        progressed = False
+        for entry in list(remaining):
+            best_category = ""
+            best_score = 0.0
+
+            for candidate in resolved:
+                if candidate is entry:
+                    continue
+                target = _entry_target(candidate)
+                if target == review_target:
+                    continue
+                category = candidate.decision.category or "Unknown"
+                if not category or category == "Unknown":
+                    continue
+
+                score = max(
+                    _score_match(entry.normalized_key, candidate.normalized_key),
+                    _score_match(entry.collapsed_key, candidate.collapsed_key),
+                    _score_match(entry.base_name.lower(), candidate.base_name.lower()),
+                )
+
+                if score > best_score:
+                    best_score = score
+                    best_category = category
+
+            if best_score < 0.75 or not best_category:
+                continue
+
+            entry.decision = ClassificationDecision(
+                best_category,
+                max(entry.decision.confidence, best_score),
+                f"link:review-match:{best_category}:{best_score:.2f}",
+            )
+            resolved.append(entry)
+            remaining.remove(entry)
+            progressed = True
+
+        if not progressed:
+            break
 
 
 def _finalize_entry(entry: PipelineEntry, routing: Dict[str, str]) -> FileItem:
