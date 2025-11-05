@@ -134,3 +134,26 @@ def test_scan_folder_metrics(tmp_path: Path) -> None:
     assert result.metrics is not None
     assert result.metrics.total_files == 1
     assert result.metrics.category_counts.get("CAS", 0) == 1
+
+
+def test_review_pool_rescues_unknowns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    primary = tmp_path / "Recognized.package"
+    secondary = tmp_path / "Recognized!!.package"
+    primary.write_bytes(b"\x00" * 4096)
+    secondary.write_bytes(b"\x00" * 4096)
+
+    def fake_manifest(path: Path, *_args, **_kwargs) -> Dict[int, int]:
+        if path.name == "Recognized.package":
+            return {0x034AEECB: 1}
+        return {}
+
+    monkeypatch.setattr(scanner, "read_package_manifest", fake_manifest)
+
+    result = scanner.scan_folder(tmp_path, recurse=False)
+    items = {item.name: item for item in result.items}
+
+    assert items["Recognized.package"].guess_type == "CAS"
+    rescued = items["Recognized!!.package"]
+    assert rescued.guess_type == "CAS"
+    reason = rescued.tooltips.get("reason", "")
+    assert reason.startswith("link:review-match:CAS")
